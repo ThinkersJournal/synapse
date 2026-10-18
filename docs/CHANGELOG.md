@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.106): dependency bumps (dependabot #205-#210 in one PR)
+
+`async-imap` 0.11 to 0.12, `ed25519-dalek` 2.2 to 3.0, `aes-gcm` 0.10 to 0.11, `gloo-storage` 0.3 to 0.4 (and `gloo-utils` 0.2 to 0.3, which it requires), `actions-rs/toolchain` 1.0.6 to 1.0.7, plus a full `cargo update` (tokio 1.53.3, and the RustCrypto chain `ed25519-dalek` 3 pulls in). No source change was needed: `cargo check --workspace --all-targets --all-features` is clean. `ed25519-dalek` 3 is the only crate with call sites here (certificate, keystore, sender_auth, auth utils); the agent_certificates, sender_authentication, transport_repairs and transport_security_events suites and the lib tests pass unchanged. `aes-gcm` and `gloo-*` are declared but unused by any `.rs` file, so those bumps are manifest-only. Not verified: the `wasm` feature on wasm32 (`ring` build script fails there; the wasm path is already unmeasured).
+
 ### Changed (rc.105): T-0 runbook lists AgentLife's M8 sender roles
 
 `docs/PILOT_T0_RUNBOOK.md` section 3c: `agentlife-launcher` and `agentlife-cli` (senders only, both need `send`), the claim order (`pm` and the lane roles claim first, or send is 404 `unknown_recipient`), the qualified recipient form `pm@ciresnave` (a bare role is also 404, measured by agentlife against rc.101), and which of the ten pilot measures apply to them and how a loss to `pm` is decided without an adapter session. Roles and their traffic are as AgentLife's lane reported them; not rehearsed. Docs only; stacked on #203.
