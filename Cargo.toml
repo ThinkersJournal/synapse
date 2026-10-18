@@ -116,7 +116,7 @@ async-smtp = { version = "0.10", optional = true }
 # exception requiring a non-default build flag to exist at all (task-3-brief.md, plan decision).
 # `default-features = false` + `runtime-tokio`: this crate is built on tokio throughout, never
 # async-std (async-imap's own default runtime).
-async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 # `tokio1` with lettre's default `native-tls` is a compile_error unless `tokio1-native-tls` is on too.
 lettre = { version = "0.11", features = ["tokio1-native-tls"] }
 mail-parser = { version = "0.11", optional = true }
