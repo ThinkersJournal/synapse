@@ -702,7 +702,10 @@ impl From<MailError> for ApiError {
             MailError::NotFound => ApiError::new(StatusCode::NOT_FOUND, "not_found", e),
             MailError::NotYourLease => ApiError::new(StatusCode::FORBIDDEN, "not_your_lease", e),
             MailError::Claim(c) => ApiError::new(StatusCode::FORBIDDEN, "claim_refused", c),
-            MailError::InvalidState(_) | MailError::Store(_) | MailError::Poisoned => {
+            MailError::InvalidState(_)
+            | MailError::Store(_)
+            | MailError::Poisoned
+            | MailError::DurabilityTooWeak { .. } => {
                 ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "store_unavailable", e)
             }
         }

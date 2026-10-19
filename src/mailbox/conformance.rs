@@ -17,7 +17,10 @@
 //! synapse::mailbox::conformance::run_all(|| synapse::mailbox::MemoryStore::new());
 //! ```
 
-use super::{Acked, Depth, Enqueued, Envelope, MailConfig, MailError, MailStore, Mailbox, Stored};
+use super::{
+    Acked, Depth, DurabilityClass, Enqueued, Envelope, MailConfig, MailError, MailStore, Mailbox,
+    REQUIRED_DURABILITY, Stored,
+};
 use crate::certificate::RevocationLookup;
 use crate::keystore::Keystore;
 use crate::roles::{ClaimRequest, Superseded, sign_claim};
@@ -125,7 +128,7 @@ impl Ids {
 }
 
 pub fn open<S: MailStore>(store: S) -> Mailbox<S> {
-    Mailbox::open(store, MailConfig::default(), t0() - Duration::seconds(1)).expect("open")
+    Mailbox::open_volatile(store, MailConfig::default(), t0() - Duration::seconds(1)).expect("open")
 }
 
 pub fn env(id: &str, to: &str, body: &[u8]) -> Envelope {
@@ -320,7 +323,7 @@ pub fn the_bound_refuses_by_count_and_by_bytes_and_keeps_the_queue<S: MailStore>
         max_bytes: 10,
         ..MailConfig::default()
     };
-    let mut mb = Mailbox::open(make(), config, t0() - Duration::seconds(1)).expect("open");
+    let mut mb = Mailbox::open_volatile(make(), config, t0() - Duration::seconds(1)).expect("open");
     let epoch = ids.claim(&mut mb, "lane", t0());
     mb.enqueue(env("m1", LANE, b"abcd"), t0()).unwrap();
     assert_eq!(
@@ -598,7 +601,7 @@ pub fn a_message_leased_max_deliveries_times_goes_dead_and_is_kept<S: MailStore>
         max_deliveries: 3,
         ..MailConfig::default()
     };
-    let mut mb = Mailbox::open(make(), config, t0() - Duration::seconds(1)).expect("open");
+    let mut mb = Mailbox::open_volatile(make(), config, t0() - Duration::seconds(1)).expect("open");
     let epoch = ids.claim(&mut mb, "lane", t0());
     mb.enqueue(env("poison", LANE, b"payload"), t0()).unwrap();
     for round in 0..3 {
@@ -637,7 +640,7 @@ pub fn a_full_dead_set_keeps_the_message_queued<S: MailStore>(make: impl Fn() ->
         max_messages: 1,
         ..MailConfig::default()
     };
-    let mut mb = Mailbox::open(make(), config, t0() - Duration::seconds(1)).expect("open");
+    let mut mb = Mailbox::open_volatile(make(), config, t0() - Duration::seconds(1)).expect("open");
     let epoch = ids.claim(&mut mb, "lane", t0());
     mb.enqueue(env("first", LANE, b"a"), t0()).unwrap();
     mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
@@ -668,7 +671,7 @@ pub fn a_dead_message_can_be_requeued<S: MailStore>(make: impl Fn() -> S) {
         max_deliveries: 1,
         ..MailConfig::default()
     };
-    let mut mb = Mailbox::open(make(), config, t0() - Duration::seconds(1)).expect("open");
+    let mut mb = Mailbox::open_volatile(make(), config, t0() - Duration::seconds(1)).expect("open");
     let epoch = ids.claim(&mut mb, "lane", t0());
     mb.enqueue(env("m", LANE, b"x"), t0()).unwrap();
     mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
@@ -687,6 +690,48 @@ pub fn a_dead_message_can_be_requeued<S: MailStore>(make: impl Fn() -> S) {
 
 /// Run every case against stores from `make`, naming the case that failed.
 ///
+/// The need the semantic cases cannot check: the store declares at least [`REQUIRED_DURABILITY`]
+/// and [`Mailbox::open`] accepts it. A store that will hold real mail must pass this beside
+/// [`run_all`] (which runs over [`Mailbox::open_volatile`], so a `Process` store can still be
+/// held to the semantics).
+///
+/// # Panics
+/// When the store declares less, or `Mailbox::open` refuses it.
+pub fn declares_the_needed_durability<S: MailStore>(make: impl Fn() -> S) {
+    let store = make();
+    let declared = store.durability();
+    assert!(
+        declared >= REQUIRED_DURABILITY,
+        "store declares {declared}, the mailbox requires {REQUIRED_DURABILITY}"
+    );
+    Mailbox::open(store, MailConfig::default(), t0() - Duration::seconds(1))
+        .expect("Mailbox::open accepts a store declaring the required class");
+}
+
+/// The refusal side: a store declaring below the requirement is refused with the declared and
+/// required classes named, and nothing is read from it.
+///
+/// # Panics
+/// When `Mailbox::open` accepts the store.
+pub fn a_store_declaring_less_is_refused<S: MailStore>(make: impl Fn() -> S) {
+    let store = make();
+    if store.durability() >= REQUIRED_DURABILITY {
+        return;
+    }
+    let declared = store.durability();
+    let err = Mailbox::open(store, MailConfig::default(), t0() - Duration::seconds(1))
+        .err()
+        .expect("a weaker store is refused");
+    assert_eq!(
+        err,
+        MailError::DurabilityTooWeak {
+            declared,
+            required: REQUIRED_DURABILITY
+        }
+    );
+    let _: DurabilityClass = declared;
+}
+
 /// # Panics
 /// With the case name prefixed, on the first failing case.
 pub fn run_all<S: MailStore>(make: impl Fn() -> S) {

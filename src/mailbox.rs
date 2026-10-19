@@ -188,9 +188,38 @@ pub enum MailError {
     Claim(ClaimError),
     InvalidState(InvalidState),
     Store(StoreError),
+    /// The store declares a [`DurabilityClass`] below [`REQUIRED_DURABILITY`]; [`Mailbox::open`]
+    /// refuses it, because mail acknowledged to a sender must survive a power loss.
+    DurabilityTooWeak {
+        declared: DurabilityClass,
+        required: DurabilityClass,
+    },
     /// A store write failed after a claim was granted in memory. Reopen the mailbox.
     Poisoned,
 }
+
+/// How much failure an acknowledged write survives. Ordered: a class includes every weaker one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DurabilityClass {
+    /// Survives the process dying (a crash or kill), not the machine losing power.
+    Process,
+    /// Survives power loss: an acknowledged write is on stable storage.
+    Machine,
+}
+
+impl fmt::Display for DurabilityClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            DurabilityClass::Process => "Process",
+            DurabilityClass::Machine => "Machine",
+        })
+    }
+}
+
+/// The least durability a [`MailStore`] may declare for [`Mailbox::open`] to accept it.
+/// CireSnave, 2026-10-18 (board 229): option A, `Machine` required. The full list of needs the
+/// conformance suite enforces is `docs/MAILBOX_STORE_NEEDS.md`.
+pub const REQUIRED_DURABILITY: DurabilityClass = DurabilityClass::Machine;
 
 impl fmt::Display for MailError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -204,6 +233,10 @@ impl fmt::Display for MailError {
             MailError::Claim(e) => write!(f, "{e}"),
             MailError::InvalidState(e) => write!(f, "{e}"),
             MailError::Store(e) => write!(f, "{e}"),
+            MailError::DurabilityTooWeak { declared, required } => write!(
+                f,
+                "the store declares durability {declared}, the mailbox requires {required}"
+            ),
             MailError::Poisoned => write!(f, "the mailbox must be reopened after a store failure"),
         }
     }
@@ -272,6 +305,12 @@ pub trait MailTxn {
 
 /// A transactional store.
 pub trait MailStore {
+    /// The strongest failure this store's acknowledged writes survive. No default: a store must
+    /// state its class, so a new backend cannot be accepted by omission. Declare only what has
+    /// been verified for the configuration in use (`Machine` means a commit has reached stable
+    /// storage before `write` returns `Ok`).
+    fn durability(&self) -> DurabilityClass;
+
     /// One atomic write transaction: every change `f` makes commits together, or none does.
     fn write(
         &self,
@@ -301,6 +340,10 @@ impl MemoryStore {
 }
 
 impl MailStore for MemoryStore {
+    fn durability(&self) -> DurabilityClass {
+        DurabilityClass::Process
+    }
+
     fn write(
         &self,
         f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
@@ -400,7 +443,27 @@ pub struct Mailbox<S: MailStore> {
 impl<S: MailStore> Mailbox<S> {
     /// Open over `store`, restoring the role epochs it holds. Claims signed at or before `now`
     /// are refused after this (M3: a captured claim cannot be replayed across a restart).
+    ///
+    /// # Errors
+    /// [`MailError::DurabilityTooWeak`] when the store declares less than [`REQUIRED_DURABILITY`].
     pub fn open(store: S, config: MailConfig, now: DateTime<Utc>) -> Result<Self, MailError> {
+        let declared = store.durability();
+        if declared < REQUIRED_DURABILITY {
+            return Err(MailError::DurabilityTooWeak {
+                declared,
+                required: REQUIRED_DURABILITY,
+            });
+        }
+        Self::open_volatile(store, config, now)
+    }
+
+    /// [`Mailbox::open`] without the durability check: for tests and throwaway in-memory use,
+    /// never for a daemon's persistent mailbox.
+    pub fn open_volatile(
+        store: S,
+        config: MailConfig,
+        now: DateTime<Utc>,
+    ) -> Result<Self, MailError> {
         let mut state = None;
         store.write(&mut |txn| {
             state = Some(txn.roles().map_err(MailError::Store)?);
@@ -1186,6 +1249,12 @@ mod redb_migration_tests {
 
 #[cfg(feature = "mailbox-redb")]
 impl MailStore for RedbStore {
+    /// redb commits at its default `Durability::Immediate` (fsync before return); this store never
+    /// lowers it.
+    fn durability(&self) -> DurabilityClass {
+        DurabilityClass::Machine
+    }
+
     fn write(
         &self,
         f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,

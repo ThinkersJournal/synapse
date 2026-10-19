@@ -27,6 +27,10 @@ struct CrashingStore {
 }
 
 impl MailStore for CrashingStore {
+    fn durability(&self) -> synapse::mailbox::DurabilityClass {
+        self.inner.durability()
+    }
+
     fn write(
         &self,
         f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
