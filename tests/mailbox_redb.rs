@@ -437,3 +437,9 @@ fn fetch_stops_at_max_before_reading_a_malformed_row_after_it() {
         "the injected row should be undecodable"
     );
 }
+
+/// Board 229: the redb store declares `Machine` and `Mailbox::open` accepts it.
+#[test]
+fn redb_declares_the_needed_durability() {
+    suite::declares_the_needed_durability(|| RedbStore::open(&fresh_path()).unwrap());
+}

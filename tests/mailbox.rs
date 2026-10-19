@@ -80,6 +80,10 @@ struct FailingStore {
 }
 
 impl MailStore for FailingStore {
+    fn durability(&self) -> synapse::mailbox::DurabilityClass {
+        self.inner.durability()
+    }
+
     fn write(
         &self,
         f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
@@ -139,7 +143,7 @@ fn a_failed_claim_write_poisons_and_a_reopen_continues_from_the_store() {
     // Reopen over the same store: the unrecorded epoch was never handed out, so it is reissued.
     let reopened_at = at + chrono::Duration::seconds(1);
     let mut reopened =
-        Mailbox::open(store.clone(), MailConfig::default(), reopened_at).expect("reopen");
+        Mailbox::open_volatile(store.clone(), MailConfig::default(), reopened_at).expect("reopen");
     let next = ids.claim(
         &mut reopened,
         "lane",
@@ -207,6 +211,10 @@ fn run_all_passes_a_conforming_store() {
 /// A store that forgets every write: its transactions run against a fresh empty state each time.
 struct Amnesiac;
 impl MailStore for Amnesiac {
+    fn durability(&self) -> synapse::mailbox::DurabilityClass {
+        synapse::mailbox::DurabilityClass::Process
+    }
+
     fn write(
         &self,
         f: &mut dyn FnMut(&mut dyn synapse::mailbox::MailTxn) -> Result<(), MailError>,
@@ -224,4 +232,35 @@ fn run_all_rejects_a_store_that_forgets_its_writes() {
         outcome.is_err(),
         "a store that persists nothing passed the conformance suite"
     );
+}
+
+/// Board 229 (CireSnave, 2026-10-18): mail needs `Machine` durability. A store declaring `Process`
+/// is refused at open, and the refusal names both classes.
+#[test]
+fn a_store_declaring_less_than_machine_is_refused_at_open() {
+    use synapse::mailbox::{DurabilityClass, REQUIRED_DURABILITY};
+    assert_eq!(REQUIRED_DURABILITY, DurabilityClass::Machine);
+    assert_eq!(MemoryStore::new().durability(), DurabilityClass::Process);
+    let err = Mailbox::open(
+        MemoryStore::new(),
+        MailConfig::default(),
+        suite::t0() - chrono::Duration::seconds(1),
+    )
+    .err()
+    .expect("refused");
+    assert_eq!(
+        err,
+        MailError::DurabilityTooWeak {
+            declared: DurabilityClass::Process,
+            required: DurabilityClass::Machine
+        }
+    );
+    suite::a_store_declaring_less_is_refused(MemoryStore::new);
+    // the escape hatch is explicit, and still works for throwaway stores
+    Mailbox::open_volatile(
+        MemoryStore::new(),
+        MailConfig::default(),
+        suite::t0() - chrono::Duration::seconds(1),
+    )
+    .expect("open_volatile");
 }

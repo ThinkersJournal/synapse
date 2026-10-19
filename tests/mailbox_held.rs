@@ -53,7 +53,7 @@ fn fetch_agrees_with_the_memory_store_and_held_rows_track_leases() {
         let ids = suite::Ids::new();
         let path = fresh_path();
         let mut redb = mailbox(&path, suite::t0());
-        let mut mem = Mailbox::open(
+        let mut mem = Mailbox::open_volatile(
             MemoryStore::default(),
             MailConfig::default(),
             suite::t0() - Duration::seconds(1),
