@@ -300,5 +300,6 @@ fn opening_and_depths_need_no_room_to_write() {
         suite::t0() - chrono::Duration::seconds(1),
     )
     .expect("open reads, it does not write");
-    mb.depths(suite::t0()).expect("depths reads, it does not write");
+    mb.depths(suite::t0())
+        .expect("depths reads, it does not write");
 }
