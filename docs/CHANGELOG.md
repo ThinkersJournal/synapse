@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+
+### Changed (rc.116): PersistAnt 0.9 (dependency rule: latest)
+
+`synapse-mailbox-persistant` takes `persistant-kv` and `persistant-sqlx` 0.9.0 (was 0.8.20; a 0.8 requirement cannot resolve 0.9). The lock also moves the transitive `unisql` crates 0.24.11 -> 0.24.17. No source change. Found by the publish-order dry-run: the existing crates on crates.io top out at rc.105, and only `synapse` can be dry-run until it is published.
+
 ### Fixed (rc.115): opening a mailbox, and `depths`, no longer write
 
 PersistAnt's power-cut run (synapse 0feebc78) showed `mailbox_vm check` failing on a full volume with "mail store: batch: ... database or disk is full": `Mailbox::open` read the role state through `MailStore::write`, which commits a batch even when nothing changed, so a full disk hid the mail already acknowledged on it. `MailStore` gains `read` (default: `write`, so redb and memory are unchanged); `Mailbox::open_volatile` and `Mailbox::depths` use it, and the SQLite adapter overrides it to read through the same overlay and commit nothing. `DaemonStore` forwards it. Test: `opening_and_depths_need_no_room_to_write` (a store whose every write fails; red before the change with "database or disk is full"). Not covered: a real full volume (PersistAnt's run, with ballast, is the check), and redb still opens through a write transaction.
