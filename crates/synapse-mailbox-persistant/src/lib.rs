@@ -842,6 +842,19 @@ impl<K: KvBackend + Send + Sync + 'static> MailStore for PersistantMailStore<K> 
             "write: gave up after {MAX_RACES} lost races"
         ))))
     }
+
+    /// Reads through the same overlay as `write` but commits nothing, so it needs no room to
+    /// write: the transaction's changes, if any, are dropped.
+    fn read(
+        &self,
+        f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
+    ) -> Result<(), MailError> {
+        let mut tx = Tx {
+            st: self,
+            writes: BTreeMap::new(),
+        };
+        f(&mut tx)
+    }
 }
 
 #[cfg(test)]

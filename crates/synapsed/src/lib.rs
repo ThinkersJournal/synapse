@@ -121,6 +121,17 @@ impl MailStore for DaemonStore {
             DaemonStore::Sqlite(s) => s.write(f),
         }
     }
+
+    fn read(
+        &self,
+        f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
+    ) -> Result<(), MailError> {
+        match self {
+            DaemonStore::Redb(s) => s.read(f),
+            #[cfg(feature = "sqlite-store")]
+            DaemonStore::Sqlite(s) => s.read(f),
+        }
+    }
 }
 
 #[derive(Debug)]

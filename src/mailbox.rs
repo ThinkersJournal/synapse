@@ -376,6 +376,17 @@ pub trait MailStore {
         &self,
         f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
     ) -> Result<(), MailError>;
+
+    /// A transaction that only reads: `f` must not change anything, and anything it does change
+    /// is discarded. The default is `write`; a store that can read without writing overrides it,
+    /// so that reading what an earlier run acknowledged does not need room to write (a full disk
+    /// must not hide the mail already on it).
+    fn read(
+        &self,
+        f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
+    ) -> Result<(), MailError> {
+        self.write(f)
+    }
 }
 
 /// An in-memory store. `write` applies the closure to a copy and keeps it only on `Ok`.
@@ -546,7 +557,7 @@ impl<S: MailStore> Mailbox<S> {
         now: DateTime<Utc>,
     ) -> Result<Self, MailError> {
         let mut state = None;
-        store.write(&mut |txn| {
+        store.read(&mut |txn| {
             state = Some(txn.roles().map_err(MailError::Store)?);
             Ok(())
         })?;
@@ -579,7 +590,7 @@ impl<S: MailStore> Mailbox<S> {
         self.live()?;
         let roles = self.roles.snapshot();
         let mut out = BTreeMap::new();
-        self.store.write(&mut |txn| {
+        self.store.read(&mut |txn| {
             out.clear();
             for (role, record) in &roles.roles {
                 let found = txn
