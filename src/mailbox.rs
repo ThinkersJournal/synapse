@@ -14,6 +14,7 @@
 
 #[cfg(feature = "mailbox-conformance")]
 pub mod conformance;
+pub mod migrate;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -333,6 +334,33 @@ pub trait MailTxn {
     fn next_seq(&mut self) -> Result<u64, StoreError>;
     fn roles(&self) -> Result<RolesState, StoreError>;
     fn set_roles(&mut self, state: &RolesState) -> Result<(), StoreError>;
+
+    // The four methods below exist for [`migrate`] (copying a mailbox between stores). They have
+    // defaults that refuse, so a store that does not support export still compiles.
+
+    /// Every role that has queued mail, dead sets (`dead:<role>`) included.
+    fn queue_roles(&self) -> Result<Vec<String>, StoreError> {
+        Err(StoreError("this store cannot export its roles".into()))
+    }
+    /// Every acked-history entry: role, message id, when.
+    fn all_acked(&self) -> Result<Vec<(String, String, DateTime<Utc>)>, StoreError> {
+        Err(StoreError(
+            "this store cannot export its acked history".into(),
+        ))
+    }
+    /// The last sequence number [`MailTxn::next_seq`] handed out.
+    fn seq_counter(&self) -> Result<u64, StoreError> {
+        Err(StoreError(
+            "this store cannot export its sequence counter".into(),
+        ))
+    }
+    /// Set the sequence counter, so the next [`MailTxn::next_seq`] returns `value + 1`.
+    fn set_seq_counter(&mut self, value: u64) -> Result<(), StoreError> {
+        let _ = value;
+        Err(StoreError(
+            "this store cannot import a sequence counter".into(),
+        ))
+    }
 }
 
 /// A transactional store.
@@ -452,6 +480,27 @@ impl MailTxn for MemState {
     fn next_seq(&mut self) -> Result<u64, StoreError> {
         self.seq += 1;
         Ok(self.seq)
+    }
+
+    fn queue_roles(&self) -> Result<Vec<String>, StoreError> {
+        Ok(self.queues.keys().cloned().collect())
+    }
+
+    fn all_acked(&self) -> Result<Vec<(String, String, DateTime<Utc>)>, StoreError> {
+        Ok(self
+            .acked
+            .iter()
+            .map(|((role, id), at)| (role.clone(), id.clone(), *at))
+            .collect())
+    }
+
+    fn seq_counter(&self) -> Result<u64, StoreError> {
+        Ok(self.seq)
+    }
+
+    fn set_seq_counter(&mut self, value: u64) -> Result<(), StoreError> {
+        self.seq = value;
+        Ok(())
     }
 
     fn roles(&self) -> Result<RolesState, StoreError> {
@@ -1706,6 +1755,58 @@ impl MailTxn for RedbTxn<'_> {
             }
         }
         Ok(doomed.len())
+    }
+
+    fn queue_roles(&self) -> Result<Vec<String>, StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::META)
+            .map_err(|e| store_err("meta")(&e))?;
+        let mut roles: Vec<String> = Vec::new();
+        for entry in t.iter().map_err(|e| store_err("meta")(&e))? {
+            let (k, _) = entry.map_err(|e| store_err("meta")(&e))?;
+            let role = k.value().0;
+            if roles.last().map(String::as_str) != Some(role) {
+                roles.push(role.to_string());
+            }
+        }
+        Ok(roles)
+    }
+
+    fn all_acked(&self) -> Result<Vec<(String, String, DateTime<Utc>)>, StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::ACKED)
+            .map_err(|e| store_err("acked")(&e))?;
+        let mut out = Vec::new();
+        for entry in t.iter().map_err(|e| store_err("acked")(&e))? {
+            let (k, v) = entry.map_err(|e| store_err("acked")(&e))?;
+            let (role, id) = k.value();
+            let at = DateTime::from_timestamp_micros(v.value())
+                .ok_or_else(|| StoreError("acked time out of range".into()))?;
+            out.push((role.to_string(), id.to_string(), at));
+        }
+        Ok(out)
+    }
+
+    fn seq_counter(&self) -> Result<u64, StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::COUNTERS)
+            .map_err(|e| store_err("counters")(&e))?;
+        Ok(t.get("seq")
+            .map_err(|e| store_err("counters")(&e))?
+            .map_or(0, |g| g.value()))
+    }
+
+    fn set_seq_counter(&mut self, value: u64) -> Result<(), StoreError> {
+        let mut t = self
+            .txn
+            .open_table(redb_tables::COUNTERS)
+            .map_err(|e| store_err("counters")(&e))?;
+        t.insert("seq", value)
+            .map_err(|e| store_err("counters")(&e))?;
+        Ok(())
     }
 
     fn next_seq(&mut self) -> Result<u64, StoreError> {

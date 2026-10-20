@@ -23,6 +23,9 @@
 //!   answered *later*, never differently. Only the failed answer is delayed, never the attempt, so
 //!   a legitimate caller is not slowed by anyone else's failures; there is no lockout anywhere.
 
+#[cfg(feature = "sqlite-store")]
+mod migration;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::future::Future;
@@ -131,6 +134,8 @@ pub enum DaemonError {
     Mail(MailError),
     /// The security event file could not be opened safely.
     Security(String),
+    /// The redb mailbox could not be moved to the SQLite store, or it is not known which holds the mail.
+    Migration(String),
 }
 
 impl fmt::Display for DaemonError {
@@ -145,6 +150,7 @@ impl fmt::Display for DaemonError {
             DaemonError::Store(e) => write!(f, "{e}"),
             DaemonError::Mail(e) => write!(f, "{e}"),
             DaemonError::Security(e) => write!(f, "security event file: {e}"),
+            DaemonError::Migration(e) => write!(f, "mailbox migration: {e}"),
         }
     }
 }
@@ -496,10 +502,13 @@ impl Daemon {
                 DaemonStore::Redb(RedbStore::open(&path).map_err(DaemonError::Store)?)
             }
             #[cfg(feature = "sqlite-store")]
-            StoreKind::Sqlite => DaemonStore::Sqlite(
-                synapse_mailbox_persistant::SqliteMailStore::open(&path)
-                    .map_err(DaemonError::Store)?,
-            ),
+            StoreKind::Sqlite => {
+                migration::prepare(&cfg.home)?;
+                DaemonStore::Sqlite(
+                    synapse_mailbox_persistant::SqliteMailStore::open(&path)
+                        .map_err(DaemonError::Store)?,
+                )
+            }
         };
         let sink = FileSink::open(
             cfg.home.join(SECURITY_EVENTS_FILE),
