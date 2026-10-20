@@ -159,14 +159,14 @@ jobs:
     - name: Positive control -- the MCP adapter does depend on rmcp
       run: |
         set -o pipefail
-        n=$(cargo tree -p synapse-mcp-server -e normal --prefix none | { grep -c '^rmcp ' || true; })
+        n=$(cargo tree --locked -p synapse-mcp-server -e normal --prefix none | { grep -c '^rmcp ' || true; })
         echo "rmcp lines in synapse-mcp-server's tree: $n"
         test "$n" -ge 1
 
     - name: The core's dependency tree has no rmcp (all features)
       run: |
         set -o pipefail
-        n=$(cargo tree -p synapse --all-features -e normal,build --prefix none | { grep -c '^rmcp ' || true; })
+        n=$(cargo tree --locked -p synapse --all-features -e normal,build --prefix none | { grep -c '^rmcp ' || true; })
         echo "rmcp lines in synapse's tree: $n"
         test "$n" -eq 0
 
@@ -181,7 +181,7 @@ jobs:
     # Not --locked: the step above deletes crates/ and empties `members`, so the resolved graph
     # legitimately differs from the committed Cargo.lock (it loses the adapters' entries).
     - name: The core builds and passes with no adapter present
-      run: cargo test -p synapse --verbose --no-fail-fast
+      run: cargo test --locked -p synapse --verbose --no-fail-fast
 
   # COVERAGE IS A SIGNAL, NOT A GATE (agreed with CireSnave 2026-10-03; a pilot with
   # mlmf and coderipper). This job is NOT a required check, sets no threshold, and
@@ -256,7 +256,7 @@ jobs:
       if: always()
       run: |
         set -o pipefail
-        pkgs=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sed 's/^/-p /' | tr '\n' ' ')
+        pkgs=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[].name' | sed 's/^/-p /' | tr '\n' ' ')
         echo "members: $pkgs"
         test -n "$pkgs"
         echo "COV_PKGS=$pkgs" >> "$GITHUB_ENV"
@@ -277,7 +277,7 @@ jobs:
       run: |
         set -o pipefail
         missing=0
-        for dir in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].manifest_path' | xargs -n1 dirname); do
+        for dir in $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[].manifest_path' | xargs -n1 dirname); do
           n=$(grep -c "^SF:$dir/src/" lcov.info || true)
           echo "$n files from $dir/src"
           if [ "$n" -eq 0 ]; then missing=1; fi
