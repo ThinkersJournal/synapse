@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.117): CI cargo commands take `--locked` (CodeRipper SUP-001)
+
+The two `cargo tree` rmcp checks and the two `cargo metadata` calls in `.github/workflows/ci_cd.yml` ran without `--locked`, so they could resolve against a lock the build jobs had not used. All now pass `--locked`. `cargo test -p synapse` in the core-only job stays unlocked on purpose: the step before it deletes `crates/`, so the lock cannot match (a first attempt to lock it failed that required job). A `.coderipper.toml` waiver records the exception. No source change.
+
 ### Changed (rc.116): PersistAnt 0.9 (dependency rule: latest)
 
 `synapse-mailbox-persistant` takes `persistant-kv` and `persistant-sqlx` 0.9.0 (was 0.8.20; a 0.8 requirement cannot resolve 0.9). The lock also moves the transitive `unisql` crates 0.24.11 -> 0.24.17. No source change. Found by the publish-order dry-run: the existing crates on crates.io top out at rc.105, and only `synapse` can be dry-run until it is published.
