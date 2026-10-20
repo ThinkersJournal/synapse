@@ -12,13 +12,16 @@
 //! names the role(s), comma separated, that may read them (for example `agentlife-launcher`).
 //! Security alerts go as mail to the roles in `SYNAPSE_ALERT_ROLES` (comma separated), from
 //! `daemon:alerts@<account>`; unset, nothing changes.
+//! The mailbox store is redb unless `SYNAPSE_MAILBOX_STORE=sqlite` and the binary was built with
+//! `--features sqlite-store` (PersistAnt SQLite, `<home>/mailbox.sqlite`). A different store is a
+//! different file: nothing is migrated, and the other file is left untouched.
 //! Security events (failed bearers and claims, over-budget requests) go to
 //! `<home>/security-events.jsonl`, owner-only; they never carry a token, nonce or signature.
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
 
-use synapsed::{Daemon, DaemonConfig};
+use synapsed::{Daemon, DaemonConfig, StoreKind};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7920";
 
@@ -46,7 +49,23 @@ async fn main() -> ExitCode {
         addr,
         sweep_every: std::time::Duration::from_secs(3600),
     };
-    let daemon = match Daemon::open(&config) {
+    let kind = match std::env::var("SYNAPSE_MAILBOX_STORE").as_deref() {
+        Err(_) | Ok("" | "redb") => StoreKind::Redb,
+        #[cfg(feature = "sqlite-store")]
+        Ok("sqlite") => StoreKind::Sqlite,
+        Ok(other) => {
+            eprintln!(
+                "synapsed: SYNAPSE_MAILBOX_STORE={other:?} is not available in this build                  (redb{})",
+                if cfg!(feature = "sqlite-store") {
+                    ", sqlite"
+                } else {
+                    "; sqlite needs --features sqlite-store"
+                }
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let daemon = match Daemon::open_with(&config, kind) {
         Ok(daemon) => daemon,
         Err(e) => {
             eprintln!("synapsed: {e}");

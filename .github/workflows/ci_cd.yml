@@ -131,6 +131,18 @@ jobs:
       # (see Cargo.toml).
       run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+    - name: Clippy, sqlite-store
+      if: always()
+      # The PersistAnt SQLite store is behind a feature that is off by default, so none of the steps
+      # above compile it.
+      run: cargo clippy --locked -p synapsed --features sqlite-store --all-targets -- -D warnings
+
+    - name: Daemon API suite against the SQLite store
+      if: always()
+      env:
+        SYNAPSE_TEST_STORE: sqlite
+      run: cargo test --locked -p synapsed --features sqlite-store --test api --no-fail-fast
+
   # CIRESNAVE-EXPECTATIONS 5.1d, verbatim: "Make sure Synapse isn't building things
   # claude-specific because it is a communication system for *any LLM*." The core crate
   # must build and pass with NO adapter crate present, and must not depend on rmcp.

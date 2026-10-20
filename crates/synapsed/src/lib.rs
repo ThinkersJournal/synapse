@@ -46,7 +46,8 @@ use serde_json::{Value, json};
 use synapse::certificate::{RevocationLookup, chain_from_pem};
 use synapse::keystore::{Keystore, KeystoreError};
 use synapse::mailbox::{
-    Acked, Depth, Enqueued, Envelope, MailConfig, MailError, Mailbox, RedbStore, StoreError,
+    Acked, Depth, DurabilityClass, Enqueued, Envelope, MailConfig, MailError, MailStore, MailTxn,
+    Mailbox, RedbStore, StoreError,
 };
 use synapse::roles::{ClaimRequest, RolesState};
 use synapse::security_events::{
@@ -67,6 +68,56 @@ pub struct DaemonConfig {
     pub addr: SocketAddr,
     /// How often acked history is swept (an M4 obligation).
     pub sweep_every: std::time::Duration,
+}
+
+/// Which store serves the mailbox. redb is the default; SQLite through PersistAnt exists only when
+/// built with the `sqlite-store` feature (board 229: declared `Machine`, so `Mailbox::open` accepts it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StoreKind {
+    #[default]
+    Redb,
+    #[cfg(feature = "sqlite-store")]
+    Sqlite,
+}
+
+impl StoreKind {
+    /// The file under the home that holds this store.
+    #[must_use]
+    pub fn file_name(self) -> &'static str {
+        match self {
+            StoreKind::Redb => "mailbox.redb",
+            #[cfg(feature = "sqlite-store")]
+            StoreKind::Sqlite => "mailbox.sqlite",
+        }
+    }
+}
+
+/// The daemon's mailbox store: one of [`StoreKind`], chosen once at open.
+pub enum DaemonStore {
+    Redb(RedbStore),
+    #[cfg(feature = "sqlite-store")]
+    Sqlite(synapse_mailbox_persistant::SqliteMailStore),
+}
+
+impl MailStore for DaemonStore {
+    fn durability(&self) -> DurabilityClass {
+        match self {
+            DaemonStore::Redb(s) => s.durability(),
+            #[cfg(feature = "sqlite-store")]
+            DaemonStore::Sqlite(s) => s.durability(),
+        }
+    }
+
+    fn write(
+        &self,
+        f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
+    ) -> Result<(), MailError> {
+        match self {
+            DaemonStore::Redb(s) => s.write(f),
+            #[cfg(feature = "sqlite-store")]
+            DaemonStore::Sqlite(s) => s.write(f),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -129,7 +180,7 @@ struct Presence {
 
 struct Shared {
     /// Never held across an `.await`.
-    mailbox: Mutex<Mailbox<RedbStore>>,
+    mailbox: Mutex<Mailbox<DaemonStore>>,
     /// SHA-256(token) -> session.
     sessions: Mutex<HashMap<[u8; 32], Session>>,
     presence: Mutex<HashMap<String, Presence>>,
@@ -430,11 +481,26 @@ impl Daemon {
     /// Open the keystore and the store under `cfg.home`. Refuses a non-loopback address, and a
     /// second daemon on the same home (redb's file lock).
     pub fn open(cfg: &DaemonConfig) -> Result<Daemon, DaemonError> {
+        Self::open_with(cfg, StoreKind::default())
+    }
+
+    /// As [`Daemon::open`], serving the mailbox from `kind`.
+    pub fn open_with(cfg: &DaemonConfig, kind: StoreKind) -> Result<Daemon, DaemonError> {
         if !cfg.addr.ip().is_loopback() {
             return Err(DaemonError::NotLoopback);
         }
         let keystore = Keystore::open(&cfg.home).map_err(DaemonError::Keystore)?;
-        let store = RedbStore::open(&cfg.home.join("mailbox.redb")).map_err(DaemonError::Store)?;
+        let path = cfg.home.join(kind.file_name());
+        let store = match kind {
+            StoreKind::Redb => {
+                DaemonStore::Redb(RedbStore::open(&path).map_err(DaemonError::Store)?)
+            }
+            #[cfg(feature = "sqlite-store")]
+            StoreKind::Sqlite => DaemonStore::Sqlite(
+                synapse_mailbox_persistant::SqliteMailStore::open(&path)
+                    .map_err(DaemonError::Store)?,
+            ),
+        };
         let sink = FileSink::open(
             cfg.home.join(SECURITY_EVENTS_FILE),
             SECURITY_EVENTS_MAX_BYTES,
