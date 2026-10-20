@@ -108,14 +108,24 @@ impl Drop for Home {
     }
 }
 
+/// What the mock model says.
+#[derive(Clone, Copy)]
+enum Say {
+    Text(&'static str),
+    /// A 500.
+    Fail,
+    /// A call of tool `name` with JSON `arguments`.
+    Tool(&'static str, &'static str),
+}
+
 /// A local OpenAI-compatible `chat/completions` endpoint. `answers` are served in order (the
-/// last repeats); `Err` serves a 500. Every request body is recorded.
+/// last repeats). Every request body is recorded.
 struct Mock {
     url: String,
     seen: Arc<Mutex<Vec<Value>>>,
 }
 
-async fn mock(answers: Vec<Result<&'static str, ()>>) -> Mock {
+async fn mock(answers: Vec<Say>) -> Mock {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/v1/", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -155,11 +165,20 @@ async fn mock(answers: Vec<Result<&'static str, ()>>) -> Mock {
             let answer = answers[n.min(answers.len() - 1)];
             n += 1;
             let reply = match answer {
-                Ok(text) => {
+                Say::Text(_) | Say::Tool(..) => {
+                    let (finish, message) = match answer {
+                        Say::Tool(name, arguments) => (
+                            "tool_calls",
+                            json!({"role": "assistant", "content": null, "tool_calls": [{
+                                "id": "call_1", "type": "function",
+                                "function": {"name": name, "arguments": arguments}}]}),
+                        ),
+                        Say::Text(text) => ("stop", json!({"role": "assistant", "content": text})),
+                        Say::Fail => unreachable!(),
+                    };
                     let payload = json!({"id": "x", "object": "chat.completion", "created": 0,
                         "model": "mock-model",
-                        "choices": [{"index": 0, "finish_reason": "stop",
-                            "message": {"role": "assistant", "content": text}}],
+                        "choices": [{"index": 0, "finish_reason": finish, "message": message}],
                         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
                     .to_string();
                     format!(
@@ -167,7 +186,7 @@ async fn mock(answers: Vec<Result<&'static str, ()>>) -> Mock {
                         payload.len()
                     )
                 }
-                Err(()) => "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
+                Say::Fail => "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
             };
             let _ = sock.write_all(reply.as_bytes()).await;
             let _ = sock.shutdown().await;
@@ -215,7 +234,7 @@ fn text(message: &Value) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_is_answered_by_the_model_and_acknowledged() {
     let home = Home::new();
-    let model = mock(vec![Ok("FOUR")]).await;
+    let model = mock(vec![Say::Text("FOUR")]).await;
     // Both roles must exist before mail is addressed to them.
     let _boss = home.server("boss").await;
     let agent = Agent::new(home.server("bot").await, responder(&model)).with_lease_secs(5);
@@ -247,6 +266,10 @@ async fn a_message_is_answered_by_the_model_and_acknowledged() {
         "the model saw the mail: {request}"
     );
     assert!(
+        seen[0].get("tools").is_none(),
+        "no tools unless asked for: {request}"
+    );
+    assert!(
         request.contains("untrusted"),
         "and was told it is untrusted: {request}"
     );
@@ -260,7 +283,7 @@ async fn a_message_is_answered_by_the_model_and_acknowledged() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_model_failure_leaves_the_message_leased_and_the_next_pass_retries_it() {
     let home = Home::new();
-    let model = mock(vec![Err(()), Ok("RECOVERED")]).await;
+    let model = mock(vec![Say::Fail, Say::Text("RECOVERED")]).await;
     let _boss = home.server("boss").await;
     let agent = Agent::new(home.server("bot").await, responder(&model)).with_lease_secs(5);
     send(&home, "boss", "bot", "q1", "hello").await;
@@ -291,7 +314,7 @@ async fn a_model_failure_leaves_the_message_leased_and_the_next_pass_retries_it(
 
 struct Failing;
 impl Responder for Failing {
-    async fn reply(&self, _from: &str, _body: &str) -> Result<String, String> {
+    async fn reply(&self, _id: &str, _from: &str, _body: &str) -> Result<String, String> {
         Err("always".into())
     }
 }
@@ -321,4 +344,76 @@ async fn a_message_that_keeps_failing_is_dropped_after_max_attempts() {
         StepReport::default(),
         "gone for good"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_model_can_send_to_an_allowed_role_and_not_to_any_other() {
+    let home = Home::new();
+    // Turn 1 asks to send to ops, turn 2 to a role off the list, turn 3 answers.
+    let model = mock(vec![
+        Say::Tool("send_message", r#"{"to":"ops","body":"disk is full"}"#),
+        Say::Tool("send_message", r#"{"to":"other","body":"leak"}"#),
+        Say::Text("DONE"),
+    ])
+    .await;
+    let _boss = home.server("boss").await;
+    let ops = home.server("ops").await;
+    let _other = home.server("other").await;
+    let bot = home.server("bot").await;
+    let responder = responder(&model).with_send_tool(bot.clone(), vec!["ops".to_string()]);
+    let agent = Agent::new(bot, responder).with_lease_secs(5);
+    send(&home, "boss", "bot", "q1", "tell ops").await;
+
+    let report = agent.step().await.expect("a pass");
+    assert_eq!(
+        report,
+        StepReport {
+            answered: 1,
+            failed: 0,
+            dropped: 0
+        }
+    );
+
+    let to_ops = inbox(&home, "ops").await;
+    assert_eq!(to_ops.len(), 1, "ops got the one allowed send: {to_ops:?}");
+    assert_eq!(text(&to_ops[0]), "disk is full");
+    assert!(
+        inbox(&home, "other").await.is_empty(),
+        "nothing off the list"
+    );
+    assert_eq!(text(&inbox(&home, "boss").await[0]), "DONE");
+
+    let seen = model.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3, "three model turns");
+    assert!(seen[0]["tools"].to_string().contains("send_message"));
+    let last = seen[2].to_string();
+    assert!(
+        last.contains("sent"),
+        "the model was told it was sent: {last}"
+    );
+    assert!(
+        last.contains("refused"),
+        "and that the other was refused: {last}"
+    );
+    drop(ops);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_call_without_the_tool_is_refused_and_a_runaway_model_is_cut_off() {
+    let home = Home::new();
+    // The model never stops asking for a tool this agent was not given.
+    let model = mock(vec![Say::Tool(
+        "send_message",
+        r#"{"to":"ops","body":"x"}"#,
+    )])
+    .await;
+    let _boss = home.server("boss").await;
+    let _ops = home.server("ops").await;
+    let agent = Agent::new(home.server("bot").await, responder(&model)).with_lease_secs(5);
+    send(&home, "boss", "bot", "q1", "go").await;
+
+    let report = agent.step().await.expect("a pass");
+    assert_eq!(report.failed, 1, "{report:?}");
+    assert_eq!(model.seen.lock().unwrap().len(), 4, "cut off after 4 turns");
+    assert!(inbox(&home, "ops").await.is_empty(), "nothing was sent");
 }
