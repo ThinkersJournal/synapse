@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.120): `synapse-agent` live-smoke fixes (first live Gemini run, 2026-10-20)
+
+The PM's live run (Google AI Studio free tier, `gemini-3.8-flash`, reply `PONG`, attempts 1) passed and found two faults outside the transport. The smoke scripts move into the repo (`crates/synapse-agent/smoke/`): `smoke.sh` converts its bin dir with `cygpath` (a `C:/...` path split `PATH` at the colon) and takes the model from `SMOKE_MODEL` (default `gemini-3.8-flash`; `gemini-2.5-flash` now answers 404 "no longer available to new users"). The agent logs an HTTP 404/410 from the provider as "model ... is retired or unavailable to this key: pick another model" (test: a mock that answers 404, and a 500 that must not be called retired).
+
 ### Added (rc.119): `synapse-agent` gives the model a `send_message` tool, bound to an allow-list (roadmap step 6, slice 2)
 
 `--allow-send ops,boss` (`GenaiResponder::with_send_tool`): the model may call `send_message(to, body)` for roles on the list only; anything else is refused and the model is told. At most 3 sends and 4 model turns per message; tool sends use ids derived from the message's, so a retried message deduplicates. `Responder::reply` now takes the message id. Tests (mock model, real `synapsed`): an allowed send arrives and an off-list one does not; a model that never stops calling a tool it was not given is cut off after 4 turns and the message stays leased. Not covered: a live provider; a model that returns several tool calls in one turn (handled in order, untested); tools other than send.

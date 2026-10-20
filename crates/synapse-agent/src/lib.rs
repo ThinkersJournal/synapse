@@ -140,6 +140,17 @@ impl<R: Responder> Agent<R> {
     }
 }
 
+/// The log line for a failed model call. A provider that retires a model answers 404 (Google did
+/// so for `gemini-2.5-flash` on 2026-10-20), and its body is long; say what to do first.
+fn model_error(model: &str, e: &genai::Error) -> String {
+    match e.status().map(|s| s.as_u16()) {
+        Some(404 | 410) => format!(
+            "model {model:?} is retired or unavailable to this key (HTTP 404/410): pick another model. Provider said: {e}"
+        ),
+        _ => format!("the model call failed: {e}"),
+    }
+}
+
 /// A [`Responder`] backed by `genai`.
 pub struct GenaiResponder {
     client: Client,
@@ -257,7 +268,7 @@ impl Responder for GenaiResponder {
                 .client
                 .exec_chat(&self.model, request.clone(), None)
                 .await
-                .map_err(|e| format!("the model call failed: {e}"))?;
+                .map_err(|e| model_error(&self.model, &e))?;
             if response.tool_calls().is_empty() {
                 return response
                     .first_text()

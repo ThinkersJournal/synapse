@@ -114,6 +114,8 @@ enum Say {
     Text(&'static str),
     /// A 500.
     Fail,
+    /// A 404, as a provider answers for a retired model.
+    Gone,
     /// A call of tool `name` with JSON `arguments`.
     Tool(&'static str, &'static str),
 }
@@ -174,7 +176,7 @@ async fn mock(answers: Vec<Say>) -> Mock {
                                 "function": {"name": name, "arguments": arguments}}]}),
                         ),
                         Say::Text(text) => ("stop", json!({"role": "assistant", "content": text})),
-                        Say::Fail => unreachable!(),
+                        Say::Fail | Say::Gone => unreachable!(),
                     };
                     let payload = json!({"id": "x", "object": "chat.completion", "created": 0,
                         "model": "mock-model",
@@ -186,6 +188,7 @@ async fn mock(answers: Vec<Say>) -> Mock {
                         payload.len()
                     )
                 }
+                Say::Gone => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
                 Say::Fail => "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
             };
             let _ = sock.write_all(reply.as_bytes()).await;
@@ -416,4 +419,24 @@ async fn a_tool_call_without_the_tool_is_refused_and_a_runaway_model_is_cut_off(
     assert_eq!(report.failed, 1, "{report:?}");
     assert_eq!(model.seen.lock().unwrap().len(), 4, "cut off after 4 turns");
     assert!(inbox(&home, "ops").await.is_empty(), "nothing was sent");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retired_model_is_reported_as_such() {
+    let model = mock(vec![Say::Gone]).await;
+    let why = responder(&model)
+        .reply("id", "boss@acct", "hi")
+        .await
+        .expect_err("a 404 is an error");
+    assert!(why.contains("retired or unavailable"), "{why}");
+    assert!(why.contains("mock-model"), "names the model: {why}");
+    let other = mock(vec![Say::Fail]).await;
+    let why = responder(&other)
+        .reply("id", "boss@acct", "hi")
+        .await
+        .unwrap_err();
+    assert!(
+        !why.contains("retired"),
+        "a 500 is not a retired model: {why}"
+    );
 }

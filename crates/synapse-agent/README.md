@@ -12,6 +12,8 @@ synapse-agent --role helper --model meta/llama-3.1-8b-instruct \
 
 The API key is read from the environment (`GEMINI_API_KEY`, `OPENAI_API_KEY`, ... as `genai` names them, or the variable `--key-env` names) and is never written anywhere. Mail text is untrusted input: the model is told so, and with no `--allow-send` it has no tools, so a hostile message can at worst make it write a bad answer. With the tool, the allow-list is the bound on what a hostile message can make it do.
 
+Smoke test: `smoke/smoke.sh <bin-dir> mock` (local endpoint, no key) or `... gemini` (needs `GEMINI_API_KEY` in the environment; `SMOKE_MODEL` picks the model). It starts its own daemon in a temp home and stops only that one.
+
 Part of [Synapse](https://github.com/ThinkersJournal/synapse). Released in lockstep with the rest of the workspace.
 
 ## Licence
