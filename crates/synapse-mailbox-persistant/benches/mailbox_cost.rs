@@ -3,7 +3,9 @@
 //! benches (adoption-fit gap 2): the same workload (1 KiB bodies, one role of N messages with half
 //! of them leased, 100 samples) against `SqliteMailStore` and, as the control on the same machine
 //! and run, `RedbStore`. A measurement, not a test (its own `main`; minutes): run with
-//! `cargo bench -p synapse-mailbox-persistant --bench mailbox_cost`.
+//! `cargo bench -p synapse-mailbox-persistant --bench mailbox_cost`. `BENCH_TOTALS=1000,5000` sets the
+//! queue sizes and `BENCH_LEASED=10` how many messages are leased first (default: half, a stuck
+//! consumer; a handful is the usual case).
 //! Numbers go in the PR that changed the adapter, with the ref and machine.
 
 use std::time::{Duration as StdDuration, Instant};
@@ -39,7 +41,11 @@ fn run<S: MailStore>(label: &str, store: S, total: usize) {
         enq.push(t.elapsed());
     }
     let fill = fill.elapsed();
-    mb.fetch(&addr, epoch, total / 2, None, now).unwrap();
+    let leased = std::env::var("BENCH_LEASED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(total / 2);
+    mb.fetch(&addr, epoch, leased, None, now).unwrap();
     let mut fetches = Vec::new();
     for _ in 0..100 {
         let t = Instant::now();

@@ -159,6 +159,14 @@ pub struct Depth {
     pub oldest_enqueued_at: Option<DateTime<Utc>>,
 }
 
+/// What [`Mailbox::depths`] reads for one role: queued and leased counts and the oldest arrival.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QueueDepth {
+    pub queued: usize,
+    pub leased: usize,
+    pub oldest_enqueued_at: Option<DateTime<Utc>>,
+}
+
 /// A store failure, described without message contents.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreError(pub String);
@@ -289,6 +297,30 @@ pub trait MailTxn {
                 true
             }
         })
+    }
+    /// The role's [`QueueDepth`] for a holder of `epoch` at `now`: a lease counts as leased only
+    /// while `fetch` would withhold it (unexpired, and held by `epoch`). The default goes through
+    /// [`MailTxn::scan_leases`], reading every message; a store that indexes leases should override it.
+    fn queue_depth(
+        &self,
+        role: &str,
+        epoch: u64,
+        now: DateTime<Utc>,
+    ) -> Result<QueueDepth, StoreError> {
+        let mut depth = QueueDepth::default();
+        self.scan_leases(role, &mut |enqueued_at, lease| {
+            if lease.is_some_and(|held| held.epoch == epoch && held.until > now) {
+                depth.leased += 1;
+            } else {
+                depth.queued += 1;
+            }
+            depth.oldest_enqueued_at = Some(
+                depth
+                    .oldest_enqueued_at
+                    .map_or(enqueued_at, |oldest| oldest.min(enqueued_at)),
+            );
+        })?;
+        Ok(depth)
     }
     fn queued(&self, role: &str, id: &str) -> Result<Option<Stored>, StoreError>;
     /// Insert, or replace by `envelope.message_id`.
@@ -501,20 +533,15 @@ impl<S: MailStore> Mailbox<S> {
         self.store.write(&mut |txn| {
             out.clear();
             for (role, record) in &roles.roles {
-                let mut depth = Depth::default();
-                txn.scan_leases(role, &mut |enqueued_at, lease| {
-                    if lease.is_some_and(|held| held.epoch == record.epoch && held.until > now) {
-                        depth.leased += 1;
-                    } else {
-                        depth.queued += 1;
-                    }
-                    depth.oldest_enqueued_at = Some(
-                        depth
-                            .oldest_enqueued_at
-                            .map_or(enqueued_at, |oldest| oldest.min(enqueued_at)),
-                    );
-                })
-                .map_err(MailError::Store)?;
+                let found = txn
+                    .queue_depth(role, record.epoch, now)
+                    .map_err(MailError::Store)?;
+                let mut depth = Depth {
+                    queued: found.queued,
+                    leased: found.leased,
+                    oldest_enqueued_at: found.oldest_enqueued_at,
+                    ..Depth::default()
+                };
                 depth.dead = txn.stats(&dead_role(role)).map_err(MailError::Store)?.0;
                 out.insert(role.clone(), depth);
             }
