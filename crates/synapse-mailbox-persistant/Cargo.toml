@@ -1,0 +1,23 @@
+[package]
+name = "synapse-mailbox-persistant"
+version.workspace = true
+edition = "2024"
+rust-version = "1.95"
+authors = ["Eric Evans <ciresnave@gmail.com>"]
+description = "A Synapse MailStore over PersistAnt's key-value kind; SQLite opened for power-loss durability."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ThinkersJournal/synapse"
+publish = false
+
+[dependencies]
+synapse = { path = "../..", version = "6.0.0-rc.107" }
+persistant-kv = "0.8.19"
+persistant-sqlx = { version = "0.8.19", features = ["sqlite"] }
+tokio = { version = "1.46.1", features = ["rt-multi-thread", "time"] }
+serde_json = "1"
+chrono = "0.4"
+
+[dev-dependencies]
+synapse = { path = "../..", version = "6.0.0-rc.107", features = ["mailbox-conformance"] }
+tempfile = "3"
+tokio = { version = "1.46.1", features = ["rt-multi-thread", "time", "macros"] }
