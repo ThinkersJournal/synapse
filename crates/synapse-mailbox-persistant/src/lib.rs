@@ -21,13 +21,16 @@
 use chrono::{DateTime, Utc};
 use persistant_kv::choose::{Durability, declared_durability};
 use persistant_kv::{BatchOp, KvBackend, KvOnRelational};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
-use synapse::mailbox::{DurabilityClass, MailError, MailStore, MailTxn, StoreError, Stored};
+use synapse::mailbox::{
+    DurabilityClass, Envelope, Lease, MailError, MailStore, MailTxn, StoreError, Stored, is_free,
+};
 use synapse::roles::RolesState;
 use tokio::runtime::Runtime;
 
@@ -101,7 +104,7 @@ impl SqliteMailStore {
             rt.shutdown_background();
             return Err(se("permissions", e));
         }
-        let mut store = Self::from_runtime(rt, kv, "mail".into());
+        let mut store = Self::from_runtime(rt, kv, "mail.v2".into());
         store._lock = Some(lock);
         Ok(store)
     }
@@ -236,14 +239,64 @@ impl<K: KvBackend + Send + Sync + 'static> Drop for PersistantMailStore<K> {
     }
 }
 
+/// A stored message without its body. The body lives under its own key, so scanning a queue for
+/// depth, leases or the next free message never reads a body (the redb store keeps the same split).
+#[derive(Serialize, Deserialize)]
+struct Meta {
+    message_id: String,
+    to: String,
+    from: String,
+    seq: u64,
+    enqueued_at: DateTime<Utc>,
+    lease: Option<Lease>,
+    attempts: u32,
+    body_len: u64,
+}
+
+impl Meta {
+    fn with_body(self, body: Vec<u8>) -> Stored {
+        Stored {
+            envelope: Envelope {
+                message_id: self.message_id,
+                to: self.to,
+                from: self.from,
+                body,
+            },
+            seq: self.seq,
+            enqueued_at: self.enqueued_at,
+            lease: self.lease,
+            attempts: self.attempts,
+        }
+    }
+}
+
+/// Called with each entry's key and value; `false` stops the scan.
+type Emit<'a> = dyn FnMut(&str, &[u8]) -> Result<bool, StoreError> + 'a;
+
+/// How many metas one backend call returns while scanning a queue.
+const PAGE: usize = 500;
+
+/// Key layout, all under `<ns>/` (the namespace carries the layout version, so a store written by
+/// an earlier layout is never read as this one):
+/// `q/<role>/<seq:020>` meta, `b/<role>/<seq:020>` body, `i/<role>/<hex id>` seq of that id,
+/// `s/<role>` (count, bytes), `a/<role>/<hex id>` ack time, `c/seq`, `r/state`.
+/// Zero-padded `seq` makes the backend's key order the queue's order.
 struct Tx<'a, K: KvBackend + Send + Sync + 'static> {
     st: &'a PersistantMailStore<K>,
     writes: BTreeMap<String, Option<Vec<u8>>>,
 }
 
 impl<K: KvBackend + Send + Sync + 'static> Tx<'_, K> {
-    fn qprefix(&self, role: &str) -> String {
-        format!("{}/q/{}/", self.st.ns, hex(role))
+    fn key(&self, kind: char, role: &str, tail: &str) -> String {
+        format!("{}/{kind}/{}/{tail}", self.st.ns, hex(role))
+    }
+
+    fn qkey(&self, role: &str, seq: u64) -> String {
+        self.key('q', role, &format!("{seq:020}"))
+    }
+
+    fn bkey(&self, role: &str, seq: u64) -> String {
+        self.key('b', role, &format!("{seq:020}"))
     }
 
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
@@ -257,39 +310,106 @@ impl<K: KvBackend + Send + Sync + 'static> Tx<'_, K> {
             .map_err(|e| se("get", e))
     }
 
-    /// Every entry under `prefix`, the overlay applied on top of what the backend holds.
-    fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-        let mut out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    fn page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+    ) -> Result<persistant_kv::ValuePage, StoreError> {
+        let kv = Arc::clone(&self.st.kv);
+        let (p, a) = (prefix.to_string(), after.map(str::to_string));
+        self.st
+            .run("scan", async move {
+                kv.ordered_scan_values(&p, a.as_deref(), PAGE).await
+            })?
+            .map_err(|e| se("scan", e))
+    }
+
+    /// Every entry under `prefix` in key order, this transaction's writes applied on top of what
+    /// the backend holds, stopping when `emit` returns `false` (so a caller that needs the first
+    /// few entries reads one page, not the queue).
+    fn for_each(&self, prefix: &str, emit: &mut Emit<'_>) -> Result<(), StoreError> {
+        let mut overlay = self
+            .writes
+            .range(prefix.to_string()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .peekable();
         let mut after: Option<String> = None;
         loop {
-            let kv = Arc::clone(&self.st.kv);
-            let (p, a) = (prefix.to_string(), after.clone());
-            let page = self
-                .st
-                .run("scan", async move {
-                    kv.ordered_scan_values(&p, a.as_deref(), 200).await
-                })?
-                .map_err(|e| se("scan", e))?;
-            out.extend(page.entries);
+            let page = self.page(prefix, after.as_deref())?;
+            for (k, v) in &page.entries {
+                // Overlay entries that sort before this backend entry.
+                while let Some((ok, ov)) = overlay.next_if(|(ok, _)| ok.as_str() < k.as_str()) {
+                    if let Some(val) = ov
+                        && !emit(ok, val)?
+                    {
+                        return Ok(());
+                    }
+                }
+                // The overlay replaces or deletes this very key.
+                let keep_going = match overlay.next_if(|(ok, _)| ok.as_str() == k.as_str()) {
+                    Some((_, Some(val))) => emit(k, val)?,
+                    Some((_, None)) => true,
+                    None => emit(k, v)?,
+                };
+                if !keep_going {
+                    return Ok(());
+                }
+            }
             match page.next {
                 Some(n) => after = Some(n),
                 None => break,
             }
         }
-        for (k, w) in self.writes.range(prefix.to_string()..) {
-            if !k.starts_with(prefix) {
-                break;
-            }
-            match w {
-                Some(v) => {
-                    out.insert(k.clone(), v.clone());
-                }
-                None => {
-                    out.remove(k);
-                }
+        for (ok, ov) in overlay {
+            if let Some(val) = ov
+                && !emit(ok, val)?
+            {
+                return Ok(());
             }
         }
-        Ok(out.into_iter().collect())
+        Ok(())
+    }
+
+    fn for_each_meta(&self, role: &str, f: &mut dyn FnMut(Meta) -> bool) -> Result<(), StoreError> {
+        self.for_each(&self.key('q', role, ""), &mut |_, raw| {
+            let meta: Meta = serde_json::from_slice(raw).map_err(|e| se("decode", e))?;
+            Ok(f(meta))
+        })
+    }
+
+    fn meta(&self, role: &str, seq: u64) -> Result<Option<Meta>, StoreError> {
+        self.get(&self.qkey(role, seq))?
+            .map(|r| serde_json::from_slice(&r).map_err(|e| se("decode", e)))
+            .transpose()
+    }
+
+    fn body(&self, role: &str, seq: u64) -> Result<Vec<u8>, StoreError> {
+        self.get(&self.bkey(role, seq))?
+            .ok_or_else(|| StoreError(format!("body missing for seq {seq}")))
+    }
+
+    fn seq_of(&self, role: &str, id: &str) -> Result<Option<u64>, StoreError> {
+        self.get(&self.key('i', role, &hex(id)))?
+            .map(|r| {
+                std::str::from_utf8(&r)
+                    .ok()
+                    .and_then(|t| t.parse().ok())
+                    .ok_or_else(|| StoreError("bad index entry".into()))
+            })
+            .transpose()
+    }
+
+    fn counts(&self, role: &str) -> Result<(u64, u64), StoreError> {
+        match self.get(&format!("{}/s/{}", self.st.ns, hex(role)))? {
+            Some(r) => serde_json::from_slice(&r).map_err(|e| se("decode", e)),
+            None => Ok((0, 0)),
+        }
+    }
+
+    fn set_counts(&mut self, role: &str, count: u64, bytes: u64) -> Result<(), StoreError> {
+        let raw = serde_json::to_vec(&(count, bytes)).map_err(|e| se("encode", e))?;
+        self.stage(format!("{}/s/{}", self.st.ns, hex(role)), raw);
+        Ok(())
     }
 
     fn stage(&mut self, key: String, v: Vec<u8>) {
@@ -299,53 +419,126 @@ impl<K: KvBackend + Send + Sync + 'static> Tx<'_, K> {
     fn del(&mut self, key: String) {
         self.writes.insert(key, None);
     }
-
-    fn stored_of(raw: &[u8]) -> Result<Stored, StoreError> {
-        serde_json::from_slice(raw).map_err(|e| se("decode", e))
-    }
 }
 
 impl<K: KvBackend + Send + Sync + 'static> MailTxn for Tx<'_, K> {
     fn stats(&self, role: &str) -> Result<(usize, u64), StoreError> {
-        let mut n = 0;
-        let mut bytes = 0u64;
-        for (_, raw) in self.scan_prefix(&self.qprefix(role))? {
-            n += 1;
-            bytes += Self::stored_of(&raw)?.envelope.body.len() as u64;
-        }
-        Ok((n, bytes))
+        let (count, bytes) = self.counts(role)?;
+        Ok((usize::try_from(count).unwrap_or(usize::MAX), bytes))
     }
 
     fn scan(&self, role: &str, visit: &mut dyn FnMut(&Stored) -> bool) -> Result<(), StoreError> {
-        let mut all = Vec::new();
-        for (_, raw) in self.scan_prefix(&self.qprefix(role))? {
-            all.push(Self::stored_of(&raw)?);
-        }
-        all.sort_by_key(|s| s.seq);
-        for s in &all {
-            if !visit(s) {
-                break;
+        let mut failed = None;
+        self.for_each_meta(role, &mut |meta| match self.body(role, meta.seq) {
+            Ok(body) => visit(&meta.with_body(body)),
+            Err(e) => {
+                failed = Some(e);
+                false
             }
-        }
-        Ok(())
+        })?;
+        failed.map_or(Ok(()), Err)
+    }
+
+    fn scan_leases(
+        &self,
+        role: &str,
+        visit: &mut dyn FnMut(DateTime<Utc>, Option<&Lease>),
+    ) -> Result<(), StoreError> {
+        self.for_each_meta(role, &mut |meta| {
+            visit(meta.enqueued_at, meta.lease.as_ref());
+            true
+        })
+    }
+
+    fn scan_free(
+        &self,
+        role: &str,
+        epoch: u64,
+        now: DateTime<Utc>,
+        visit: &mut dyn FnMut(&Stored) -> bool,
+    ) -> Result<(), StoreError> {
+        let mut failed = None;
+        self.for_each_meta(role, &mut |meta| {
+            if !is_free(meta.lease.as_ref(), epoch, now) {
+                return true;
+            }
+            match self.body(role, meta.seq) {
+                Ok(body) => visit(&meta.with_body(body)),
+                Err(e) => {
+                    failed = Some(e);
+                    false
+                }
+            }
+        })?;
+        failed.map_or(Ok(()), Err)
     }
 
     fn queued(&self, role: &str, id: &str) -> Result<Option<Stored>, StoreError> {
-        let key = format!("{}{}", self.qprefix(role), hex(id));
-        self.get(&key)?.map(|r| Self::stored_of(&r)).transpose()
+        let Some(seq) = self.seq_of(role, id)? else {
+            return Ok(None);
+        };
+        let Some(meta) = self.meta(role, seq)? else {
+            return Ok(None);
+        };
+        let body = self.body(role, seq)?;
+        Ok(Some(meta.with_body(body)))
     }
 
     fn put(&mut self, role: &str, stored: Stored) -> Result<(), StoreError> {
-        let key = format!("{}{}", self.qprefix(role), hex(&stored.envelope.message_id));
-        let raw = serde_json::to_vec(&stored).map_err(|e| se("encode", e))?;
-        self.stage(key, raw);
+        let id = stored.envelope.message_id.clone();
+        let existing = match self.seq_of(role, &id)? {
+            Some(seq) => self.meta(role, seq)?,
+            None => None,
+        };
+        // A replace keeps the stored body and its size (as the redb store does): leasing a
+        // message must not rewrite it.
+        let body_len = existing
+            .as_ref()
+            .map_or(stored.envelope.body.len() as u64, |m| m.body_len);
+        let seq = existing.as_ref().map_or(stored.seq, |m| m.seq);
+        let meta = Meta {
+            message_id: id.clone(),
+            to: stored.envelope.to.clone(),
+            from: stored.envelope.from.clone(),
+            seq,
+            enqueued_at: stored.enqueued_at,
+            lease: stored.lease.clone(),
+            attempts: stored.attempts,
+            body_len,
+        };
+        let raw = serde_json::to_vec(&meta).map_err(|e| se("encode", e))?;
+        let qkey = self.qkey(role, seq);
+        self.stage(qkey, raw);
+        if existing.is_none() {
+            let bkey = self.bkey(role, seq);
+            self.stage(bkey, stored.envelope.body);
+            let ikey = self.key('i', role, &hex(&id));
+            self.stage(ikey, seq.to_string().into_bytes());
+            let (count, bytes) = self.counts(role)?;
+            self.set_counts(role, count + 1, bytes + body_len)?;
+        }
         Ok(())
     }
 
     fn remove(&mut self, role: &str, id: &str) -> Result<(), StoreError> {
-        let key = format!("{}{}", self.qprefix(role), hex(id));
-        self.del(key);
-        Ok(())
+        let Some(seq) = self.seq_of(role, id)? else {
+            return Ok(());
+        };
+        let body_len = self.meta(role, seq)?.map_or(0, |m| m.body_len);
+        let (qkey, bkey, ikey) = (
+            self.qkey(role, seq),
+            self.bkey(role, seq),
+            self.key('i', role, &hex(id)),
+        );
+        self.del(qkey);
+        self.del(bkey);
+        self.del(ikey);
+        let (count, bytes) = self.counts(role)?;
+        self.set_counts(
+            role,
+            count.saturating_sub(1),
+            bytes.saturating_sub(body_len),
+        )
     }
 
     fn acked_at(&self, role: &str, id: &str) -> Result<Option<DateTime<Utc>>, StoreError> {
@@ -363,13 +556,17 @@ impl<K: KvBackend + Send + Sync + 'static> MailTxn for Tx<'_, K> {
     }
 
     fn sweep_acked(&mut self, before: DateTime<Utc>) -> Result<usize, StoreError> {
-        let mut n = 0;
-        for (k, raw) in self.scan_prefix(&format!("{}/a/", self.st.ns))? {
-            let at: DateTime<Utc> = serde_json::from_slice(&raw).map_err(|e| se("decode", e))?;
+        let mut old = Vec::new();
+        self.for_each(&format!("{}/a/", self.st.ns), &mut |k, raw| {
+            let at: DateTime<Utc> = serde_json::from_slice(raw).map_err(|e| se("decode", e))?;
             if at < before {
-                self.del(k);
-                n += 1;
+                old.push(k.to_string());
             }
+            Ok(true)
+        })?;
+        let n = old.len();
+        for k in old {
+            self.del(k);
         }
         Ok(n)
     }

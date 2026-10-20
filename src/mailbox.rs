@@ -246,7 +246,7 @@ impl std::error::Error for MailError {}
 
 /// Whether `epoch` may lease a message holding `lease` at `now`: it has none, it expired, or it
 /// belongs to an older epoch (a takeover voids it).
-fn is_free(lease: Option<&Lease>, epoch: u64, now: DateTime<Utc>) -> bool {
+pub fn is_free(lease: Option<&Lease>, epoch: u64, now: DateTime<Utc>) -> bool {
     match lease {
         None => true,
         Some(held) => held.until <= now || held.epoch != epoch,
