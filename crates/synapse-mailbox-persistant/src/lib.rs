@@ -22,14 +22,15 @@ use chrono::{DateTime, Utc};
 use persistant_kv::choose::{Durability, declared_durability};
 use persistant_kv::{BatchOp, KvBackend, KvOnRelational};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 use synapse::mailbox::{
-    DurabilityClass, Envelope, Lease, MailError, MailStore, MailTxn, StoreError, Stored, is_free,
+    DurabilityClass, Envelope, Lease, MailError, MailStore, MailTxn, QueueDepth, StoreError,
+    Stored, is_free,
 };
 use synapse::roles::RolesState;
 use tokio::runtime::Runtime;
@@ -104,7 +105,7 @@ impl SqliteMailStore {
             rt.shutdown_background();
             return Err(se("permissions", e));
         }
-        let mut store = Self::from_runtime(rt, kv, "mail.v2".into());
+        let mut store = Self::from_runtime(rt, kv, "mail.v3".into());
         store._lock = Some(lock);
         Ok(store)
     }
@@ -276,9 +277,72 @@ type Emit<'a> = dyn FnMut(&str, &[u8]) -> Result<bool, StoreError> + 'a;
 /// How many metas one backend call returns while scanning a queue.
 const PAGE: usize = 500;
 
+/// How many index entries `fetch` reads at a time: it usually wants the first few.
+const FREE_PAGE: usize = 64;
+
+/// A pull-based, paged scan of one key prefix with a transaction's pending writes applied on top
+/// (a pending put replaces or adds an entry, a pending delete hides one), in key order.
+struct Cursor<'a, K: KvBackend + Send + Sync + 'static> {
+    st: &'a PersistantMailStore<K>,
+    prefix: String,
+    page: usize,
+    after: Option<String>,
+    buf: VecDeque<(String, Vec<u8>)>,
+    exhausted: bool,
+    overlay: Vec<(String, Option<Vec<u8>>)>,
+    oi: usize,
+}
+
+impl<K: KvBackend + Send + Sync + 'static> Cursor<'_, K> {
+    fn refill(&mut self) -> Result<(), StoreError> {
+        let kv = Arc::clone(&self.st.kv);
+        let (p, a, n) = (self.prefix.clone(), self.after.clone(), self.page);
+        let page = self
+            .st
+            .run("scan", async move {
+                kv.ordered_scan_values(&p, a.as_deref(), n).await
+            })?
+            .map_err(|e| se("scan", e))?;
+        self.buf.extend(page.entries);
+        match page.next {
+            Some(n) => self.after = Some(n),
+            None => self.exhausted = true,
+        }
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<Option<(String, Vec<u8>)>, StoreError> {
+        loop {
+            while self.buf.is_empty() && !self.exhausted {
+                self.refill()?;
+            }
+            let backend = self.buf.front().map(|(k, _)| k.as_str());
+            let pending = self.overlay.get(self.oi).map(|(k, _)| k.as_str());
+            match (backend, pending) {
+                (None, None) => return Ok(None),
+                (Some(_), None) => return Ok(self.buf.pop_front()),
+                (Some(b), Some(o)) if b < o => return Ok(self.buf.pop_front()),
+                (b, Some(o)) => {
+                    // The pending write comes first, or replaces the backend entry of the same key.
+                    if b == Some(o) {
+                        self.buf.pop_front();
+                    }
+                    let (k, v) = self.overlay[self.oi].clone();
+                    self.oi += 1;
+                    if let Some(v) = v {
+                        return Ok(Some((k, v)));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Key layout, all under `<ns>/` (the namespace carries the layout version, so a store written by
 /// an earlier layout is never read as this one):
 /// `q/<role>/<seq:020>` meta, `b/<role>/<seq:020>` body, `i/<role>/<hex id>` seq of that id,
+/// `f/<role>/<seq:020>` a marker for each message with no lease, `l/<role>/<seq:020>` the
+/// `Lease` of each message that has one (so `fetch` and `depths` read only what they need),
 /// `s/<role>` (count, bytes), `a/<role>/<hex id>` ack time, `c/seq`, `r/state`.
 /// Zero-padded `seq` makes the backend's key order the queue's order.
 struct Tx<'a, K: KvBackend + Send + Sync + 'static> {
@@ -310,61 +374,33 @@ impl<K: KvBackend + Send + Sync + 'static> Tx<'_, K> {
             .map_err(|e| se("get", e))
     }
 
-    fn page(
-        &self,
-        prefix: &str,
-        after: Option<&str>,
-    ) -> Result<persistant_kv::ValuePage, StoreError> {
-        let kv = Arc::clone(&self.st.kv);
-        let (p, a) = (prefix.to_string(), after.map(str::to_string));
-        self.st
-            .run("scan", async move {
-                kv.ordered_scan_values(&p, a.as_deref(), PAGE).await
-            })?
-            .map_err(|e| se("scan", e))
+    fn cursor(&self, prefix: String, page: usize) -> Cursor<'_, K> {
+        let overlay: Vec<(String, Option<Vec<u8>>)> = self
+            .writes
+            .range(prefix.clone()..)
+            .take_while(|(k, _)| k.starts_with(prefix.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        Cursor {
+            st: self.st,
+            prefix,
+            page,
+            after: None,
+            buf: VecDeque::new(),
+            exhausted: false,
+            overlay,
+            oi: 0,
+        }
     }
 
     /// Every entry under `prefix` in key order, this transaction's writes applied on top of what
     /// the backend holds, stopping when `emit` returns `false` (so a caller that needs the first
     /// few entries reads one page, not the queue).
     fn for_each(&self, prefix: &str, emit: &mut Emit<'_>) -> Result<(), StoreError> {
-        let mut overlay = self
-            .writes
-            .range(prefix.to_string()..)
-            .take_while(|(k, _)| k.starts_with(prefix))
-            .peekable();
-        let mut after: Option<String> = None;
-        loop {
-            let page = self.page(prefix, after.as_deref())?;
-            for (k, v) in &page.entries {
-                // Overlay entries that sort before this backend entry.
-                while let Some((ok, ov)) = overlay.next_if(|(ok, _)| ok.as_str() < k.as_str()) {
-                    if let Some(val) = ov
-                        && !emit(ok, val)?
-                    {
-                        return Ok(());
-                    }
-                }
-                // The overlay replaces or deletes this very key.
-                let keep_going = match overlay.next_if(|(ok, _)| ok.as_str() == k.as_str()) {
-                    Some((_, Some(val))) => emit(k, val)?,
-                    Some((_, None)) => true,
-                    None => emit(k, v)?,
-                };
-                if !keep_going {
-                    return Ok(());
-                }
-            }
-            match page.next {
-                Some(n) => after = Some(n),
-                None => break,
-            }
-        }
-        for (ok, ov) in overlay {
-            if let Some(val) = ov
-                && !emit(ok, val)?
-            {
-                return Ok(());
+        let mut cursor = self.cursor(prefix.to_string(), PAGE);
+        while let Some((k, v)) = cursor.next()? {
+            if !emit(&k, &v)? {
+                break;
             }
         }
         Ok(())
@@ -375,6 +411,23 @@ impl<K: KvBackend + Send + Sync + 'static> Tx<'_, K> {
             let meta: Meta = serde_json::from_slice(raw).map_err(|e| se("decode", e))?;
             Ok(f(meta))
         })
+    }
+
+    /// The first `limit` metas of the role's queue, one backend call.
+    fn for_each_meta_limit(
+        &self,
+        role: &str,
+        limit: usize,
+        f: &mut dyn FnMut(Meta),
+    ) -> Result<(), StoreError> {
+        let mut cursor = self.cursor(self.key('q', role, ""), limit.max(1));
+        for _ in 0..limit {
+            let Some((_, raw)) = cursor.next()? else {
+                break;
+            };
+            f(serde_json::from_slice(&raw).map_err(|e| se("decode", e))?);
+        }
+        Ok(())
     }
 
     fn meta(&self, role: &str, seq: u64) -> Result<Option<Meta>, StoreError> {
@@ -457,20 +510,82 @@ impl<K: KvBackend + Send + Sync + 'static> MailTxn for Tx<'_, K> {
         now: DateTime<Utc>,
         visit: &mut dyn FnMut(&Stored) -> bool,
     ) -> Result<(), StoreError> {
-        let mut failed = None;
-        self.for_each_meta(role, &mut |meta| {
-            if !is_free(meta.lease.as_ref(), epoch, now) {
-                return true;
-            }
-            match self.body(role, meta.seq) {
-                Ok(body) => visit(&meta.with_body(body)),
-                Err(e) => {
-                    failed = Some(e);
-                    false
+        // Two ordered streams, merged by seq: messages never leased (all free) and leased ones
+        // (free only when expired or held by an older epoch). Neither reads a message's metadata
+        // or body until it is chosen, and the scan stops at the first `false`.
+        let fprefix = self.key('f', role, "");
+        let lprefix = self.key('l', role, "");
+        let mut free = self.cursor(fprefix.clone(), FREE_PAGE);
+        let mut leased = self.cursor(lprefix.clone(), FREE_PAGE);
+        let mut next_free = free.next()?;
+        let mut next_leased = leased.next()?;
+        loop {
+            let take_free = match (&next_free, &next_leased) {
+                (None, None) => break,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some((f, _)), Some((l, _))) => f[fprefix.len()..] < l[lprefix.len()..],
+            };
+            let seq: u64 = if take_free {
+                let (k, _) = next_free.take().expect("checked above");
+                next_free = free.next()?;
+                k[fprefix.len()..]
+                    .parse()
+                    .map_err(|_| StoreError("bad free key".into()))?
+            } else {
+                let (k, v) = next_leased.take().expect("checked above");
+                next_leased = leased.next()?;
+                let lease: Lease = serde_json::from_slice(&v).map_err(|e| se("decode", e))?;
+                if !is_free(Some(&lease), epoch, now) {
+                    continue;
                 }
+                k[lprefix.len()..]
+                    .parse()
+                    .map_err(|_| StoreError("bad lease key".into()))?
+            };
+            let Some(meta) = self.meta(role, seq)? else {
+                continue;
+            };
+            // The metadata is the authority; the indexes only say where to look.
+            if !is_free(meta.lease.as_ref(), epoch, now) {
+                continue;
             }
+            let body = self.body(role, seq)?;
+            if !visit(&meta.with_body(body)) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn queue_depth(
+        &self,
+        role: &str,
+        epoch: u64,
+        now: DateTime<Utc>,
+    ) -> Result<QueueDepth, StoreError> {
+        let (total, _) = self.counts(role)?;
+        let total = usize::try_from(total).unwrap_or(usize::MAX);
+        // Only the leased messages are read: those held by this epoch and unexpired are `leased`,
+        // everything else is `queued`.
+        let mut leased = 0_usize;
+        let mut cursor = self.cursor(self.key('l', role, ""), PAGE);
+        while let Some((_, v)) = cursor.next()? {
+            let lease: Lease = serde_json::from_slice(&v).map_err(|e| se("decode", e))?;
+            if lease.epoch == epoch && lease.until > now {
+                leased += 1;
+            }
+        }
+        // Sequence numbers rise with enqueue time, so the oldest arrival is the first row's.
+        let mut oldest = None;
+        self.for_each_meta_limit(role, 1, &mut |meta| {
+            oldest = Some(meta.enqueued_at);
         })?;
-        failed.map_or(Ok(()), Err)
+        Ok(QueueDepth {
+            queued: total.saturating_sub(leased),
+            leased,
+            oldest_enqueued_at: oldest,
+        })
     }
 
     fn queued(&self, role: &str, id: &str) -> Result<Option<Stored>, StoreError> {
@@ -509,6 +624,21 @@ impl<K: KvBackend + Send + Sync + 'static> MailTxn for Tx<'_, K> {
         let raw = serde_json::to_vec(&meta).map_err(|e| se("encode", e))?;
         let qkey = self.qkey(role, seq);
         self.stage(qkey, raw);
+        let (fkey, lkey) = (
+            self.key('f', role, &format!("{seq:020}")),
+            self.key('l', role, &format!("{seq:020}")),
+        );
+        match &stored.lease {
+            Some(lease) => {
+                let raw = serde_json::to_vec(lease).map_err(|e| se("encode", e))?;
+                self.stage(lkey, raw);
+                self.del(fkey);
+            }
+            None => {
+                self.stage(fkey, b"1".to_vec());
+                self.del(lkey);
+            }
+        }
         if existing.is_none() {
             let bkey = self.bkey(role, seq);
             self.stage(bkey, stored.envelope.body);
@@ -530,9 +660,15 @@ impl<K: KvBackend + Send + Sync + 'static> MailTxn for Tx<'_, K> {
             self.bkey(role, seq),
             self.key('i', role, &hex(id)),
         );
+        let (fkey, lkey) = (
+            self.key('f', role, &format!("{seq:020}")),
+            self.key('l', role, &format!("{seq:020}")),
+        );
         self.del(qkey);
         self.del(bkey);
         self.del(ikey);
+        self.del(fkey);
+        self.del(lkey);
         let (count, bytes) = self.counts(role)?;
         self.set_counts(
             role,
