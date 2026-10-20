@@ -49,6 +49,16 @@ fn config(home: &std::path::Path) -> DaemonConfig {
     }
 }
 
+/// `SYNAPSE_TEST_STORE=sqlite` (with `--features sqlite-store`) runs this whole suite against the
+/// PersistAnt SQLite store; unset, against redb.
+fn open_daemon(cfg: &DaemonConfig) -> Result<Daemon, DaemonError> {
+    #[cfg(feature = "sqlite-store")]
+    if std::env::var("SYNAPSE_TEST_STORE").as_deref() == Ok("sqlite") {
+        return Daemon::open_with(cfg, synapsed::StoreKind::Sqlite);
+    }
+    Daemon::open(cfg)
+}
+
 async fn start() -> Running {
     start_with(None).await
 }
@@ -60,7 +70,7 @@ async fn start_with(security: Option<SecurityConfig>) -> Running {
 async fn start_daemon(security: Option<SecurityConfig>, pause: Option<Pause>) -> Running {
     let home = tempfile::tempdir().unwrap();
     Keystore::init_account(home.path(), "acct").expect("init account");
-    let mut daemon = Daemon::open(&config(home.path())).expect("open daemon");
+    let mut daemon = open_daemon(&config(home.path())).expect("open daemon");
     if let Some(security) = security {
         daemon = daemon.with_security(security);
     }
@@ -570,7 +580,7 @@ fn a_non_loopback_bind_is_refused() {
 async fn a_second_daemon_on_the_same_home_fails() {
     let d = start().await;
     assert!(
-        Daemon::open(&config(d.home.path())).is_err(),
+        open_daemon(&config(d.home.path())).is_err(),
         "the store lock keeps one daemon"
     );
     d.stop().await;

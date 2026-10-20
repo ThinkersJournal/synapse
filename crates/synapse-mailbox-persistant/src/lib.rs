@@ -46,10 +46,13 @@ fn se(what: &str, e: impl std::fmt::Display) -> StoreError {
 
 /// A mailbox store over any PersistAnt [`KvBackend`] with `batch` and `Require`.
 pub struct PersistantMailStore<K: KvBackend + Send + Sync + 'static> {
-    rt: Runtime,
+    /// `Some` until drop, which must not block (see the `Drop` impl).
+    rt: Option<Runtime>,
     kv: Arc<K>,
     ns: String,
     timeout: Duration,
+    /// Held for the store's life by [`SqliteMailStore::open`]: one process per database file.
+    _lock: Option<std::fs::File>,
 }
 
 /// The SQLite store, opened for power-loss durability.
@@ -57,23 +60,98 @@ pub type SqliteMailStore = PersistantMailStore<KvOnRelational<persistant_sqlx::S
 
 impl SqliteMailStore {
     /// Open (creating if missing) a SQLite file with WAL and `synchronous=FULL`
-    /// (`SqliteBackend::open_durable`), declared `Machine` by PersistAnt.
+    /// (`SqliteBackend::open_durable`), declared `Machine` by PersistAnt. Like the redb store, a new
+    /// file is created owner-only (Unix `0600`; on Windows it inherits the profile's ACL) and every
+    /// open refuses a file broader than its owner. Safe to call from inside a tokio runtime.
     ///
     /// # Errors
-    /// When the database cannot be opened.
+    /// When the file is too open, or the database cannot be opened.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let rt = new_runtime()?;
         let path = path.as_ref().to_path_buf();
-        let kv = rt
-            .block_on(async move {
-                let db = persistant_sqlx::SqliteBackend::open_durable(path)
+        #[cfg(unix)]
+        create_owner_only(&path).map_err(|e| se("create", e))?;
+        if path.exists() {
+            synapse::keystore::check_owner_only(&path, "mail store")
+                .map_err(|e| se("permissions", e))?;
+        }
+        let lock = lock_exclusive(&path)?;
+        let rt = new_runtime()?;
+        let opened = {
+            let p = path.clone();
+            rt.handle().clone().spawn(async move {
+                let db = persistant_sqlx::SqliteBackend::open_durable(p)
                     .await
                     .map_err(|e| se("open sqlite", e))?;
                 KvOnRelational::open(db).await.map_err(|e| se("open kv", e))
             })
-            .map_err(|e: StoreError| e)?;
-        Ok(Self::from_runtime(rt, kv, "mail".into()))
+        };
+        let kv = match wait(&rt, opened) {
+            Ok(kv) => kv,
+            Err(e) => {
+                rt.shutdown_background();
+                return Err(e);
+            }
+        };
+        if let Err(e) = synapse::keystore::check_owner_only(&path, "mail store") {
+            rt.shutdown_background();
+            return Err(se("permissions", e));
+        }
+        let mut store = Self::from_runtime(rt, kv, "mail".into());
+        store._lock = Some(lock);
+        Ok(store)
     }
+}
+
+/// An exclusive lock on `<path>.lock`, held until the returned handle drops. The mailbox keeps its
+/// role epochs in memory, so two processes serving one database would hand out clashing epochs;
+/// redb's own file lock gives the redb store this, SQLite has none.
+fn lock_exclusive(path: &Path) -> Result<std::fs::File, StoreError> {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    let lock_path = std::path::PathBuf::from(name);
+    #[cfg(unix)]
+    create_owner_only(&lock_path).map_err(|e| se("create lock", e))?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| se("open lock", e))?;
+    file.try_lock().map_err(|e| {
+        StoreError(format!(
+            "another process holds the mail store ({}): {e}",
+            lock_path.display()
+        ))
+    })?;
+    Ok(file)
+}
+
+/// Wait for a task on `rt` without `block_on`, so this works inside another tokio runtime.
+fn wait<T: Send + 'static>(
+    rt: &Runtime,
+    task: tokio::task::JoinHandle<Result<T, StoreError>>,
+) -> Result<T, StoreError> {
+    let (tx, rx) = mpsc::channel();
+    rt.spawn(async move {
+        let _ = tx.send(task.await);
+    });
+    match rx.recv() {
+        Ok(Ok(r)) => r,
+        _ => Err(StoreError("open: the backend task died".into())),
+    }
+}
+
+/// A new file starts owner-only (`0600`); an existing one is left as it is.
+#[cfg(unix)]
+fn create_owner_only(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map(drop)
 }
 
 fn new_runtime() -> Result<Runtime, StoreError> {
@@ -97,11 +175,16 @@ impl<K: KvBackend + Send + Sync + 'static> PersistantMailStore<K> {
 
     fn from_runtime(rt: Runtime, kv: K, ns: String) -> Self {
         PersistantMailStore {
-            rt,
+            rt: Some(rt),
             kv: Arc::new(kv),
             ns,
             timeout: DEFAULT_TIMEOUT,
+            _lock: None,
         }
+    }
+
+    fn rt(&self) -> &Runtime {
+        self.rt.as_ref().expect("the runtime lives until drop")
     }
 
     /// Bound every backend call by `timeout` (a stall becomes an `Err`, nothing changed).
@@ -119,7 +202,7 @@ impl<K: KvBackend + Send + Sync + 'static> PersistantMailStore<K> {
     ) -> Result<T, StoreError> {
         let (tx, rx) = mpsc::channel();
         let timeout = self.timeout;
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             let out = tokio::time::timeout(timeout, fut).await;
             let _ = tx.send(out);
         });
@@ -129,6 +212,17 @@ impl<K: KvBackend + Send + Sync + 'static> PersistantMailStore<K> {
                 "{what}: no answer from the backend within {timeout:?}"
             ))),
             Err(_) => Err(StoreError(format!("{what}: the backend task died"))),
+        }
+    }
+}
+
+/// Dropping a tokio runtime blocks, which panics inside another runtime (a daemon drops its store
+/// while shutting down on one). `shutdown_background` does not wait for tasks, and every `write`
+/// has already returned, so nothing of ours is in flight.
+impl<K: KvBackend + Send + Sync + 'static> Drop for PersistantMailStore<K> {
+    fn drop(&mut self) {
+        if let Some(rt) = self.rt.take() {
+            rt.shutdown_background();
         }
     }
 }

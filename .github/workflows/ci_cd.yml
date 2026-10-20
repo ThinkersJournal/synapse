@@ -303,6 +303,56 @@ jobs:
         # dashboard, which reads as a fresh one.
         fail_ci_if_error: true
 
+  # THE SQLITE STORE (board 229) IS A SEPARATE, NON-REQUIRED JOB (PM ruling 2026-10-20): the daemon's
+  # API suite takes ~10 minutes against SQLite (about 21 seconds against redb), and `sqlite-store` is
+  # off by default, so no step of `build` compiles it. Not in branch protection; a red here is read
+  # as a finding about the SQLite store, and `Build and Test` stays the gate for everything else.
+  sqlite-store:
+    name: SQLite store (signal, not a gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Cache Cargo dependencies
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-sqlite-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-sqlite-
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config libpq-dev protobuf-compiler
+
+    - name: Install stable toolchain
+      uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+        components: clippy
+
+    - name: Clippy, sqlite-store
+      if: always()
+      run: cargo clippy --locked -p synapsed -p synapse-mailbox-persistant --features synapsed/sqlite-store --all-targets -- -D warnings
+
+    - name: Adapter tests
+      if: always()
+      run: cargo test --locked -p synapse-mailbox-persistant --no-fail-fast
+
+    - name: Daemon API suite against the SQLite store
+      if: always()
+      env:
+        SYNAPSE_TEST_STORE: sqlite
+      run: cargo test --locked -p synapsed --features sqlite-store --test api --no-fail-fast
+
   # The WebAssembly package has its own job so that `Build and Test` can be a
   # required check. While it was a step of that job, it failed on every run with
   # `cd: wasm: No such file or directory` -- there is no `wasm/` directory in this

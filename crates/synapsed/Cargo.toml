@@ -18,8 +18,8 @@ name = "synapsed"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.108" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.108" }
+synapse = { path = "../..", version = "6.0.0-rc.109" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.109" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
 tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -28,6 +28,12 @@ base64 = "0.23"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 ring = "0.17"
 uuid = { version = "1.6", features = ["v4"] }
+synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.109", optional = true }
+
+[features]
+# Off by default: serve the mailbox from PersistAnt SQLite (WAL, synchronous=FULL; declared Machine)
+# instead of redb. Selected at run time with SYNAPSE_MAILBOX_STORE=sqlite. Board 229.
+sqlite-store = ["dep:synapse-mailbox-persistant"]
 
 [dev-dependencies]
 reqwest = { version = "0.13.5", features = ["json"] }

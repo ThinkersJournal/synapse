@@ -97,3 +97,59 @@ fn a_reopen_keeps_queue_acks_and_epochs() {
         "the unacked message survives, the acked one does not"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn the_store_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = fresh_path();
+    drop(SqliteMailStore::open(&path).unwrap());
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        SqliteMailStore::open(&path).is_err(),
+        "a widened store file is refused"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn the_store_file_is_owner_only() {
+    let path = fresh_path();
+    drop(SqliteMailStore::open(&path).unwrap());
+    assert!(
+        SqliteMailStore::open(&path).is_ok(),
+        "control: a fresh store reopens"
+    );
+    let status = std::process::Command::new("icacls")
+        .arg(&path)
+        .arg("/grant")
+        .arg("*S-1-1-0:R")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("icacls runs");
+    assert!(status.success(), "icacls did not apply the grant");
+    assert!(
+        SqliteMailStore::open(&path).is_err(),
+        "a store Everyone can read is refused"
+    );
+}
+
+/// `synapsed` opens its store from inside `#[tokio::main]`; a `block_on` there would panic.
+#[tokio::test]
+async fn open_works_inside_a_tokio_runtime() {
+    let store = SqliteMailStore::open(fresh_path()).unwrap();
+    assert_eq!(store.durability(), DurabilityClass::Machine);
+}
+
+/// The mailbox keeps its role epochs in memory, so one database file has one serving process.
+#[test]
+fn a_second_open_of_a_live_store_is_refused() {
+    let path = fresh_path();
+    let first = SqliteMailStore::open(&path).unwrap();
+    let err = SqliteMailStore::open(&path).err().expect("refused");
+    assert!(err.0.contains("another process holds"), "{err}");
+    drop(first);
+    SqliteMailStore::open(&path).expect("control: free again once the first is dropped");
+}
