@@ -18,7 +18,7 @@ store does not meet it. A need with no enforcement named is a gap, listed at the
 | 6 | **Idempotence.** A duplicate id while queued is not queued twice; an ack is idempotent; a resend after ack is reported a duplicate. | `a_duplicate_while_queued_is_not_queued_twice`, `ack_is_idempotent`, `ack_removes_for_good_and_a_resend_is_a_duplicate`. |
 | 7 | **Bounds without loss.** A full queue refuses the sender and drops nothing; a full dead set keeps the message queued. | `the_bound_refuses_by_count_and_by_bytes_and_keeps_the_queue`, `a_full_dead_set_keeps_the_message_queued`. |
 | 8 | **Roles written through.** Claims and epochs persist in the store and a reopen continues from them. | `claims_are_written_through_the_store`; `tests/mailbox.rs` (poison and reopen). |
-| 9 | **Stalls become errors.** A store that can stall (MySQL did in PersistAnt's disk-full test, 2026-10-18) must return `Err` within a bound rather than block `write` forever. | **Not yet enforced.** The adapter will carry its own timeout; a conformance case is owed with it. |
+| 9 | **Stalls become errors.** A store that can stall (MySQL did in PersistAnt's disk-full test, 2026-10-18) must return `Err` within a bound rather than block `write` forever; a timed-out write has an unknown outcome, so a retry under the same id must leave one copy. | `conformance::a_stalled_backend_returns_an_error_not_a_hang` (not in `run_all`: it needs a stall switch, so a store that can stall runs it beside it). Run by `synapse-mailbox-persistant` in `tests/stall.rs`. |
 
 `run_all` runs the semantic cases (2-8) over `Mailbox::open_volatile`, so a `Process` store can still be checked for
 semantics. A store that will hold real mail must also pass `declares_the_needed_durability`.
@@ -28,7 +28,7 @@ semantics. A store that will hold real mail must also pass `declares_the_needed_
 - **Machine is declared, not verified, for redb.** `RedbStore` declares `Machine` because redb commits at its default
   `Durability::Immediate` and this store never lowers it. Synapse has no power-cut test of its own; the crash test aborts
   the process, which is Process-class evidence.
-- **Need 9** has no case yet.
+- **Need 9** is a case beside `run_all`, not inside it, so a new stallable store can forget to run it.
 - **A backend's declaration is trusted.** For a PersistAnt-backed store, the declaration must come from PersistAnt's
   verified class for the configuration actually opened (for SQLite, `open_durable`: WAL + `synchronous=FULL`), never from
   the backend family.
