@@ -12,6 +12,7 @@ Measured at `origin/main` f9f49af (rc.115) with `cargo publish --dry-run --locke
 | 6 | `synapsed` | 1, 2, 3 (optional dep) |
 | 7 | `synapsectl` | 1, 2, 4 |
 | 8 | `synapse-claude-channel` | 1, 5 (4 as a dev-dependency) |
+| 9 | `synapse-agent` | 1, 5 (4 as a dev-dependency) |
 
 `cargo publish --dry-run` verifies only `synapse`: every other crate fails at resolve until its predecessors are on the index (`synapse ^6.0.0-rc.N` not found). Run the dry-run for each crate after the one before it is published, and wait for the index to show it.
 

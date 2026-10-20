@@ -214,6 +214,20 @@ impl SynapseMcpServer {
             .collect())
     }
 
+    /// Send `body` (UTF-8 text) to `to` under `message_id`, as the `send` tool does. The daemon
+    /// dedupes on the id, so resending the same id after a crash queues nothing twice.
+    pub async fn deliver(&self, to: String, message_id: String, body: &str) -> Result<(), String> {
+        let inner = self.inner.clone();
+        let body = encode_body(body.as_bytes());
+        tokio::task::spawn_blocking(move || {
+            send_call(&inner.daemon, &inner.role, to, &message_id, &body)
+        })
+        .await
+        .map_err(|_| "the call task failed".to_string())?
+        .map_err(|e| describe(&e))?;
+        Ok(())
+    }
+
     /// Acknowledge a message returned by [`Self::pull`].
     pub async fn confirm(&self, message_id: String) -> Result<(), String> {
         let inner = self.inner.clone();
@@ -378,6 +392,30 @@ fn unique_id() -> String {
     )
 }
 
+/// `/v1/send`. A bare `to` is a role in the sender's own account: its global id carries the account.
+fn send_call(
+    daemon: &Daemon,
+    role: &str,
+    to: String,
+    id: &str,
+    body_b64: &str,
+) -> Result<Value, MailError> {
+    let to = if to.contains('@') {
+        to
+    } else {
+        let me = daemon.session_info(role)?;
+        match me.global_id.split_once('@') {
+            Some((_, account)) => format!("{to}@{account}"),
+            None => to,
+        }
+    };
+    daemon.call(
+        role,
+        "/v1/send",
+        Some(&json!({"to": to, "message_id": id, "body_b64": body_b64})),
+    )
+}
+
 #[tool_router(server_handler, vis = "pub")]
 impl SynapseMcpServer {
     #[tool(
@@ -390,24 +428,8 @@ impl SynapseMcpServer {
         let id = args.message_id.unwrap_or_else(unique_id);
         let to = args.to;
         let body = encode_body(args.body.as_bytes());
-        self.daemon(move |daemon, role| {
-            // A bare role is in the sender's own account: its global id carries the account.
-            let to = if to.contains('@') {
-                to
-            } else {
-                let me = daemon.session_info(role)?;
-                match me.global_id.split_once('@') {
-                    Some((_, account)) => format!("{to}@{account}"),
-                    None => to,
-                }
-            };
-            daemon.call(
-                role,
-                "/v1/send",
-                Some(&json!({"to": to, "message_id": id, "body_b64": body})),
-            )
-        })
-        .await
+        self.daemon(move |daemon, role| send_call(daemon, role, to, &id, &body))
+            .await
     }
 
     #[tool(
