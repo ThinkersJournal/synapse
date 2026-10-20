@@ -1,0 +1,2 @@
+# bash fails on CRLF; autocrlf would check these out with it on Windows
+crates/synapse-agent/smoke/*.sh text eol=lf

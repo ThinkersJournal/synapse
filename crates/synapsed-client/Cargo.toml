@@ -10,8 +10,8 @@ repository = "https://github.com/ThinkersJournal/synapse"
 readme = "README.md"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.119", default-features = false, features = ["native-base"] }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.119" }
+synapse = { path = "../..", version = "6.0.0-rc.120", default-features = false, features = ["native-base"] }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.120" }
 chrono = "0.4"
 # Loopback HTTP only: no TLS stack and no system proxy (board 104: no new non-Rust deps).
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json"] }
