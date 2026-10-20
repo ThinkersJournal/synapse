@@ -44,6 +44,15 @@ fn hex(s: &str) -> String {
     s.bytes().map(|b| format!("{b:02x}")).collect()
 }
 
+fn unhex(s: &str) -> Result<String, StoreError> {
+    let bytes = (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2).unwrap_or("zz"), 16))
+        .collect::<Result<Vec<u8>, _>>()
+        .map_err(|_| StoreError("bad hex key".into()))?;
+    String::from_utf8(bytes).map_err(|_| StoreError("bad hex key".into()))
+}
+
 fn se(what: &str, e: impl std::fmt::Display) -> StoreError {
     StoreError(format!("{what}: {e}"))
 }
@@ -705,6 +714,48 @@ impl<K: KvBackend + Send + Sync + 'static> MailTxn for Tx<'_, K> {
             self.del(k);
         }
         Ok(n)
+    }
+
+    fn queue_roles(&self) -> Result<Vec<String>, StoreError> {
+        // A count row exists for every role that ever held a message; keep those that hold some.
+        let prefix = format!("{}/s/", self.st.ns);
+        let mut roles = Vec::new();
+        self.for_each(&prefix, &mut |k, raw| {
+            let (count, _): (u64, u64) =
+                serde_json::from_slice(raw).map_err(|e| se("decode", e))?;
+            if count > 0 {
+                roles.push(unhex(&k[prefix.len()..])?);
+            }
+            Ok(true)
+        })?;
+        Ok(roles)
+    }
+
+    fn all_acked(&self) -> Result<Vec<(String, String, DateTime<Utc>)>, StoreError> {
+        let prefix = format!("{}/a/", self.st.ns);
+        let mut out = Vec::new();
+        self.for_each(&prefix, &mut |k, raw| {
+            let (role, id) = k[prefix.len()..]
+                .split_once('/')
+                .ok_or_else(|| StoreError("bad acked key".into()))?;
+            let at = serde_json::from_slice(raw).map_err(|e| se("decode", e))?;
+            out.push((unhex(role)?, unhex(id)?, at));
+            Ok(true)
+        })?;
+        Ok(out)
+    }
+
+    fn seq_counter(&self) -> Result<u64, StoreError> {
+        match self.get(&format!("{}/c/seq", self.st.ns))? {
+            Some(r) => serde_json::from_slice(&r).map_err(|e| se("decode", e)),
+            None => Ok(0),
+        }
+    }
+
+    fn set_seq_counter(&mut self, value: u64) -> Result<(), StoreError> {
+        let raw = serde_json::to_vec(&value).map_err(|e| se("encode", e))?;
+        self.stage(format!("{}/c/seq", self.st.ns), raw);
+        Ok(())
     }
 
     fn next_seq(&mut self) -> Result<u64, StoreError> {
