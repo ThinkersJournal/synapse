@@ -264,3 +264,41 @@ fn a_store_declaring_less_than_machine_is_refused_at_open() {
     )
     .expect("open_volatile");
 }
+
+/// A store whose writes all fail, as a full volume's do: reads go through the inner store.
+struct NoRoomStore(MemoryStore);
+
+impl MailStore for NoRoomStore {
+    fn durability(&self) -> synapse::mailbox::DurabilityClass {
+        self.0.durability()
+    }
+
+    fn write(
+        &self,
+        _f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
+    ) -> Result<(), MailError> {
+        Err(MailError::Store(synapse::mailbox::StoreError(
+            "database or disk is full".into(),
+        )))
+    }
+
+    fn read(
+        &self,
+        f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
+    ) -> Result<(), MailError> {
+        self.0.write(f)
+    }
+}
+
+/// Opening a mailbox, and asking its depths, only read: a store with no room to write (a full
+/// disk) must still open, so the mail it acknowledged earlier can be read back.
+#[test]
+fn opening_and_depths_need_no_room_to_write() {
+    let mb = Mailbox::open_volatile(
+        NoRoomStore(MemoryStore::new()),
+        MailConfig::default(),
+        suite::t0() - chrono::Duration::seconds(1),
+    )
+    .expect("open reads, it does not write");
+    mb.depths(suite::t0()).expect("depths reads, it does not write");
+}
