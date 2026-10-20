@@ -181,7 +181,7 @@ jobs:
     # Not --locked: the step above deletes crates/ and empties `members`, so the resolved graph
     # legitimately differs from the committed Cargo.lock (it loses the adapters' entries).
     - name: The core builds and passes with no adapter present
-      run: cargo test --locked -p synapse --verbose --no-fail-fast
+      run: cargo test -p synapse --verbose --no-fail-fast
 
   # COVERAGE IS A SIGNAL, NOT A GATE (agreed with CireSnave 2026-10-03; a pilot with
   # mlmf and coderipper). This job is NOT a required check, sets no threshold, and
