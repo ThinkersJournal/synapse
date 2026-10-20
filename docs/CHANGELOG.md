@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (rc.117): CI cargo commands take `--locked` (CodeRipper SUP-001)
 
-The two `cargo tree` rmcp checks and the two `cargo metadata` calls in `.github/workflows/ci_cd.yml` ran without `--locked`, so they could resolve against a lock the build jobs had not used. All now pass `--locked`. `cargo test -p synapse` in the core-only job stays unlocked on purpose: the step before it deletes `crates/`, so the lock cannot match (a first attempt to lock it failed that required job). No source change.
+The two `cargo tree` rmcp checks and the two `cargo metadata` calls in `.github/workflows/ci_cd.yml` ran without `--locked`, so they could resolve against a lock the build jobs had not used. All now pass `--locked`. `cargo test -p synapse` in the core-only job stays unlocked on purpose: the step before it deletes `crates/`, so the lock cannot match (a first attempt to lock it failed that required job). A `.coderipper.toml` waiver records the exception. No source change.
 
 ### Changed (rc.116): PersistAnt 0.9 (dependency rule: latest)
 
