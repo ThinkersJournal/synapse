@@ -10,7 +10,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use genai::adapter::AdapterKind;
-use genai::chat::{ChatMessage, ChatRequest};
+use genai::chat::{ChatMessage, ChatRequest, Tool, ToolResponse};
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
 use synapse_mcp_server::{MessageView, SynapseMcpServer};
@@ -45,8 +45,15 @@ pub struct StepReport {
 
 /// Something that answers a message: the model.
 pub trait Responder: Send + Sync + 'static {
-    /// Answer `body`, sent by `from` (the sender's global id, verified by the daemon).
-    fn reply(&self, from: &str, body: &str) -> impl Future<Output = Result<String, String>> + Send;
+    /// Answer `body`, sent by `from` (the sender's global id, verified by the daemon) as message
+    /// `id`. Anything the responder sends itself must be under ids derived from `id`, so a retry
+    /// of the same message repeats ids the daemon already knows instead of sending twice.
+    fn reply(
+        &self,
+        id: &str,
+        from: &str,
+        body: &str,
+    ) -> impl Future<Output = Result<String, String>> + Send;
 }
 
 /// Delivery attempts after which a message that keeps failing is dropped rather than retried for
@@ -116,7 +123,7 @@ impl<R: Responder> Agent<R> {
             .as_str()
             .map(str::to_string)
             .ok_or("a message whose body is not UTF-8 text")?;
-        let answer = self.responder.reply(from, &body).await?;
+        let answer = self.responder.reply(id, from, &body).await?;
         self.server
             .deliver(from.to_string(), reply_id(id), &answer)
             .await
@@ -137,6 +144,57 @@ impl<R: Responder> Agent<R> {
 pub struct GenaiResponder {
     client: Client,
     model: String,
+    send: Option<SendTool>,
+}
+
+/// Model turns allowed per message (each tool round is one more call).
+const MAX_ROUNDS: usize = 4;
+/// Sends one message may make through the tool.
+const MAX_TOOL_SENDS: usize = 3;
+const SEND_TOOL: &str = "send_message";
+
+/// The one tool the model may be given: send a message to a role on an allow-list.
+///
+/// The mail that prompts the model is untrusted, so the model can be talked into calling this with
+/// anything. The allow-list is what bounds that: a recipient outside it is refused (and the model
+/// is told so), at most [`MAX_TOOL_SENDS`] go out per message, and every send uses an id derived
+/// from the message's, so a retried message does not send twice.
+struct SendTool {
+    server: SynapseMcpServer,
+    allowed: Vec<String>,
+}
+
+impl SendTool {
+    fn definition() -> Tool {
+        Tool::new(SEND_TOOL)
+            .with_description("Send a text message to another agent (role) on the network. Only some recipients are permitted; a refused call says so.")
+            .with_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "The recipient's role name"},
+                    "body": {"type": "string", "description": "The message text"}
+                },
+                "required": ["to", "body"]
+            }))
+    }
+
+    /// Run one call; the result is what the model reads next.
+    async fn call(&self, id: &str, n: usize, args: &serde_json::Value) -> String {
+        let (Some(to), Some(body)) = (args["to"].as_str(), args["body"].as_str()) else {
+            return "refused: `to` and `body` must both be text".into();
+        };
+        if !self.allowed.iter().any(|a| a == to) {
+            return format!("refused: you may not send to {to:?}");
+        }
+        if n >= MAX_TOOL_SENDS {
+            return format!("refused: at most {MAX_TOOL_SENDS} sends per message");
+        }
+        let id = format!("{}-t{n}", reply_id(id));
+        match self.server.deliver(to.to_string(), id, body).await {
+            Ok(()) => "sent".into(),
+            Err(e) => format!("failed: {e}"),
+        }
+    }
 }
 
 impl GenaiResponder {
@@ -146,6 +204,7 @@ impl GenaiResponder {
         Ok(GenaiResponder {
             client: Client::new().map_err(|e| e.to_string())?,
             model: model.to_string(),
+            send: None,
         })
     }
 
@@ -168,26 +227,57 @@ impl GenaiResponder {
                 .build()
                 .expect("a client with one resolver"),
             model: model.to_string(),
+            send: None,
         }
+    }
+
+    /// Give the model a `send_message` tool that sends through `server` to the roles in `allowed`
+    /// (and nowhere else). Without this the model has no tools.
+    #[must_use]
+    pub fn with_send_tool(mut self, server: SynapseMcpServer, allowed: Vec<String>) -> Self {
+        self.send = Some(SendTool { server, allowed });
+        self
     }
 }
 
 impl Responder for GenaiResponder {
-    async fn reply(&self, from: &str, body: &str) -> Result<String, String> {
-        let request = ChatRequest::default()
+    async fn reply(&self, id: &str, from: &str, body: &str) -> Result<String, String> {
+        let mut request = ChatRequest::default()
             .with_system(SYSTEM_PROMPT)
             .append_message(ChatMessage::user(format!(
                 "From {from}:
 {body}"
             )));
-        let response = self
-            .client
-            .exec_chat(&self.model, request, None)
-            .await
-            .map_err(|e| format!("the model call failed: {e}"))?;
-        response
-            .first_text()
-            .map(str::to_string)
-            .ok_or_else(|| "the model returned no text".to_string())
+        if self.send.is_some() {
+            request = request.with_tools(vec![SendTool::definition()]);
+        }
+        let mut sent = 0;
+        for _ in 0..MAX_ROUNDS {
+            let response = self
+                .client
+                .exec_chat(&self.model, request.clone(), None)
+                .await
+                .map_err(|e| format!("the model call failed: {e}"))?;
+            if response.tool_calls().is_empty() {
+                return response
+                    .first_text()
+                    .map(str::to_string)
+                    .ok_or_else(|| "the model returned no text".to_string());
+            }
+            let calls = response.into_tool_calls();
+            request = request.append_message(calls.clone());
+            for call in calls {
+                let result = match (&self.send, call.fn_name.as_str()) {
+                    (Some(tool), SEND_TOOL) => {
+                        let result = tool.call(id, sent, &call.fn_arguments).await;
+                        sent += 1;
+                        result
+                    }
+                    _ => format!("refused: there is no tool {:?}", call.fn_name),
+                };
+                request = request.append_message(ToolResponse::new(call.call_id, result));
+            }
+        }
+        Err("the model kept calling tools".into())
     }
 }

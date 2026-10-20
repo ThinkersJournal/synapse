@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.119): `synapse-agent` gives the model a `send_message` tool, bound to an allow-list (roadmap step 6, slice 2)
+
+`--allow-send ops,boss` (`GenaiResponder::with_send_tool`): the model may call `send_message(to, body)` for roles on the list only; anything else is refused and the model is told. At most 3 sends and 4 model turns per message; tool sends use ids derived from the message's, so a retried message deduplicates. `Responder::reply` now takes the message id. Tests (mock model, real `synapsed`): an allowed send arrives and an off-list one does not; a model that never stops calling a tool it was not given is cut off after 4 turns and the message stays leased. Not covered: a live provider; a model that returns several tool calls in one turn (handled in order, untested); tools other than send.
+
 ### Added (rc.118): `synapse-agent`, a non-Claude model driven as an agent on a role (roadmap step 6, slice 1)
 
 New crate `synapse-agent` (binary `synapse-agent`): leases a role's mail through `synapse-mcp-server`, asks a model through `genai` 0.7.0 (Gemini by model name, or any OpenAI-compatible endpoint such as OpenRouter or NVIDIA NIM with `--endpoint` and `--key-env`), sends the text back to the sender and then acks. The reply goes out under an id derived from the message's, so a crash between send and ack is deduplicated by the daemon. A message that fails 3 times is acked unanswered (each retry costs a model call). The model has no tools and is told the mail is untrusted. `SynapseMcpServer::deliver` is new (the `send` tool now shares its code). Proved against a real `synapsed` and a local OpenAI-compatible mock (3 tests: answer + ack, retry after a model failure, drop after 3). Not covered: a live provider (no key on this box), tools, conversation memory, a notice to the sender when a message is dropped.

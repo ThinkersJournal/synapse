@@ -2,10 +2,11 @@
 //! `synapse-agent`: drives a non-Claude model as an agent on a Synapse role.
 //!
 //! Usage: `synapse-agent --role <role> --model <model> [--endpoint <url/> --key-env <VAR>]
-//! [--home <dir>] [--every <secs>]`. Without `--endpoint`, `genai` routes by model name and reads
+//! [--home <dir>] [--every <secs>] [--allow-send <role,role>]`. Without `--endpoint`, `genai` routes by model name and reads
 //! the provider's usual key variable (`GEMINI_API_KEY`, `OPENAI_API_KEY`, ...). With it the model is
 //! reached on an OpenAI-compatible endpoint (OpenRouter, NVIDIA NIM, a local server), keyed from
-//! `--key-env`. The key is read from the environment and never printed. Logs go to stderr.
+//! `--key-env`. `--allow-send` gives the model a `send_message` tool limited to those roles; without it
+//! the model has no tools. The key is read from the environment and never printed. Logs go to stderr.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,7 +15,7 @@ use std::time::Duration;
 use synapse_agent::{Agent, GenaiResponder};
 use synapse_mcp_server::{McpConfig, SynapseMcpServer};
 
-const USAGE: &str = "usage: synapse-agent --role <role> --model <model> [--endpoint <url/> --key-env <VAR>] [--home <dir>] [--every <secs>]";
+const USAGE: &str = "usage: synapse-agent --role <role> --model <model> [--endpoint <url/> --key-env <VAR>] [--home <dir>] [--every <secs>] [--allow-send <role,role>]";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -69,6 +70,13 @@ async fn main() -> ExitCode {
             eprintln!("synapse-agent: {e}");
             return ExitCode::FAILURE;
         }
+    };
+    let responder = match arg("--allow-send") {
+        Some(list) => responder.with_send_tool(
+            server.clone(),
+            list.split(',').map(|r| r.trim().to_string()).collect(),
+        ),
+        None => responder,
     };
     Agent::new(server, responder).run(every).await
 }
