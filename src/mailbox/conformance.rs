@@ -732,6 +732,76 @@ pub fn a_store_declaring_less_is_refused<S: MailStore>(make: impl Fn() -> S) {
     let _: DurabilityClass = declared;
 }
 
+/// A switch for a stallable store (need 9 of `docs/MAILBOX_STORE_NEEDS.md`): while it is set, the
+/// store's backend must never answer, as MySQL did on a full disk. Clone it into the backend.
+#[derive(Clone, Default)]
+pub struct Stall(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Stall {
+    #[must_use]
+    pub fn new() -> Self {
+        Stall::default()
+    }
+
+    pub fn set(&self, on: bool) {
+        self.0.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[must_use]
+    pub fn is_set(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Need 9: a store whose backend stops answering returns `Err` from `write` within `within` instead
+/// of hanging, and nothing is lost or doubled. `make` must build a store whose backend consults
+/// the [`Stall`] and whose own call bound is well under `within`. Not part of [`run_all`], which
+/// takes no stall switch; a store that can stall must run this beside it.
+///
+/// A timed-out write has an unknown outcome (it may have been applied), so the sender retries
+/// under the same message id; the case checks that the retry leaves exactly one copy.
+///
+/// # Panics
+/// When the stalled write returns `Ok` or takes longer than `within`, or the queue afterwards is
+/// not exactly the two messages once each.
+pub fn a_stalled_backend_returns_an_error_not_a_hang<S: MailStore>(
+    make: impl Fn(Stall) -> S,
+    within: std::time::Duration,
+) {
+    let stall = Stall::new();
+    let mut mb = Mailbox::open_volatile(
+        make(stall.clone()),
+        MailConfig::default(),
+        t0() - Duration::seconds(1),
+    )
+    .expect("open");
+    mb.enqueue(env("one", "lane@acct", b"1"), t0())
+        .expect("a healthy write");
+    stall.set(true);
+    let started = std::time::Instant::now();
+    let stalled = mb.enqueue(env("two", "lane@acct", b"2"), t0());
+    let took = started.elapsed();
+    assert!(
+        stalled.is_err(),
+        "a write against a stalled backend returned Ok"
+    );
+    assert!(
+        took < within,
+        "the stalled write took {took:?}, bound {within:?}"
+    );
+    stall.set(false);
+    mb.enqueue(env("two", "lane@acct", b"2"), t0())
+        .expect("the retry once the backend answers");
+    let ids = Ids::new();
+    let epoch = ids.claim(&mut mb, "lane", t0() + Duration::seconds(1));
+    let got = mb
+        .fetch("lane@acct", epoch, 10, None, t0() + Duration::seconds(2))
+        .expect("fetch");
+    let mut seen: Vec<&str> = got.iter().map(|d| d.envelope.message_id.as_str()).collect();
+    seen.sort_unstable();
+    assert_eq!(seen, ["one", "two"], "each message exactly once");
+}
+
 /// # Panics
 /// With the case name prefixed, on the first failing case.
 pub fn run_all<S: MailStore>(make: impl Fn() -> S) {

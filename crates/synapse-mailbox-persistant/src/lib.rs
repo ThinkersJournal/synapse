@@ -56,7 +56,8 @@ pub struct PersistantMailStore<K: KvBackend + Send + Sync + 'static> {
 }
 
 /// The SQLite store, opened for power-loss durability.
-pub type SqliteMailStore = PersistantMailStore<KvOnRelational<persistant_sqlx::SqliteBackend>>;
+pub type SqliteMailStore =
+    PersistantMailStore<KvOnRelational<persistant_sqlx::Bounded<persistant_sqlx::SqliteBackend>>>;
 
 impl SqliteMailStore {
     /// Open (creating if missing) a SQLite file with WAL and `synchronous=FULL`
@@ -82,7 +83,11 @@ impl SqliteMailStore {
                 let db = persistant_sqlx::SqliteBackend::open_durable(p)
                     .await
                     .map_err(|e| se("open sqlite", e))?;
-                KvOnRelational::open(db).await.map_err(|e| se("open kv", e))
+                // PersistAnt 0.8.20's call bound: a call that times out poisons its transaction,
+                // so a timed-out batch is rolled back rather than left half-open.
+                KvOnRelational::open(persistant_sqlx::Bounded::new(db, DEFAULT_TIMEOUT))
+                    .await
+                    .map_err(|e| se("open kv", e))
             })
         };
         let kv = match wait(&rt, opened) {
@@ -176,9 +181,13 @@ impl<K: KvBackend + Send + Sync + 'static> PersistantMailStore<K> {
     fn from_runtime(rt: Runtime, kv: K, ns: String) -> Self {
         PersistantMailStore {
             rt: Some(rt),
-            kv: Arc::new(kv),
             ns,
-            timeout: DEFAULT_TIMEOUT,
+            // Past the backend's own bound, if it has one, so the backend's error (and its
+            // rollback) comes first and this is only the backstop.
+            timeout: kv
+                .call_bound()
+                .map_or(DEFAULT_TIMEOUT, |b| b + Duration::from_secs(5)),
+            kv: Arc::new(kv),
             _lock: None,
         }
     }
