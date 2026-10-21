@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Security (rc.122): lock-only update of `rustls-webpki` and `webpki-root-certs`
+
+`cargo update -p rustls-webpki -p webpki-root-certs`: rustls-webpki 0.103.15 -> 0.103.16 (RUSTSEC-2026-0382) and webpki-root-certs 1.0.9 -> 1.0.10 (RUSTSEC-2026-0383). Only `Cargo.lock` and the version change; no source change.
+
 ### Changed (rc.120): `synapse-agent` live-smoke fixes (first live Gemini run, 2026-10-20)
 
 The PM's live run (Google AI Studio free tier, `gemini-3.8-flash`, reply `PONG`, attempts 1) passed and found two faults outside the transport. The smoke scripts move into the repo (`crates/synapse-agent/smoke/`): `smoke.sh` converts its bin dir with `cygpath` (a `C:/...` path split `PATH` at the colon) and takes the model from `SMOKE_MODEL` (default `gemini-3.8-flash`; `gemini-2.5-flash` now answers 404 "no longer available to new users"). The agent logs an HTTP 404/410 from the provider as "model ... is retired or unavailable to this key: pick another model" (test: a mock that answers 404, and a 500 that must not be called retired).
