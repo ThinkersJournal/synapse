@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.123): pilot T-0 runbook installs the SQLite build
+
+`docs/PILOT_T0_RUNBOOK.md` installs rc.123 (was rc.97) with `cargo install synapsed --features sqlite-store`, and says the agentlife task wrapper must set `SYNAPSE_MAILBOX_STORE=sqlite` before `-Register` (the wrapper carries only `SYNAPSE_HOME`, `SYNAPSE_ADDR`, `SYNAPSE_LAUNCHER_ROLES`). Docs only; no code change.
+
 ### Security (rc.122): lock-only update of `rustls-webpki` and `webpki-root-certs`
 
 `cargo update -p rustls-webpki -p webpki-root-certs`: rustls-webpki 0.103.15 -> 0.103.16 (RUSTSEC-2026-0382) and webpki-root-certs 1.0.9 -> 1.0.10 (RUSTSEC-2026-0383). Only `Cargo.lock` and the version change; no source change.

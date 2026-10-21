@@ -20,11 +20,13 @@ Subject: lanes `synapse`, `agentlife`, `overmind`. Pilot home: `C:\Users\cires\A
   `server:claude-peers, server:synapse`; without it every relaunch stops at a dialog nobody answers) and a
   decision on the **account name** (`<ACCT>` below).
 
-## 1. Install rc.97 and stop the rc.33 daemon
+## 1. Install rc.123 and stop the rc.33 daemon
 
 ```powershell
-cargo install synapsed synapsectl synapse-claude-channel --version 6.0.0-rc.97 --locked
+cargo install synapsed --version 6.0.0-rc.123 --locked --features sqlite-store
+cargo install synapsectl synapse-claude-channel --version 6.0.0-rc.123 --locked
 ```
+Two commands: `--features` applies to every package named in one `cargo install`, and only `synapsed` has `sqlite-store`. Board 237 (CireSnave, "Decision 237: yes") puts the pilot on the SQLite mailbox store; a `synapsed` built without the feature refuses `SYNAPSE_MAILBOX_STORE=sqlite` and the pilot would not start.
 Needs the MSVC toolchain env your shell already has. Prerelease: `--version` must be exact.
 Expect: `Installed package ... synapsed`, `... synapsectl`, `... synapse-claude-channel`; in `C:\Users\cires\.cargo\bin`:
 `synapsed.exe`, `synapse.exe`, `synapse-claude-channel.exe` (side by side: the client looks next to its own exe).
@@ -58,6 +60,8 @@ material. The 24 h certificate does not end the pilot: the keystore reissues it 
 (`RENEW_BELOW`, `src/keystore.rs`). The home must be owner-only: a home under `C:\s` inherited Authenticated Users and
 `id init` refused it (`permissions_too_open ... account directory`, exit 2); a home under `%LOCALAPPDATA%` works.
 `id init` refuses a second run (`error: an account already exists`, exit 2). Rollback: delete the pilot home (step 5).
+
+**The store choice must reach the daemon, and the task wrapper does not carry it.** `scripts/synapsed-task.ps1` (agentlife) SETs only `SYNAPSE_HOME`, `SYNAPSE_ADDR` and `SYNAPSE_LAUNCHER_ROLES`; a lane's environment never reaches the daemon. The pilot home is fresh, so a daemon started without `SYNAPSE_MAILBOX_STORE=sqlite` would open the default store (redb, `mailbox.redb`) there, and the pilot would not be the SQLite pilot Decision 237 ruled. Before `-Register`, the agentlife script needs a `set "SYNAPSE_MAILBOX_STORE=sqlite"` line in the wrapper (a `-MailboxStore` parameter, validated like `-LauncherRoles`). Until that lands, do not register. After registering, read the wrapper (`%SYNAPSE_HOME%\task\synapsed-run-*.cmd`) for that line and, after the first start, confirm that `mailbox.sqlite` (not `mailbox.redb`) is the file that appears in the pilot home (`StoreKind::file_name`, `crates/synapsed/src/lib.rs`).
 
 Dry run (prints the wrapper and the task XML, changes nothing), then register:
 ```powershell
@@ -178,7 +182,7 @@ with the sender's identity: match on the suffix); the event arrived at +0.7 s, +
 then read `sent:1, acked:1, redelivered:2, expired:2` for that one message: **`expired` and `redelivered` count each
 unacknowledged show, so 2 per message is normal, not loss** (measure it as `sent` vs `acked` plus `synapse dead`, which
 was empty).
-Record at T-0 in the pilot log: `git rev-parse` of the rc.97 tag/commit (crates.io rc.97 = the commit it was
+Record at T-0 in the pilot log: `git rev-parse` of the rc.123 tag/commit (crates.io rc.123 = the commit it was
 published from), `synapse list --role <r>` output, the task XML, and each lane's `--role`. Then start the 10 measures
 (spec section 3, table): sender log lines `<id> <to-role> <utc>` with ids `pilot-<role>-<n>`; `synapse list --role <r>` every 5 min;
 `security-events.jsonl` and `synapse dead <role>` at the end. Do not `curl` the port without a session
@@ -199,4 +203,4 @@ Rollback (nothing on claude-peers was ever switched off, so no path needs rebuil
 2. `.\scripts\synapsed-task.ps1 -Remove`, then stop the daemon by pid (step 2 rollback). Never by image name.
 3. Keep `$env:SYNAPSE_HOME` until the pilot report is written (the mailbox and `security-events.jsonl` are the
    evidence). Then `Remove-Item -Recurse "C:\Users\cires\AppData\Local\synapse-pilot"` (keystore included).
-4. `cargo uninstall synapsed synapsectl synapse-claude-channel` if rc.97 should leave the machine too.
+4. `cargo uninstall synapsed synapsectl synapse-claude-channel` if rc.123 should leave the machine too.
