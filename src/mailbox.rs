@@ -230,6 +230,35 @@ impl fmt::Display for DurabilityClass {
 /// conformance suite enforces is `docs/MAILBOX_STORE_NEEDS.md`.
 pub const REQUIRED_DURABILITY: DurabilityClass = DurabilityClass::Machine;
 
+/// What the mailbox needs from whatever store holds it, stated without naming a store
+/// (`docs/MAILBOX_STORE_NEEDS.md`). A selector (`synapse-mailbox-persistant::select`) maps these to a
+/// storage kind's own checks and picks among the stores that meet every one; a need no store meets
+/// is an error that lists why each was left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MailboxNeeds {
+    /// The least durability an acknowledged write must have (need 1).
+    pub durability: DurabilityClass,
+    /// A write applies every change or none, and concurrent writers cannot both win (needs 2, 6, 8).
+    pub atomic_batch: bool,
+    /// Entries come back in key order, so a queue scans in enqueue order (need 3).
+    pub ordered_scan: bool,
+    /// Entries can expire and be swept, which lease redelivery and retention rest on (needs 4, 5).
+    pub lease_ttl: bool,
+    /// A call that cannot finish returns an error within a bound (need 9).
+    pub bounded_calls: bool,
+}
+
+impl MailboxNeeds {
+    /// What [`Mailbox`] relies on today.
+    pub const MAILBOX: MailboxNeeds = MailboxNeeds {
+        durability: REQUIRED_DURABILITY,
+        atomic_batch: true,
+        ordered_scan: true,
+        lease_ttl: true,
+        bounded_calls: true,
+    };
+}
+
 impl fmt::Display for MailError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1857,5 +1886,20 @@ impl MailTxn for RedbTxn<'_> {
         t.insert("state", raw.as_slice())
             .map_err(|e| store_err("roles")(&e))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod needs_tests {
+    use super::*;
+
+    /// The declared needs are what `Mailbox::open` enforces, and every one is asked for.
+    #[test]
+    fn the_mailbox_needs_ask_for_everything_open_enforces() {
+        let n = MailboxNeeds::MAILBOX;
+        assert_eq!(n.durability, REQUIRED_DURABILITY);
+        assert!(n.atomic_batch && n.ordered_scan && n.lease_ttl && n.bounded_calls);
+        // Control: the class really is ordered, so a Process store is below the need.
+        assert!(DurabilityClass::Process < n.durability);
     }
 }

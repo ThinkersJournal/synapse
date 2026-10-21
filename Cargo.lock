@@ -2803,24 +2803,24 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "persistant-blob"
-version = "0.9.0"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f60a0c2d52e26534b4ac3b8bd2afa76157cd2002a3a026259afa4a8fb8ed40f"
+checksum = "e723d79b3acee1e2b944e962f7e71550333dd2fbee76e06770d3f09e032ddd86"
 dependencies = [
  "persistant-core",
 ]
 
 [[package]]
 name = "persistant-core"
-version = "0.9.2"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98b19460fc91ebb59aca11ba6a178dceae930dede5d8e92721b969a1a1e3693d"
+checksum = "ffb96f223c2a97bb6752e18420b5da917884f5a8e46fc212c90116905a70cf16"
 
 [[package]]
 name = "persistant-kv"
-version = "0.9.0"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b3f3cf636128546d77d0cb7ed464e36a267b2d63bee6a7e0d64dd64172d5aec"
+checksum = "ceacab1378ac9416606adbb641d5f6d9875a50d5046648fcfe6e301c5371de97"
 dependencies = [
  "persistant-blob",
  "persistant-core",
@@ -2830,9 +2830,9 @@ dependencies = [
 
 [[package]]
 name = "persistant-relational"
-version = "0.9.0"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b12d73f6bd1b6871eb7f46793987ab46a762942d9114fa26f67f0dc2e484155"
+checksum = "a050be53f183c90e4c98b17c8e400cfdf13d2118129d0d641c37b49e5b79d790"
 dependencies = [
  "persistant-core",
  "unisql-core",
@@ -2840,9 +2840,9 @@ dependencies = [
 
 [[package]]
 name = "persistant-sqlx"
-version = "0.9.0"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d848cf0d288ce4caadd0137ed7f7c9871e95f93b3897fa116f0b45e341979a0"
+checksum = "ca86cab807875674a07d99259268a2690d9cfdb32685c5f97f7910e490969b04"
 dependencies = [
  "persistant-core",
  "persistant-relational",
@@ -4254,7 +4254,7 @@ dependencies = [
 
 [[package]]
 name = "synapse"
-version = "6.0.0-rc.123"
+version = "6.0.0-rc.124"
 dependencies = [
  "aes-gcm",
  "ahash",
@@ -4337,7 +4337,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-agent"
-version = "6.0.0-rc.123"
+version = "6.0.0-rc.124"
 dependencies = [
  "genai",
  "serde_json",
@@ -4352,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-claude-channel"
-version = "6.0.0-rc.123"
+version = "6.0.0-rc.124"
 dependencies = [
  "base64 0.23.1",
  "rmcp",
@@ -4367,7 +4367,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mailbox-persistant"
-version = "6.0.0-rc.123"
+version = "6.0.0-rc.124"
 dependencies = [
  "chrono",
  "persistant-kv",
@@ -4382,7 +4382,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mcp-server"
-version = "6.0.0-rc.123"
+version = "6.0.0-rc.124"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4402,7 +4402,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-security"
-version = "6.0.0-rc.123"
+version = "6.0.0-rc.124"
 dependencies = [
  "chrono",
  "serde_json",
@@ -4412,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "synapsectl"
-version = "6.0.0-rc.123"
+version = "6.0.0-rc.124"
 dependencies = [
  "chrono",
  "clap",
@@ -4426,7 +4426,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed"
-version = "6.0.0-rc.123"
+version = "6.0.0-rc.124"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4445,7 +4445,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed-client"
-version = "6.0.0-rc.123"
+version = "6.0.0-rc.124"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4533,7 +4533,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

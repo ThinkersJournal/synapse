@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.124): `MailboxNeeds`, the mailbox's needs stated without naming a store; PersistAnt 0.9.4
+
+`synapse::mailbox::MailboxNeeds` (`MailboxNeeds::MAILBOX`): minimum durability (`REQUIRED_DURABILITY`, Machine), atomic batch, ordered scan, lease/TTL, bounded calls, one field per row of `docs/MAILBOX_STORE_NEEDS.md`. It names no backend. Nothing consumes it yet: CireSnave ruled (2026-10-21) that PersistAnt takes the needs and returns the stores that can provide them, so Synapse neither keeps a backend registry nor builds candidates; the daemon will call PersistAnt's API when it exists. `persistant-kv` and `persistant-sqlx` 0.9.0 -> 0.9.4 (lock: also persistant-core, -blob, -relational). No behaviour change: `SYNAPSE_MAILBOX_STORE` and the stores are untouched.
+
 ### Changed (rc.123): pilot T-0 runbook installs the SQLite build
 
 `docs/PILOT_T0_RUNBOOK.md` installs rc.123 (was rc.97) with `cargo install synapsed --features sqlite-store`, and says the agentlife task wrapper must set `SYNAPSE_MAILBOX_STORE=sqlite` before `-Register` (the wrapper carries only `SYNAPSE_HOME`, `SYNAPSE_ADDR`, `SYNAPSE_LAUNCHER_ROLES`). Docs only; no code change.
