@@ -32,6 +32,10 @@ enum Command {
     /// Identity: the account key and per-role keys kept in the keystore.
     #[command(subcommand)]
     Id(IdCommand),
+    /// Which store holds the mailbox: list what this build offers, record the one to use.
+    #[cfg(feature = "storage")]
+    #[command(subcommand)]
+    Storage(StorageCommand),
     /// Claim a role on the daemon (taking it over if another holder has it).
     ///
     /// The session is cached per role in this home, so every `synapse` command for the role here
@@ -106,6 +110,23 @@ struct RoleArg {
     /// The role to act as.
     #[arg(long, env = "SYNAPSE_ROLE")]
     role: String,
+}
+
+#[cfg(feature = "storage")]
+#[derive(Subcommand)]
+enum StorageCommand {
+    /// The stores that meet every need of the mailbox, best first, with why each ranks where it
+    /// does. Nothing is changed.
+    List,
+    /// Record the store the daemon opens at its next start: an id from `list`. The id is checked
+    /// against the mailbox's needs before it is written.
+    Use {
+        id: String,
+        /// The file under the home that holds it (default `mailbox.<id>`; an existing
+        /// `mailbox.sqlite` must be named to keep its mail).
+        #[arg(long)]
+        file: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -274,6 +295,8 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 println!("{entry}");
             }
         }
+        #[cfg(feature = "storage")]
+        Command::Storage(command) => storage(&home, command)?,
         Command::List { role, cwd, repo } => {
             let daemon = connect(&home, &role)?;
             let reply = daemon.call(
@@ -284,6 +307,49 @@ fn run(cli: Cli) -> Result<(), MailError> {
             for entry in reply["roles"].as_array().into_iter().flatten() {
                 println!("{entry}");
             }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "storage")]
+fn storage(home: &std::path::Path, command: StorageCommand) -> Result<(), MailError> {
+    use synapse::mailbox::MailboxNeeds;
+    use synapse_mailbox_persistant::needs::{StoreChoice, listing};
+    let usage = |e: &dyn std::fmt::Display| MailError::Usage(e.to_string());
+    let listed = listing(&MailboxNeeds::MAILBOX).map_err(|e| usage(&e))?;
+    match command {
+        StorageCommand::List => {
+            let recorded = StoreChoice::read(home).map_err(|e| usage(&e))?;
+            for l in &listed {
+                let mark = recorded.as_ref().is_some_and(|c| c.id == l.id);
+                println!(
+                    "{}{}  {}",
+                    l.id,
+                    if mark { "  (recorded)" } else { "" },
+                    l.title
+                );
+                for line in l.why() {
+                    println!("    {line}");
+                }
+            }
+            if recorded.is_none() {
+                println!("no store recorded in this home; `synapse storage use <id>` records one");
+            }
+        }
+        StorageCommand::Use { id, file } => {
+            if !listed.iter().any(|l| l.id == id) {
+                let ids: Vec<_> = listed.iter().map(|l| l.id).collect();
+                return Err(MailError::Usage(format!(
+                    "`{id}` does not meet the mailbox's needs in this build; choose one of {ids:?}"
+                )));
+            }
+            let choice = StoreChoice::new(&id, file.as_deref()).map_err(|e| usage(&e))?;
+            choice.write(home).map_err(|e| usage(&e))?;
+            println!(
+                "recorded {} in {}; the daemon uses it at its next start",
+                choice.id, choice.file
+            );
         }
     }
     Ok(())

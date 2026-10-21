@@ -18,6 +18,8 @@
 //! inside another tokio runtime (a `block_on` there would panic). Every backend call is bounded by
 //! [`PersistantMailStore::with_timeout`] (default 30 s): MySQL was measured to *stall*, not fail,
 //! on a full disk, so a store without its own timeout could hang a daemon.
+pub mod needs;
+
 use chrono::{DateTime, Utc};
 use persistant_kv::choose::{Durability, declared_durability};
 use persistant_kv::{BatchOp, KvBackend, KvOnRelational};
@@ -82,8 +84,7 @@ impl SqliteMailStore {
     /// When the file is too open, or the database cannot be opened.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
-        #[cfg(unix)]
-        create_owner_only(&path).map_err(|e| se("create", e))?;
+        create_owner_only_if_unix(&path)?;
         if path.exists() {
             synapse::keystore::check_owner_only(&path, "mail store")
                 .map_err(|e| se("permissions", e))?;
@@ -157,6 +158,15 @@ fn wait<T: Send + 'static>(
         Ok(Ok(r)) => r,
         _ => Err(StoreError("open: the backend task died".into())),
     }
+}
+
+/// On Unix, a new file starts owner-only; elsewhere the profile's ACL applies (checked on open).
+fn create_owner_only_if_unix(path: &Path) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    create_owner_only(path).map_err(|e| se("create", e))?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// A new file starts owner-only (`0600`); an existing one is left as it is.
