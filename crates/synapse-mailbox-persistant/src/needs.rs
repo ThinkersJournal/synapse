@@ -219,6 +219,7 @@ mod tests {
         assert!(ids.contains(&"sqlite-full"), "{ids:?}");
         assert!(!ids.contains(&"sqlite"), "{ids:?}");
         assert!(!ids.contains(&"memory"), "{ids:?}");
+        assert!(!ids.contains(&"fs"), "{ids:?}");
     }
 
     #[test]
