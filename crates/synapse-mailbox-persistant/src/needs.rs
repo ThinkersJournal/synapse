@@ -140,21 +140,32 @@ impl RegistryMailStore {
         ns: &str,
     ) -> Result<Self, StoreError> {
         let rt = new_runtime()?;
-        let opened = {
-            let (id, var, needs) = (id.to_string(), url_env.to_string(), provider_needs(needs));
-            rt.handle().clone().spawn(async move {
-                let options = OpenOptions::new().call_bound(call_bound);
-                registry::open_named_with(&id, &Endpoint::url_env(var), &needs, &options)
-                    .await
-                    .map(registry::Handle::into_kv)
-                    .map_err(|e| se("open", e))
-            })
-        };
-        let kv = match wait(&rt, opened) {
-            Ok(kv) => kv,
-            Err(e) => {
-                rt.shutdown_background();
-                return Err(e);
+        // Two processes opening a database that has no tables yet both run `CREATE TABLE IF NOT
+        // EXISTS`, and PostgreSQL lets one of them fail with a unique violation on its catalog.
+        // The tables exist by then, so the open is tried again: the loser then meets the lease
+        // and is refused for the right reason instead of failing on a catalog race.
+        let mut tries = 0;
+        let kv = loop {
+            tries += 1;
+            let opened = {
+                let (id, var, needs) = (id.to_string(), url_env.to_string(), provider_needs(needs));
+                rt.handle().clone().spawn(async move {
+                    let options = OpenOptions::new().call_bound(call_bound);
+                    registry::open_named_with(&id, &Endpoint::url_env(var), &needs, &options)
+                        .await
+                        .map(registry::Handle::into_kv)
+                        .map_err(|e| se("open", e))
+                })
+            };
+            match wait(&rt, opened) {
+                Ok(kv) => break kv,
+                Err(e) if tries < 4 && e.to_string().contains("unique violation") => {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Err(e) => {
+                    rt.shutdown_background();
+                    return Err(e);
+                }
             }
         };
         let mut store = Self::from_runtime(rt, kv, ns.into());
