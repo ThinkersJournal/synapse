@@ -23,7 +23,10 @@ fn config(home: &std::path::Path) -> DaemonConfig {
 }
 
 fn top_id() -> &'static str {
-    listing(&synapse::mailbox::MailboxNeeds::MAILBOX).expect("a store qualifies")[0].id
+    let listed = listing(&synapse::mailbox::MailboxNeeds::MAILBOX).expect("a store qualifies");
+    synapse_mailbox_persistant::needs::first_file_store(&listed)
+        .expect("a file store qualifies")
+        .id
 }
 
 #[test]

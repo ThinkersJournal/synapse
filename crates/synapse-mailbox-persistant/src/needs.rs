@@ -63,6 +63,22 @@ pub fn provider_needs(needs: &MailboxNeeds) -> ProviderNeeds {
     ProviderNeeds::new(ids(&want), durability)
 }
 
+/// Whether `listing` is a server, opened from a connection URL, rather than a file.
+#[must_use]
+pub fn wants_url(listing: &Listing) -> bool {
+    matches!(
+        listing.endpoint,
+        persistant::capability::provider::EndpointSpec::Url { .. }
+    )
+}
+
+/// The best listed store that lives in a file under the home: the one a fresh home can be given
+/// with nothing from the operator. A server needs a connection URL only the operator has.
+#[must_use]
+pub fn first_file_store(listed: &[Listing]) -> Option<&Listing> {
+    listed.iter().find(|l| !wants_url(l))
+}
+
 /// The stores this build can offer for `needs`, best first, each with the reasons it ranks where it
 /// does. `Err` names, for every store considered, what it lacks; no closest match is offered.
 ///
@@ -76,6 +92,87 @@ pub fn listing(needs: &MailboxNeeds) -> Result<Vec<Listing>, Unmet> {
 pub type RegistryMailStore = PersistantMailStore<AnyKv>;
 
 impl RegistryMailStore {
+    /// Open the store `choice` records, under `home`: a file store as [`Self::open_named`], a server
+    /// store as [`Self::open_named_url`].
+    ///
+    /// # Errors
+    /// As those two.
+    pub fn open_choice(
+        choice: &StoreChoice,
+        home: &Path,
+        needs: &MailboxNeeds,
+        call_bound: Duration,
+    ) -> Result<Self, StoreError> {
+        match (&choice.file, &choice.url_env) {
+            (Some(file), _) => Self::open_named(&choice.id, home.join(file), needs, call_bound),
+            (None, Some(var)) => Self::open_named_url(&choice.id, var, needs, call_bound),
+            (None, None) => Err(StoreError("the store choice names no file or URL".into())),
+        }
+    }
+
+    /// Open the server provider `id` with the connection URL held in the environment variable
+    /// `url_env` (read now, never printed), gated against `needs` with every call bounded by
+    /// `call_bound`. A server has no file to lock, so the store takes a **lease** in itself
+    /// ([`PersistantMailStore::hold_lease`]): a second daemon on the same database is refused.
+    ///
+    /// # Errors
+    /// When PersistAnt refuses the id, the URL is missing or wrong, the server cannot be reached, or
+    /// another process holds the store.
+    pub fn open_named_url(
+        id: &str,
+        url_env: &str,
+        needs: &MailboxNeeds,
+        call_bound: Duration,
+    ) -> Result<Self, StoreError> {
+        Self::open_named_url_in(id, url_env, needs, call_bound, "mail.v3")
+    }
+
+    /// As [`Self::open_named_url`], keeping the mailbox under key namespace `ns` (several mailboxes
+    /// can share one database; each takes its own lease).
+    ///
+    /// # Errors
+    /// As [`Self::open_named_url`].
+    pub fn open_named_url_in(
+        id: &str,
+        url_env: &str,
+        needs: &MailboxNeeds,
+        call_bound: Duration,
+        ns: &str,
+    ) -> Result<Self, StoreError> {
+        let rt = new_runtime()?;
+        // Two processes opening a database that has no tables yet both run `CREATE TABLE IF NOT
+        // EXISTS`, and PostgreSQL lets one of them fail with a unique violation on its catalog.
+        // The tables exist by then, so the open is tried again: the loser then meets the lease
+        // and is refused for the right reason instead of failing on a catalog race.
+        let mut tries = 0;
+        let kv = loop {
+            tries += 1;
+            let opened = {
+                let (id, var, needs) = (id.to_string(), url_env.to_string(), provider_needs(needs));
+                rt.handle().clone().spawn(async move {
+                    let options = OpenOptions::new().call_bound(call_bound);
+                    registry::open_named_with(&id, &Endpoint::url_env(var), &needs, &options)
+                        .await
+                        .map(registry::Handle::into_kv)
+                        .map_err(|e| se("open", e))
+                })
+            };
+            match wait(&rt, opened) {
+                Ok(kv) => break kv,
+                Err(e) if tries < 4 && e.to_string().contains("unique violation") => {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Err(e) => {
+                    rt.shutdown_background();
+                    return Err(e);
+                }
+            }
+        };
+        let mut store = Self::from_runtime(rt, kv, ns.into());
+        store.hold_lease()?;
+        Ok(store)
+    }
+
     /// Open provider `id` (an id from [`listing`], as recorded in Synapse's configuration) at the
     /// file `path`, gated again against `needs` by PersistAnt, with every call bounded by
     /// `call_bound`. The file is owner-only, as for the SQLite store, and one process holds it.
@@ -127,32 +224,76 @@ impl RegistryMailStore {
 /// The file under a Synapse home that records the operator's chosen store.
 pub const CHOICE_FILE: &str = "mailbox-store.json";
 
-/// The store the operator picked from [`listing`]: a PersistAnt provider id and the file under the
-/// home that holds it. Synapse code names no id; it only keeps the one it was given.
+/// The store the operator picked from [`listing`]: a PersistAnt provider id and where it is: a file
+/// under the home, or the name of an environment variable that holds the connection URL (the URL is
+/// read when the store opens and is never written to the home, printed or logged). Synapse code
+/// names no id; it only keeps the one it was given.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoreChoice {
     /// A [`Listing::id`] from PersistAnt's registry.
     pub id: String,
-    /// The file name under the home. A bare name: no separators.
-    pub file: String,
+    /// The file name under the home, a bare name with no separators. Absent for a server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The environment variable holding the connection URL. Absent for a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_env: Option<String>,
+}
+
+fn valid_env_name(n: &str) -> bool {
+    let mut c = n.chars();
+    c.next()
+        .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+        && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
 }
 
 impl StoreChoice {
-    /// A choice of `id`, held in `file` (default `mailbox.<id>`).
+    /// A choice of `id` held in `file` (default `mailbox.<id>`).
     ///
     /// # Errors
     /// When `file` is not a bare file name.
     pub fn new(id: &str, file: Option<&str>) -> Result<Self, StoreError> {
         let file = file.map_or_else(|| format!("mailbox.{id}"), str::to_string);
-        if file.is_empty() || file.contains(['/', '\\']) || file == "." || file == ".." {
-            return Err(StoreError(format!(
-                "store file {file:?} is not a bare file name"
-            )));
-        }
-        Ok(StoreChoice {
+        Self {
             id: id.to_string(),
-            file,
-        })
+            file: Some(file),
+            url_env: None,
+        }
+        .checked()
+    }
+
+    /// A choice of the server provider `id`, its connection URL in the variable `url_env`.
+    ///
+    /// # Errors
+    /// When `url_env` is not an environment variable name.
+    pub fn server(id: &str, url_env: &str) -> Result<Self, StoreError> {
+        Self {
+            id: id.to_string(),
+            file: None,
+            url_env: Some(url_env.to_string()),
+        }
+        .checked()
+    }
+
+    /// Exactly one of file and URL variable, each well formed.
+    fn checked(self) -> Result<Self, StoreError> {
+        match (&self.file, &self.url_env) {
+            (Some(f), None)
+                if !f.is_empty() && !f.contains(['/', '\\']) && f != "." && f != ".." =>
+            {
+                Ok(self)
+            }
+            (Some(f), None) => Err(StoreError(format!(
+                "store file {f:?} is not a bare file name"
+            ))),
+            (None, Some(v)) if valid_env_name(v) => Ok(self),
+            (None, Some(v)) => Err(StoreError(format!(
+                "{v:?} is not an environment variable name"
+            ))),
+            _ => Err(StoreError(
+                "a store choice names a file or a URL variable, not both and not neither".into(),
+            )),
+        }
     }
 
     /// The recorded choice in `home`, or `None` when the operator has recorded none.
@@ -167,7 +308,7 @@ impl StoreChoice {
         };
         let c: StoreChoice =
             serde_json::from_str(&text).map_err(|e| se("parse store choice", e))?;
-        Self::new(&c.id, Some(&c.file)).map(Some)
+        c.checked().map(Some)
     }
 
     /// Record this choice in `home`. Takes effect at the next daemon start.
@@ -179,10 +320,14 @@ impl StoreChoice {
         std::fs::write(home.join(CHOICE_FILE), text + "\n").map_err(|e| se("write store choice", e))
     }
 
-    /// The path of the store file under `home`.
+    /// Where the store is, in words: the file name, or `url from $VAR`.
     #[must_use]
-    pub fn path(&self, home: &Path) -> std::path::PathBuf {
-        home.join(&self.file)
+    pub fn describe(&self) -> String {
+        match (&self.file, &self.url_env) {
+            (Some(f), _) => f.clone(),
+            (None, Some(v)) => format!("connection URL from ${v}"),
+            (None, None) => String::new(),
+        }
     }
 }
 
@@ -199,6 +344,18 @@ mod tests {
         assert!(has("kv.ordered_scan"));
         assert!(has("kv.ttl"));
         assert!(has("kv.bounded_call"));
+    }
+
+    #[test]
+    fn a_fresh_home_is_never_given_a_server() {
+        let listed = listing(&MailboxNeeds::MAILBOX).expect("a store qualifies");
+        let server = listed.iter().find(|l| wants_url(l)).map(|l| l.id);
+        assert!(
+            server.is_some(),
+            "control: this build lists a server: {listed:?}"
+        );
+        let file = first_file_store(&listed).expect("a file store qualifies");
+        assert!(!wants_url(file), "{}", file.id);
     }
 
     #[test]
@@ -227,7 +384,10 @@ mod tests {
         use synapse::mailbox::MailStore;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("mail.db");
-        let top = listing(&MailboxNeeds::MAILBOX).expect("a store qualifies")[0].id;
+        let listed = listing(&MailboxNeeds::MAILBOX).expect("a store qualifies");
+        let top = first_file_store(&listed)
+            .expect("a file store qualifies")
+            .id;
         let bound = Duration::from_secs(10);
         let store = RegistryMailStore::open_named(top, &path, &MailboxNeeds::MAILBOX, bound)
             .expect("opens");
@@ -260,9 +420,37 @@ mod tests {
         assert_eq!(StoreChoice::read(dir.path()).expect("reads"), Some(c));
         assert!(StoreChoice::new("x", Some("../evil")).is_err());
         assert_eq!(
-            StoreChoice::new("x", None).expect("default").file,
-            "mailbox.x"
+            StoreChoice::new("x", None)
+                .expect("default")
+                .file
+                .as_deref(),
+            Some("mailbox.x")
         );
+    }
+
+    #[test]
+    fn a_server_choice_keeps_the_variable_name_and_never_a_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let c = StoreChoice::server("postgres", "SYNAPSE_DB_URL").expect("a variable name");
+        c.write(dir.path()).expect("writes");
+        let text = std::fs::read_to_string(dir.path().join(CHOICE_FILE)).expect("reads");
+        assert!(
+            text.contains("SYNAPSE_DB_URL") && !text.contains("file"),
+            "{text}"
+        );
+        assert_eq!(StoreChoice::read(dir.path()).expect("reads"), Some(c));
+        assert!(StoreChoice::server("postgres", "postgres://u:p@h/db").is_err());
+    }
+
+    #[test]
+    fn a_choice_with_both_or_neither_is_refused() {
+        let both = r#"{"id":"x","file":"f","url_env":"V"}"#;
+        let neither = r#"{"id":"x"}"#;
+        for text in [both, neither] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join(CHOICE_FILE), text).expect("writes");
+            assert!(StoreChoice::read(dir.path()).is_err(), "{text}");
+        }
     }
 
     #[test]

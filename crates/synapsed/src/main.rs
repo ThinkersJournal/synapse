@@ -158,7 +158,8 @@ fn named_choice(
     let Ok(listed) = listing(&synapse::mailbox::MailboxNeeds::MAILBOX) else {
         return Ok(None);
     };
-    let Some(top) = listed.first() else {
+    // A server needs a URL only the operator has, so a fresh home is given the best file store.
+    let Some(top) = synapse_mailbox_persistant::needs::first_file_store(&listed) else {
         return Ok(None);
     };
     let choice = StoreChoice::new(top.id, None).map_err(|e| e.to_string())?;

@@ -357,6 +357,96 @@ jobs:
       if: always()
       run: cargo test --locked -p synapsed --features sqlite-store --test migrate --no-fail-fast
 
+  # PostgreSQL 16 mailbox store. A service container on a GitHub-hosted runner, as PersistAnt's own CI does it
+  # (SUP-008 waiver reason, PM ruling 2026-10-14): CI-only container, no credential of ours reaches it
+  # (the password below is throwaway and only this job's runner can reach the port), pinned by digest.
+  # SYNAPSE_REQUIRE_DATABASE=1 makes a missing URL fail instead of skip: a skipped test must not look green.
+  server-postgres:
+    name: PostgreSQL 16 mailbox store (service container, signal, not a gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_PASSWORD: synapse-test
+          POSTGRES_DB: synapse
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      SYNAPSE_TEST_DATABASE_URL: postgres://postgres:synapse-test@localhost:5432/synapse
+      SYNAPSE_REQUIRE_DATABASE: "1"
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config protobuf-compiler
+
+    - name: Install stable toolchain
+      uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+
+    - name: The mailbox on the server (conformance suite, listing, one daemon per database)
+      run: cargo test --locked -p synapse-mailbox-persistant --test servers --no-fail-fast
+
+    - name: The lease (SQLite, no server needed)
+      run: cargo test --locked -p synapse-mailbox-persistant --test lease --no-fail-fast
+
+  # MySQL 8.4 mailbox store. A service container on a GitHub-hosted runner, as PersistAnt's own CI does it
+  # (SUP-008 waiver reason, PM ruling 2026-10-14): CI-only container, no credential of ours reaches it
+  # (the password below is throwaway and only this job's runner can reach the port), pinned by digest.
+  # SYNAPSE_REQUIRE_MYSQL=1 makes a missing URL fail instead of skip: a skipped test must not look green.
+  server-mysql:
+    name: MySQL 8.4 mailbox store (service container, signal, not a gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      mysql:
+        image: mysql:8.4@sha256:24989179f58856db763f418010c1169fecc944e3ec1ea7e921572d83eb070f70
+        env:
+          MYSQL_ROOT_PASSWORD: synapse-test
+          MYSQL_DATABASE: synapse
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -psynapse-test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      SYNAPSE_TEST_MYSQL_URL: mysql://root:synapse-test@127.0.0.1:3306/synapse
+      SYNAPSE_REQUIRE_MYSQL: "1"
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config protobuf-compiler
+
+    - name: Install stable toolchain
+      uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+
+    - name: The mailbox on the server (conformance suite, listing, one daemon per database)
+      run: cargo test --locked -p synapse-mailbox-persistant --test servers --no-fail-fast
+
+    - name: The lease (SQLite, no server needed)
+      run: cargo test --locked -p synapse-mailbox-persistant --test lease --no-fail-fast
+
   # The WebAssembly package has its own job so that `Build and Test` can be a
   # required check. While it was a step of that job, it failed on every run with
   # `cd: wasm: No such file or directory` -- there is no `wasm/` directory in this

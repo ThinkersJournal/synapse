@@ -124,8 +124,12 @@ enum StorageCommand {
         id: String,
         /// The file under the home that holds it (default `mailbox.<id>`; an existing
         /// `mailbox.sqlite` must be named to keep its mail).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "url_env")]
         file: Option<String>,
+        /// For a server provider: the NAME of the environment variable that holds the connection
+        /// URL, set in the daemon's environment. The URL itself is never recorded.
+        #[arg(long, value_name = "VAR")]
+        url_env: Option<String>,
     },
 }
 
@@ -337,18 +341,36 @@ fn storage(home: &std::path::Path, command: StorageCommand) -> Result<(), MailEr
                 println!("no store recorded in this home; `synapse storage use <id>` records one");
             }
         }
-        StorageCommand::Use { id, file } => {
+        StorageCommand::Use { id, file, url_env } => {
             if !listed.iter().any(|l| l.id == id) {
                 let ids: Vec<_> = listed.iter().map(|l| l.id).collect();
                 return Err(MailError::Usage(format!(
                     "`{id}` does not meet the mailbox's needs in this build; choose one of {ids:?}"
                 )));
             }
-            let choice = StoreChoice::new(&id, file.as_deref()).map_err(|e| usage(&e))?;
+            let wants_url = listed
+                .iter()
+                .find(|l| l.id == id)
+                .is_some_and(synapse_mailbox_persistant::needs::wants_url);
+            if wants_url != url_env.is_some() {
+                return Err(MailError::Usage(if wants_url {
+                    format!(
+                        "`{id}` is a server: give --url-env <VAR> naming the variable that holds its URL"
+                    )
+                } else {
+                    format!("`{id}` is a file: use --file (or neither), not --url-env")
+                }));
+            }
+            let choice = match url_env.as_deref() {
+                Some(var) => StoreChoice::server(&id, var),
+                None => StoreChoice::new(&id, file.as_deref()),
+            }
+            .map_err(|e| usage(&e))?;
             choice.write(home).map_err(|e| usage(&e))?;
             println!(
                 "recorded {} in {}; the daemon uses it at its next start",
-                choice.id, choice.file
+                choice.id,
+                choice.describe()
             );
         }
     }
