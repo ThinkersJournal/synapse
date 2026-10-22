@@ -61,6 +61,8 @@ material. The 24 h certificate does not end the pilot: the keystore reissues it 
 `id init` refused it (`permissions_too_open ... account directory`, exit 2); a home under `%LOCALAPPDATA%` works.
 `id init` refuses a second run (`error: an account already exists`, exit 2). Rollback: delete the pilot home (step 5).
 
+**Server stores are not the pilot's store** (Decision 237 is SQLite). If a later pilot uses PostgreSQL/MySQL, `synapse storage use <id> --url-env VAR` records the variable name and the wrapper must set `VAR` itself; one daemon per database is enforced by a lease (a restart after a hard kill can be refused for up to 20 s). Detail: `docs/MAILBOX_STORES.md`.
+
 **The store choice must reach the daemon, and the task wrapper does not carry it.** `scripts/synapsed-task.ps1` (agentlife) SETs only `SYNAPSE_HOME`, `SYNAPSE_ADDR` and `SYNAPSE_LAUNCHER_ROLES`; a lane's environment never reaches the daemon. The pilot home is fresh, so a daemon started without `SYNAPSE_MAILBOX_STORE=sqlite` would open the default store (redb, `mailbox.redb`) there, and the pilot would not be the SQLite pilot Decision 237 ruled. Before `-Register`, the agentlife script needs a `set "SYNAPSE_MAILBOX_STORE=sqlite"` line in the wrapper (a `-MailboxStore` parameter, validated like `-LauncherRoles`). Until that lands, do not register. After registering, read the wrapper (`%SYNAPSE_HOME%\task\synapsed-run-*.cmd`) for that line and, after the first start, confirm that `mailbox.sqlite` (not `mailbox.redb`) is the file that appears in the pilot home (`StoreKind::file_name`, `crates/synapsed/src/lib.rs`).
 
 Dry run (prints the wrapper and the task XML, changes nothing), then register:
