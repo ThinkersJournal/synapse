@@ -14,14 +14,14 @@ name = "synapse"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.126" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.126" }
-synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.126" }
+synapse = { path = "../..", version = "6.0.0-rc.127" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.127" }
+synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.127" }
 clap = { version = "4.5.41", features = ["derive", "env"] }
 chrono = "0.4"
 serde_json = "1.0"
 uuid = { version = "1.6", features = ["v4"] }
-synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.126", optional = true }
+synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.127", optional = true }
 
 [features]
 # `synapse storage list` / `use`: the stores PersistAnt can offer for the mailbox, and recording the
