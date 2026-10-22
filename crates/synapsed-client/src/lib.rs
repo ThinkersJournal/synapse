@@ -186,16 +186,49 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Find this home's daemon, starting it if nothing answers.
-    pub fn connect(home: &Path) -> Result<Daemon, MailError> {
-        let http = reqwest::blocking::Client::builder()
+    fn http_client() -> Result<reqwest::blocking::Client, MailError> {
+        reqwest::blocking::Client::builder()
             .no_proxy()
             // synapsed never redirects; following one would re-send a claim body where a squatter
             // points it (review, #74).
             .redirect(reqwest::redirect::Policy::none())
             .timeout(CALL_TIMEOUT)
             .build()
-            .map_err(|e| MailError::Transport(e.to_string()))?;
+            .map_err(|e| MailError::Transport(e.to_string()))
+    }
+
+    /// Find this home's daemon and never start one: for a long-lived caller (the MCP adapter)
+    /// whose daemon is run by its owner, with the owner's environment (store, address), so a
+    /// daemon it spawned itself would silently run with the wrong store.
+    pub fn connect_existing(home: &Path) -> Result<Daemon, MailError> {
+        let http = Self::http_client()?;
+        let mut squat = Squat::default();
+        // Two tries, as in `connect`: one slow answer from a live daemon is not "no daemon".
+        for _ in 0..2 {
+            if let Some(found) = squat.check(home, answering(&http, home)?) {
+                return Ok(Daemon::new(http, home, found));
+            }
+        }
+        Err(MailError::NoDaemon(match &squat.0 {
+            Some(addr) => squat_warning(addr),
+            None => "no daemon answered; start synapsed with its own environment".to_string(),
+        }))
+    }
+
+    /// Whether the daemon this connection proved is gone: nothing answers at the announced
+    /// address, or a different instance does. A listener that fails the proof is not "gone" (it
+    /// may be a squatter or a slow daemon), so this stays false and sends nothing to it.
+    pub fn instance_gone(&self) -> bool {
+        match answering(&self.http, &self.home) {
+            Ok(Answer::Nothing) => true,
+            Ok(Answer::Proven(announce, _)) => announce.instance_id != self.instance_id,
+            Ok(Answer::Unproven(_)) | Err(_) => false,
+        }
+    }
+
+    /// Find this home's daemon, starting it if nothing answers.
+    pub fn connect(home: &Path) -> Result<Daemon, MailError> {
+        let http = Self::http_client()?;
         let mut squat = Squat::default();
         // Two tries, so one slow answer from a live daemon doesn't start a doomed second one.
         for _ in 0..2 {

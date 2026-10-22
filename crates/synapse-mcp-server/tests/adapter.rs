@@ -55,9 +55,22 @@ fn ensure_synapsed_built() {
 /// runtime, which panics if dropped inside the async test.
 fn connects(home: &Path) -> bool {
     let home = home.to_path_buf();
-    std::thread::spawn(move || Daemon::connect(&home).is_ok())
+    std::thread::spawn(move || Daemon::connect_existing(&home).is_ok())
         .join()
         .unwrap_or(false)
+}
+
+fn start_daemon(home: &Path) -> std::process::Child {
+    let exe = exe_dir().join(format!("synapsed{}", std::env::consts::EXE_SUFFIX));
+    Command::new(exe)
+        .current_dir(home)
+        .env("SYNAPSE_HOME", home)
+        .env("SYNAPSE_ADDR", "127.0.0.1:0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("synapsed starts")
 }
 
 /// A home with an account and a running daemon, killed on drop.
@@ -71,26 +84,31 @@ impl Home {
         ensure_synapsed_built();
         let dir = tempfile::tempdir().unwrap();
         Keystore::init_account(dir.path(), "acct").expect("init account");
-        let exe = exe_dir().join(format!("synapsed{}", std::env::consts::EXE_SUFFIX));
-        let daemon = Command::new(exe)
-            .current_dir(dir.path())
-            .env("SYNAPSE_HOME", dir.path())
-            .env("SYNAPSE_ADDR", "127.0.0.1:0")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("synapsed starts");
-        // The announce file is the daemon's own word that it is up; then it must answer the proof.
+        let daemon = start_daemon(dir.path());
         // Owned by a `Home` first, so a failed wait still kills the daemon.
         let home = Home { dir, daemon };
-        let announce = home.path().join("synapsed.json");
+        home.wait_up();
+        home
+    }
+
+    /// The announce file is the daemon's own word that it is up; then it must answer the proof.
+    fn wait_up(&self) {
+        let announce = self.path().join("synapsed.json");
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !(announce.exists() && connects(home.path())) {
+        while !(announce.exists() && connects(self.path())) {
             assert!(Instant::now() < deadline, "synapsed never announced");
             std::thread::sleep(Duration::from_millis(50));
         }
-        home
+    }
+
+    /// Kill the daemon and start another at the same home: a new instance id, no sessions.
+    fn restart(&mut self) {
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
+        // The dead daemon's announce file would pass `wait_up` before the new one writes its own.
+        let _ = std::fs::remove_file(self.path().join("synapsed.json"));
+        self.daemon = start_daemon(self.path());
+        self.wait_up();
     }
 
     fn path(&self) -> &Path {
@@ -402,6 +420,51 @@ async fn no_key_path_or_key_bytes_reach_any_result_or_error() {
     ] {
         assert!(!transcript.contains(needle), "leaked {needle:?}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_adapter_never_starts_a_daemon() {
+    // The positive control: `synapsed` is built next to this binary, so the spawning client would
+    // find it and start one here.
+    ensure_synapsed_built();
+    let dir = tempfile::tempdir().unwrap();
+    Keystore::init_account(dir.path(), "acct").expect("init account");
+    let err = SynapseMcpServer::start(McpConfig {
+        role: "alice".into(),
+        home: dir.path().to_path_buf(),
+    })
+    .await
+    .err()
+    .expect("no daemon, so the adapter fails to start");
+    assert!(err.contains("not running"), "{err}");
+    // Give a daemon spawned by mistake time to announce itself before concluding it was not.
+    std::thread::sleep(Duration::from_millis(500));
+    for leftover in ["synapsed.json", "synapsed-start.err"] {
+        assert!(!dir.path().join(leftover).exists(), "{leftover} exists");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adapter_re_attaches_to_a_restarted_daemon_and_not_after_a_takeover() {
+    let mut home = Home::new();
+    let alice = agent(&home, "alice").await;
+    let before = alice.ok("whoami", json!({})).await["daemon_instance"].clone();
+    alice.ok("list", json!({})).await;
+
+    home.restart();
+    // The first call after the restart fails (its daemon is gone) and re-attaches; the next works.
+    let first = alice.refused("list", json!({})).await;
+    assert!(!first.is_empty());
+    alice.ok("list", json!({})).await;
+    let after = alice.ok("whoami", json!({})).await["daemon_instance"].clone();
+    assert_ne!(before, after, "still attached to the old daemon instance");
+
+    // A takeover under the same instance is a human's to answer: no re-attach, no re-claim.
+    tokio::task::block_in_place(|| rival_claim(&home, "alice"));
+    let refusal = alice.refused("list", json!({})).await;
+    assert!(refusal.contains("superseded"), "{refusal}");
+    let again = alice.refused("list", json!({})).await;
+    assert!(again.contains("superseded"), "{again}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -13,8 +13,9 @@
 pub mod push;
 
 use std::mem::ManuallyDrop;
+use std::ops::Deref;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use rmcp::handler::server::wrapper::Parameters;
@@ -62,17 +63,83 @@ pub struct McpConfig {
     pub home: PathBuf,
 }
 
-struct Inner {
-    role: String,
-    daemon: ManuallyDrop<Daemon>,
+/// A connection that is dropped off the async workers.
+struct Held(ManuallyDrop<Daemon>);
+
+impl Deref for Held {
+    type Target = Daemon;
+    fn deref(&self) -> &Daemon {
+        &self.0
+    }
 }
 
-impl Drop for Inner {
+impl Drop for Held {
     fn drop(&mut self) {
-        // SAFETY: taken exactly once, here, and `self.daemon` is never touched again.
-        let daemon = unsafe { ManuallyDrop::take(&mut self.daemon) };
+        // SAFETY: taken exactly once, here, and `self.0` is never touched again.
+        let daemon = unsafe { ManuallyDrop::take(&mut self.0) };
         // A blocking reqwest client panics if dropped on an async worker; drop it elsewhere.
         std::thread::spawn(move || drop(daemon));
+    }
+}
+
+struct Inner {
+    role: String,
+    home: PathBuf,
+    daemon: Mutex<Arc<Held>>,
+}
+
+impl Inner {
+    fn current(&self) -> Arc<Held> {
+        self.daemon
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// A blocking daemon call as this role. When it fails in a way a daemon restart explains and
+    /// the daemon this connection proved is gone, attach to the daemon now at the home (which
+    /// holds no session of ours, so this is the same implicit claim startup makes, never a
+    /// takeback from a holder) and report this call's failure; the next call succeeds. A refusal
+    /// from the same daemon instance (`superseded`, ...) is never recovered: that is a human's
+    /// `synapse claim`. Must run off the async workers.
+    fn call<T>(
+        &self,
+        f: impl FnOnce(&Daemon, &str) -> Result<T, MailError>,
+    ) -> Result<T, MailError> {
+        let held = self.current();
+        let result = f(&held, &self.role);
+        if let Err(e) = &result
+            && restart_explains(e)
+        {
+            self.reattach(&held);
+        }
+        result
+    }
+
+    fn reattach(&self, failed: &Arc<Held>) {
+        if !failed.instance_gone() {
+            return;
+        }
+        let config = McpConfig {
+            role: self.role.clone(),
+            home: self.home.clone(),
+        };
+        if let Ok(fresh) = connect(&config) {
+            let mut slot = self.daemon.lock().unwrap_or_else(PoisonError::into_inner);
+            // Another call may have re-attached first; only replace the connection that failed.
+            if Arc::ptr_eq(&slot, failed) {
+                *slot = Arc::new(Held(ManuallyDrop::new(fresh)));
+            }
+        }
+    }
+}
+
+/// The failures a restarted daemon causes: it is unreachable, or no longer knows our session.
+fn restart_explains(e: &MailError) -> bool {
+    match e {
+        MailError::NoDaemon(_) | MailError::Transport(_) => true,
+        MailError::Api { kind, .. } => kind == "unauthorized",
+        _ => false,
     }
 }
 
@@ -96,10 +163,12 @@ fn describe(e: &MailError) -> String {
     }
 }
 
-/// `Daemon::connect` and one authenticated heartbeat, which makes the implicit claim (once, under
-/// the role lock, only when no session is cached for this daemon instance).
+/// `Daemon::connect_existing` (the adapter never starts a daemon: one it started would run
+/// without the owner's store and address) and one authenticated heartbeat, which makes the
+/// implicit claim (once, under the role lock, only when no session is cached for this daemon
+/// instance).
 fn connect(config: &McpConfig) -> Result<Daemon, String> {
-    let daemon = Daemon::connect(&config.home).map_err(|e| describe(&e))?;
+    let daemon = Daemon::connect_existing(&config.home).map_err(|e| describe(&e))?;
     daemon
         .call(&config.role, "/v1/heartbeat", Some(&presence_fields()))
         .map_err(|e| describe(&e))?;
@@ -116,12 +185,14 @@ impl SynapseMcpServer {
             );
         }
         let role = config.role.clone();
+        let config_home = config.home.clone();
         let daemon = tokio::task::spawn_blocking(move || connect(&config))
             .await
             .map_err(|_| "the startup task failed".to_string())??;
         let inner = Arc::new(Inner {
             role,
-            daemon: ManuallyDrop::new(daemon),
+            home: config_home,
+            daemon: Mutex::new(Arc::new(Held(ManuallyDrop::new(daemon)))),
         });
         let weak = Arc::downgrade(&inner);
         tokio::spawn(async move {
@@ -131,13 +202,12 @@ impl SynapseMcpServer {
                 tick.tick().await;
                 let Some(inner) = weak.upgrade() else { return };
                 let beat = tokio::task::spawn_blocking(move || {
-                    inner
-                        .daemon
-                        .call(&inner.role, "/v1/heartbeat", Some(&presence_fields()))
+                    inner.call(|d, role| d.call(role, "/v1/heartbeat", Some(&presence_fields())))
                 })
                 .await;
                 // A refused beat (superseded, unknown session) is not retried into a re-claim; the
-                // next tool call reports it. Only the task's loss ends the loop.
+                // next tool call reports it. A beat that finds the daemon restarted re-attaches
+                // (see `Inner::call`). Only the task's loss ends the loop.
                 if beat.is_err() {
                     return;
                 }
@@ -160,7 +230,7 @@ impl SynapseMcpServer {
         F: FnOnce(&Daemon, &str) -> Result<Value, MailError> + Send + 'static,
     {
         let inner = self.inner.clone();
-        match tokio::task::spawn_blocking(move || f(&inner.daemon, &inner.role)).await {
+        match tokio::task::spawn_blocking(move || inner.call(f)).await {
             Ok(Ok(value)) => reply(value),
             Ok(Err(e)) => refuse(describe(&e)),
             Err(_) => Err(ErrorData::internal_error("the call task failed", None)),
@@ -201,7 +271,7 @@ impl SynapseMcpServer {
         }
         let inner = self.inner.clone();
         let reply = tokio::task::spawn_blocking(move || {
-            inner.daemon.call(&inner.role, "/v1/fetch", Some(&request))
+            inner.call(|d, role| d.call(role, "/v1/fetch", Some(&request)))
         })
         .await
         .map_err(|_| "the call task failed".to_string())?
@@ -220,7 +290,7 @@ impl SynapseMcpServer {
         let inner = self.inner.clone();
         let body = encode_body(body.as_bytes());
         tokio::task::spawn_blocking(move || {
-            send_call(&inner.daemon, &inner.role, to, &message_id, &body)
+            inner.call(|d, role| send_call(d, role, to, &message_id, &body))
         })
         .await
         .map_err(|_| "the call task failed".to_string())?
@@ -232,11 +302,7 @@ impl SynapseMcpServer {
     pub async fn confirm(&self, message_id: String) -> Result<(), String> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
-            inner.daemon.call(
-                &inner.role,
-                "/v1/ack",
-                Some(&json!({"message_id": message_id})),
-            )
+            inner.call(|d, role| d.call(role, "/v1/ack", Some(&json!({"message_id": message_id}))))
         })
         .await
         .map_err(|_| "the call task failed".to_string())?
