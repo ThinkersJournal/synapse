@@ -539,9 +539,9 @@ impl Daemon {
         choice: &synapse_mailbox_persistant::needs::StoreChoice,
     ) -> Result<Daemon, DaemonError> {
         Self::open_store(cfg, || {
-            synapse_mailbox_persistant::needs::RegistryMailStore::open_named(
-                &choice.id,
-                choice.path(&cfg.home),
+            synapse_mailbox_persistant::needs::RegistryMailStore::open_choice(
+                choice,
+                &cfg.home,
                 &synapse::mailbox::MailboxNeeds::MAILBOX,
                 std::time::Duration::from_secs(30),
             )

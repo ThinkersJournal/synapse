@@ -18,6 +18,7 @@
 //! inside another tokio runtime (a `block_on` there would panic). Every backend call is bounded by
 //! [`PersistantMailStore::with_timeout`] (default 30 s): MySQL was measured to *stall*, not fail,
 //! on a full disk, so a store without its own timeout could hang a daemon.
+pub mod lease;
 pub mod needs;
 
 use chrono::{DateTime, Utc};
@@ -68,6 +69,8 @@ pub struct PersistantMailStore<K: KvBackend + Send + Sync + 'static> {
     timeout: Duration,
     /// Held for the store's life by [`SqliteMailStore::open`]: one process per database file.
     _lock: Option<std::fs::File>,
+    /// Held by [`PersistantMailStore::hold_lease`] for a store on a server.
+    lease: Option<lease::Lease>,
 }
 
 /// The SQLite store, opened for power-loss durability.
@@ -185,7 +188,7 @@ fn create_owner_only(path: &Path) -> std::io::Result<()> {
 fn new_runtime() -> Result<Runtime, StoreError> {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
-        .enable_time()
+        .enable_all()
         .build()
         .map_err(|e| se("runtime", e))
 }
@@ -212,6 +215,7 @@ impl<K: KvBackend + Send + Sync + 'static> PersistantMailStore<K> {
                 .map_or(DEFAULT_TIMEOUT, |b| b + Duration::from_secs(5)),
             kv: Arc::new(kv),
             _lock: None,
+            lease: None,
         }
     }
 
@@ -253,6 +257,9 @@ impl<K: KvBackend + Send + Sync + 'static> PersistantMailStore<K> {
 /// has already returned, so nothing of ours is in flight.
 impl<K: KvBackend + Send + Sync + 'static> Drop for PersistantMailStore<K> {
     fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            lease.release();
+        }
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
         }
@@ -806,6 +813,7 @@ impl<K: KvBackend + Send + Sync + 'static> MailStore for PersistantMailStore<K> 
         &self,
         f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
     ) -> Result<(), MailError> {
+        self.check_lease().map_err(MailError::Store)?;
         let ver_key = format!("{}/m/ver", self.ns);
         for _ in 0..MAX_RACES {
             let kv = Arc::clone(&self.kv);
