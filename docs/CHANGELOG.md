@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fix (rc.130): the MCP adapter never starts a daemon, and re-attaches after a daemon restart
+
+Pilot gates 5 and 6. `synapse-mcp-server` (and so `synapse-claude-channel` and `synapse-agent`) attached with `Daemon::connect`, which starts `synapsed` when nothing answers; the daemon it started inherited the adapter's environment, not the owner's, and ran on the default redb store (seen 2026-10-22: a stray `mailbox.redb` appeared beside the live sqlite store). It now uses the new `Daemon::connect_existing`, which never spawns and fails with "synapsed is not running". After the daemon restarts, the adapter's calls and heartbeat find (new `Daemon::instance_gone`) that the instance it proved is gone, attach to the new one (the same implicit claim startup makes; the call that noticed still reports its failure, the next succeeds). A refusal from the same instance (`superseded`, ...) is still never recovered: taking a role back stays a human `synapse claim`. Breaking for no one: `Daemon::connect` is unchanged. Tests: `the_adapter_never_starts_a_daemon`, `an_adapter_re_attaches_to_a_restarted_daemon_and_not_after_a_takeover` (fails with re-attach disabled).
+
 ### CI (rc.129): no repository secret in any pull-request job
 
 CireSnave 2026-10-22: "Don't give pull-request-triggered jobs on a public repo any repository secrets." `coverage` no longer references `CODECOV_TOKEN`: a pull request uploads tokenless (a refusal does not fail the signal), and the new `coverage-upload` job (push only, downloads the `lcov` artifact) holds the token. `build-docker` builds without login or push on every event; the new `publish-docker` (push only) holds `DOCKERHUB_*`, and the deploy jobs now follow it. The top-level `permissions: contents: read` was already present. No code change.
