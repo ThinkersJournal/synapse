@@ -100,6 +100,9 @@ pub enum DaemonStore {
     Redb(RedbStore),
     #[cfg(feature = "sqlite-store")]
     Sqlite(synapse_mailbox_persistant::SqliteMailStore),
+    /// A PersistAnt provider the operator picked by id (`mailbox-store.json`).
+    #[cfg(feature = "sqlite-store")]
+    Named(synapse_mailbox_persistant::needs::RegistryMailStore),
 }
 
 impl MailStore for DaemonStore {
@@ -108,6 +111,8 @@ impl MailStore for DaemonStore {
             DaemonStore::Redb(s) => s.durability(),
             #[cfg(feature = "sqlite-store")]
             DaemonStore::Sqlite(s) => s.durability(),
+            #[cfg(feature = "sqlite-store")]
+            DaemonStore::Named(s) => s.durability(),
         }
     }
 
@@ -119,6 +124,8 @@ impl MailStore for DaemonStore {
             DaemonStore::Redb(s) => s.write(f),
             #[cfg(feature = "sqlite-store")]
             DaemonStore::Sqlite(s) => s.write(f),
+            #[cfg(feature = "sqlite-store")]
+            DaemonStore::Named(s) => s.write(f),
         }
     }
 
@@ -130,6 +137,8 @@ impl MailStore for DaemonStore {
             DaemonStore::Redb(s) => s.read(f),
             #[cfg(feature = "sqlite-store")]
             DaemonStore::Sqlite(s) => s.read(f),
+            #[cfg(feature = "sqlite-store")]
+            DaemonStore::Named(s) => s.read(f),
         }
     }
 }
@@ -503,24 +512,53 @@ impl Daemon {
 
     /// As [`Daemon::open`], serving the mailbox from `kind`.
     pub fn open_with(cfg: &DaemonConfig, kind: StoreKind) -> Result<Daemon, DaemonError> {
+        Self::open_store(cfg, || {
+            let path = cfg.home.join(kind.file_name());
+            Ok(match kind {
+                StoreKind::Redb => {
+                    DaemonStore::Redb(RedbStore::open(&path).map_err(DaemonError::Store)?)
+                }
+                #[cfg(feature = "sqlite-store")]
+                StoreKind::Sqlite => {
+                    migration::prepare(&cfg.home)?;
+                    DaemonStore::Sqlite(
+                        synapse_mailbox_persistant::SqliteMailStore::open(&path)
+                            .map_err(DaemonError::Store)?,
+                    )
+                }
+            })
+        })
+    }
+
+    /// As [`Daemon::open`], serving the mailbox from the PersistAnt provider the operator recorded
+    /// (`synapsectl storage use`). PersistAnt checks the provider against the mailbox's needs again
+    /// at open, with every call bounded; an id that no longer meets them stops the start.
+    #[cfg(feature = "sqlite-store")]
+    pub fn open_named(
+        cfg: &DaemonConfig,
+        choice: &synapse_mailbox_persistant::needs::StoreChoice,
+    ) -> Result<Daemon, DaemonError> {
+        Self::open_store(cfg, || {
+            synapse_mailbox_persistant::needs::RegistryMailStore::open_named(
+                &choice.id,
+                choice.path(&cfg.home),
+                &synapse::mailbox::MailboxNeeds::MAILBOX,
+                std::time::Duration::from_secs(30),
+            )
+            .map(DaemonStore::Named)
+            .map_err(DaemonError::Store)
+        })
+    }
+
+    fn open_store(
+        cfg: &DaemonConfig,
+        open: impl FnOnce() -> Result<DaemonStore, DaemonError>,
+    ) -> Result<Daemon, DaemonError> {
         if !cfg.addr.ip().is_loopback() {
             return Err(DaemonError::NotLoopback);
         }
         let keystore = Keystore::open(&cfg.home).map_err(DaemonError::Keystore)?;
-        let path = cfg.home.join(kind.file_name());
-        let store = match kind {
-            StoreKind::Redb => {
-                DaemonStore::Redb(RedbStore::open(&path).map_err(DaemonError::Store)?)
-            }
-            #[cfg(feature = "sqlite-store")]
-            StoreKind::Sqlite => {
-                migration::prepare(&cfg.home)?;
-                DaemonStore::Sqlite(
-                    synapse_mailbox_persistant::SqliteMailStore::open(&path)
-                        .map_err(DaemonError::Store)?,
-                )
-            }
-        };
+        let store = open()?;
         let sink = FileSink::open(
             cfg.home.join(SECURITY_EVENTS_FILE),
             SECURITY_EVENTS_MAX_BYTES,

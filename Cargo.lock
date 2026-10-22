@@ -282,6 +282,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "asyncband"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5161fb43cb8f231f06983cb2b8f9ee9cee14be0b1356d8383398cc0f312800d1"
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2151,10 +2157,12 @@ dependencies = [
  "jiff-core",
  "jiff-static",
  "jiff-tzdb-platform",
+ "js-sys",
  "log",
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -2673,6 +2681,55 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
+name = "opendal"
+version = "0.59.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46081824c74bac9f68f0bc4408077f77b0e315c006514719c97af1c2227ac2d2"
+dependencies = [
+ "opendal-core",
+ "opendal-service-fs",
+]
+
+[[package]]
+name = "opendal-core"
+version = "0.59.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33d5a635dfea36a7a0c3bbb2ca34c97af17f98dd69b0cdf31a1d436a346e0a12"
+dependencies = [
+ "anyhow",
+ "asyncband",
+ "base64 0.23.1",
+ "bytes",
+ "futures",
+ "http 1.5.0",
+ "jiff",
+ "log",
+ "md-5",
+ "percent-encoding",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "uuid",
+ "web-time",
+]
+
+[[package]]
+name = "opendal-service-fs"
+version = "0.59.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70768b8f5af6996a494e784a1dc2a76b5cf890c422aff31ad094319bde98feb7"
+dependencies = [
+ "bytes",
+ "log",
+ "opendal-core",
+ "serde",
+ "tokio",
+ "xattr",
+]
+
+[[package]]
 name = "openssl"
 version = "0.10.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2802,25 +2859,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "persistant-blob"
-version = "0.9.4"
+name = "persistant"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e723d79b3acee1e2b944e962f7e71550333dd2fbee76e06770d3f09e032ddd86"
+checksum = "7b8796b790e8298889d27638dccbfbb4d6f695e5dbe8c81b213d71647d53d632"
+dependencies = [
+ "futures-util",
+ "opendal",
+ "persistant-blob",
+ "persistant-core",
+ "persistant-kv",
+ "persistant-opendal",
+ "persistant-relational",
+ "persistant-sqlx",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "persistant-blob"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b09d0be968d705ea5789875c26070ffaea80929f64354fb90dd33bbf62bff8b"
 dependencies = [
  "persistant-core",
 ]
 
 [[package]]
 name = "persistant-core"
-version = "0.9.4"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffb96f223c2a97bb6752e18420b5da917884f5a8e46fc212c90116905a70cf16"
+checksum = "3ab1b10377ba67e280a8a1ea866fc708f6046935a037246ba3a8cc5e0bde82e2"
 
 [[package]]
 name = "persistant-kv"
-version = "0.9.4"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ceacab1378ac9416606adbb641d5f6d9875a50d5046648fcfe6e301c5371de97"
+checksum = "80ab1089db67179f69e3be7b0468fc23a39d6a584c0b8fce3419c965d549d367"
 dependencies = [
  "persistant-blob",
  "persistant-core",
@@ -2829,10 +2905,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "persistant-relational"
-version = "0.9.4"
+name = "persistant-opendal"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a050be53f183c90e4c98b17c8e400cfdf13d2118129d0d641c37b49e5b79d790"
+checksum = "d7bb69b8fee84bc6e123d8db18379082e1edf3f8bf8ba2d50a7ab591fa9be79c"
+dependencies = [
+ "futures-util",
+ "opendal",
+ "persistant-blob",
+ "persistant-core",
+ "tokio",
+]
+
+[[package]]
+name = "persistant-relational"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d092167a83326389ce43af23045a4c00f042b805caf8e2a9c93978b353781ad"
 dependencies = [
  "persistant-core",
  "unisql-core",
@@ -2840,9 +2929,9 @@ dependencies = [
 
 [[package]]
 name = "persistant-sqlx"
-version = "0.9.4"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca86cab807875674a07d99259268a2690d9cfdb32685c5f97f7910e490969b04"
+checksum = "2d25f35cee652c9ea19bc73f856b508fface2952fc4870c26f5746640304c930"
 dependencies = [
  "persistant-core",
  "persistant-relational",
@@ -3014,6 +3103,16 @@ dependencies = [
  "wasi",
  "web-sys",
  "winapi",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -4254,7 +4353,7 @@ dependencies = [
 
 [[package]]
 name = "synapse"
-version = "6.0.0-rc.124"
+version = "6.0.0-rc.125"
 dependencies = [
  "aes-gcm",
  "ahash",
@@ -4337,7 +4436,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-agent"
-version = "6.0.0-rc.124"
+version = "6.0.0-rc.125"
 dependencies = [
  "genai",
  "serde_json",
@@ -4352,7 +4451,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-claude-channel"
-version = "6.0.0-rc.124"
+version = "6.0.0-rc.125"
 dependencies = [
  "base64 0.23.1",
  "rmcp",
@@ -4367,9 +4466,10 @@ dependencies = [
 
 [[package]]
 name = "synapse-mailbox-persistant"
-version = "6.0.0-rc.124"
+version = "6.0.0-rc.125"
 dependencies = [
  "chrono",
+ "persistant",
  "persistant-kv",
  "persistant-sqlx",
  "serde",
@@ -4382,7 +4482,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mcp-server"
-version = "6.0.0-rc.124"
+version = "6.0.0-rc.125"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4402,7 +4502,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-security"
-version = "6.0.0-rc.124"
+version = "6.0.0-rc.125"
 dependencies = [
  "chrono",
  "serde_json",
@@ -4412,12 +4512,13 @@ dependencies = [
 
 [[package]]
 name = "synapsectl"
-version = "6.0.0-rc.124"
+version = "6.0.0-rc.125"
 dependencies = [
  "chrono",
  "clap",
  "serde_json",
  "synapse",
+ "synapse-mailbox-persistant",
  "synapse-security",
  "synapsed-client",
  "tempfile",
@@ -4426,7 +4527,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed"
-version = "6.0.0-rc.124"
+version = "6.0.0-rc.125"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4445,7 +4546,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed-client"
-version = "6.0.0-rc.124"
+version = "6.0.0-rc.125"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -5771,6 +5872,16 @@ dependencies = [
  "rusticata-macros",
  "thiserror 2.0.21",
  "time",
+]
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
 ]
 
 [[package]]

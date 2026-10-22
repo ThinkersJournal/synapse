@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.125): the mailbox store is chosen through PersistAnt 0.9.10, not named in Synapse
+
+`synapse-mailbox-persistant::needs`: `provider_needs(&MailboxNeeds)` (capability ids incl. `kv.bounded_call`, durability Machine), `listing()` (= `persistant::registry::providers`), `RegistryMailStore::open_named(id, path, needs, call_bound)` (`open_named_with` + `Handle::into_kv`; owner-only file and one-process lock as for the SQLite store) and `StoreChoice` (`<home>/mailbox-store.json`: provider id + file). `synapsed` serves the recorded choice (`Daemon::open_named`); on a fresh home in a `sqlite-store` build it records the first provider PersistAnt lists. `synapse storage list` prints the list with PersistAnt's reasons; `synapse storage use <id> [--file F]` records one (feature `storage`, default on in `synapsectl`). `SYNAPSE_MAILBOX_STORE` still works and wins, but is deprecated (the daemon says so). Existing homes keep their store: a home with `mailbox.redb` or `mailbox.sqlite` and no recorded choice opens as before. No Synapse code names a backend id; a Postgres/MySQL provider needs a URL endpoint and is not wired here. `persistant` 0.9.10 (kv/sqlx 0.9.4 -> 0.9.10).
+
 ### Added (rc.124): `MailboxNeeds`, the mailbox's needs stated without naming a store; PersistAnt 0.9.4
 
 `synapse::mailbox::MailboxNeeds` (`MailboxNeeds::MAILBOX`): minimum durability (`REQUIRED_DURABILITY`, Machine), atomic batch, ordered scan, lease/TTL, bounded calls, one field per row of `docs/MAILBOX_STORE_NEEDS.md`. It names no backend. Nothing consumes it yet: CireSnave ruled (2026-10-21) that PersistAnt takes the needs and returns the stores that can provide them, so Synapse neither keeps a backend registry nor builds candidates; the daemon will call PersistAnt's API when it exists. `persistant-kv` and `persistant-sqlx` 0.9.0 -> 0.9.4 (lock: also persistant-core, -blob, -relational). No behaviour change: `SYNAPSE_MAILBOX_STORE` and the stores are untouched.

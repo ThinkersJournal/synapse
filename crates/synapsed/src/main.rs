@@ -12,9 +12,12 @@
 //! names the role(s), comma separated, that may read them (for example `agentlife-launcher`).
 //! Security alerts go as mail to the roles in `SYNAPSE_ALERT_ROLES` (comma separated), from
 //! `daemon:alerts@<account>`; unset, nothing changes.
-//! The mailbox store is redb unless `SYNAPSE_MAILBOX_STORE=sqlite` and the binary was built with
-//! `--features sqlite-store` (PersistAnt SQLite, `<home>/mailbox.sqlite`). A different store is a
-//! different file: nothing is migrated, and the other file is left untouched.
+//! The mailbox store, in order: `SYNAPSE_MAILBOX_STORE` (deprecated pin: `redb`, or `sqlite` in a
+//! build with `--features sqlite-store`); else the PersistAnt provider recorded in
+//! `<home>/mailbox-store.json` (`synapsectl storage list` shows what this build offers, `storage use`
+//! records one); else, on a home with no mailbox file and in a `sqlite-store` build, the first
+//! provider PersistAnt lists for the mailbox's needs, which is then recorded; else redb. A different
+//! store is a different file: nothing is migrated, and the other file is left untouched.
 //! Security events (failed bearers and claims, over-budget requests) go to
 //! `<home>/security-events.jsonl`, owner-only; they never carry a token, nonce or signature.
 
@@ -49,6 +52,14 @@ async fn main() -> ExitCode {
         addr,
         sweep_every: std::time::Duration::from_secs(3600),
     };
+    #[cfg(feature = "sqlite-store")]
+    let named = match named_choice(&config.home) {
+        Ok(choice) => choice,
+        Err(e) => {
+            eprintln!("synapsed: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let kind = match std::env::var("SYNAPSE_MAILBOX_STORE").as_deref() {
         Err(_) | Ok("" | "redb") => StoreKind::Redb,
         #[cfg(feature = "sqlite-store")]
@@ -65,7 +76,14 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let daemon = match Daemon::open_with(&config, kind) {
+    #[cfg(feature = "sqlite-store")]
+    let opened = match &named {
+        Some(choice) => Daemon::open_named(&config, choice),
+        None => Daemon::open_with(&config, kind),
+    };
+    #[cfg(not(feature = "sqlite-store"))]
+    let opened = Daemon::open_with(&config, kind);
+    let daemon = match opened {
         Ok(daemon) => daemon,
         Err(e) => {
             eprintln!("synapsed: {e}");
@@ -114,6 +132,43 @@ async fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// The PersistAnt provider to serve the mailbox from, or `None` for the pinned/default store.
+/// `SYNAPSE_MAILBOX_STORE` (deprecated) wins; then the recorded choice; then, on a home with no
+/// mailbox file, the first provider PersistAnt lists for the mailbox's needs, recorded so the next
+/// start opens the same one.
+#[cfg(feature = "sqlite-store")]
+fn named_choice(
+    home: &std::path::Path,
+) -> Result<Option<synapse_mailbox_persistant::needs::StoreChoice>, String> {
+    use synapse_mailbox_persistant::needs::{StoreChoice, listing};
+    if std::env::var("SYNAPSE_MAILBOX_STORE").is_ok_and(|v| !v.is_empty()) {
+        eprintln!(
+            "synapsed: SYNAPSE_MAILBOX_STORE is deprecated; record a store with `synapse storage use`"
+        );
+        return Ok(None);
+    }
+    if let Some(choice) = StoreChoice::read(home).map_err(|e| e.to_string())? {
+        return Ok(Some(choice));
+    }
+    if home.join("mailbox.redb").exists() || home.join("mailbox.sqlite").exists() {
+        return Ok(None);
+    }
+    let Ok(listed) = listing(&synapse::mailbox::MailboxNeeds::MAILBOX) else {
+        return Ok(None);
+    };
+    let Some(top) = listed.first() else {
+        return Ok(None);
+    };
+    let choice = StoreChoice::new(top.id, None).map_err(|e| e.to_string())?;
+    choice.write(home).map_err(|e| e.to_string())?;
+    eprintln!(
+        "synapsed: fresh home; recorded mailbox store {:?} in {}",
+        choice.id,
+        synapse_mailbox_persistant::needs::CHOICE_FILE
+    );
+    Ok(Some(choice))
 }
 
 /// Resolves on the first stop request. A handler that cannot be installed just never fires.
