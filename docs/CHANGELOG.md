@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.128): cutover docs say how G6 was built
+
+The readiness doc, the cutover spec, the replacement plan and the adapter spec named role `lane-restart@<account>` for lane-restart's notify. agentlife built it as an outbox relayed under role `agentlife-launcher` (#123); replies are not routed back, and one real send on a scratch home is owed before `notify_transport` is flipped. Evidence: OverMind#157. No code change.
+
 ### Docs (rc.127): `docs/MAILBOX_STORES.md`
 
 How to list and record a mailbox store (`synapse storage list|use`), the store order the daemon follows, and what server stores (PostgreSQL/MySQL/MariaDB) need: the URL variable in the daemon's own environment, one daemon per database by lease, and what is not covered. A line in the pilot runbook points to it. No code change.
