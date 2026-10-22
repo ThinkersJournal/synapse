@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### CI (rc.129): no repository secret in any pull-request job
+
+CireSnave 2026-10-22: "Don't give pull-request-triggered jobs on a public repo any repository secrets." `coverage` no longer references `CODECOV_TOKEN`: a pull request uploads tokenless (a refusal does not fail the signal), and the new `coverage-upload` job (push only, downloads the `lcov` artifact) holds the token. `build-docker` builds without login or push on every event; the new `publish-docker` (push only) holds `DOCKERHUB_*`, and the deploy jobs now follow it. The top-level `permissions: contents: read` was already present. No code change.
+
 ### Docs (rc.128): cutover docs say how G6 was built
 
 The readiness doc, the cutover spec, the replacement plan and the adapter spec named role `lane-restart@<account>` for lane-restart's notify. agentlife built it as an outbox relayed under role `agentlife-launcher` (#123); replies are not routed back, and one real send on a scratch home is owed before `notify_transport` is flipped. Evidence: OverMind#157. No code change.
