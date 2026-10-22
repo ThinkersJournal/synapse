@@ -19,7 +19,7 @@ Gap numbers and wording are the table in `superpowers/specs/2026-10-15-cutover-a
 | G3 | `set_summary` | **Closed**: tool in `synapse-mcp-server` (`set_summary`, with `send`, `fetch`, `ack`, `list`, `whoami`) | M6, on main before rc.73 |
 | G4 | Peer ids rotate | Not a gap: roles are stable, mail to an offline role is kept | n/a |
 | G5 | Dev-channels dialog approval for `server:synapse` | **OPEN. CireSnave's verbatim yes is the blocker.** I have not read OverMind's handler file at its current `main`; last known state is "no record" | PM asks CireSnave; OverMind writes the record |
-| G6 | `lane-restart` notify uses claude-peers' port and replies go nowhere | **OPEN**, OverMind step 3 (role `lane-restart@<account>`); no Synapse change needed | OverMind |
+| G6 | `lane-restart` notify uses claude-peers' port and replies go nowhere | **BUILT, NOT RUN** (amended 2026-10-22): outbox relayed under role `agentlife-launcher` (agentlife #123), not `lane-restart@<account>`; one real send on a scratch home is owed before `notify_transport` is flipped; no Synapse change needed | OverMind |
 | G7 | Who starts `synapsed` at login | **OPEN.** Today it is started by hand (the soak daemon is this lane's, pid 28280). The adapter fails if it is down | PM decision; OverMind is the natural owner |
 | G8 | Broadcast to all peers | **OPEN, unrequested.** No broadcast in Synapse; the PM's `[NOTICE]` to ~20 lanes would be 20 sends | PM: needed or not |
 | G9 | Broker accepted any local process as any peer | Not a gap: the daemon verifies keys | n/a |
@@ -49,7 +49,7 @@ OverMind, agentlife, unisql. Four had no summary set.
 | Dev-channels dialog | Exact-match approval record per channel string | **Not covered** (G5) |
 | Broadcast | none | **Not covered** (G8) |
 | Auto-start broker | none (G7) | **Not covered** |
-| Reply-less non-peer notify from `lane-restart` | role `lane-restart@<account>` | Not wired (G6) |
+| Reply-less non-peer notify from `lane-restart` | role `agentlife-launcher` relaying the outbox (amended 2026-10-22; was `lane-restart@<account>`) | Built, never run against a daemon (G6) |
 
 ## 3. Soak evidence and what it did not test
 

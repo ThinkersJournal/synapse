@@ -54,7 +54,7 @@ Order is by dependency. Each row is one PR unless stated; owner in brackets.
 |---|---|---|---|
 | 1 | Approval record for `Channels: server:synapse` (and the overlap value) in OverMind's handlers, scoped to the lane roles in the existing record | CireSnave's verbatim yes [PM asks] | handler tests pin the exact-match and the no-prefix cases, like the claude-peers record's |
 | 2 | Lane launch passes `--role` and the synapse channel (OverMind `lane-restart` and AgentLife launcher) | 1 | a restarted test lane shows a pushed event |
-| 3 | `notify.rs` becomes role `lane-restart@<account>` on the daemon API (plan M8) [OverMind] | daemon API (on main) | the restart ask gets its reply |
+| 3 | `notify.rs` becomes an outbox relayed under role `agentlife-launcher` (agentlife #123; **amended 2026-10-22**, was role `lane-restart@<account>`; replies are not routed back to lane-restart) [OverMind/agentlife] | daemon API (on main) | the restart ask gets its reply |
 | 4 | Peer lookup by cwd and summary on the daemon (gap G1) | PR in section 7 | a lane finds another by cwd without claude-peers |
 | 5 | Channel meta carries sender summary and cwd (gap G2) | 4 | event shows who sent it by lane, not only role |
 | 6 | Side by side: both channels loaded, new traffic over Synapse, soak 3 days on `/v1/stats` (`redelivered`, never-acked) | 1-3 | soak counters read; board 175's soak is the model |
@@ -69,7 +69,7 @@ Order is by dependency. Each row is one PR unless stated; owner in brackets.
 | G3 | `set_summary` | `set_summary` tool exists in M6 (`summary` in list) | None; check the tool is in the channel server's tool set |
 | G4 | Peer ids rotate on every restart; senders rediscover | Roles are stable; mail to an offline role is kept | An improvement, not a gap. CLAUDE.md section 8 ("peer IDs rotate") becomes obsolete |
 | G5 | Dev-channels dialog approval for `server:claude-peers` | No record for `server:synapse` | Step 1; CireSnave's decision |
-| G6 | `lane-restart` notify posts to 127.0.0.1:7899 as non-peer `lane-restart-host`; replies go nowhere | Role `lane-restart@<account>` can receive | Step 3 |
+| G6 | `lane-restart` notify posts to 127.0.0.1:7899 as non-peer `lane-restart-host`; replies go nowhere | Amended 2026-10-22: the `agentlife-launcher` relay sends it; no reply path needed | Step 3 |
 | G7 | Auto-start broker on first MCP use | `synapsed` is started by hand or by the soak scripts; the adapter fails if it is down | Decide who starts `synapsed` at login (OverMind at boot is the natural owner); until then lane launch must check `/v1/health` and name the failure |
 | G8 | Broadcast to all peers | None | Only if a lane still needs it; the PM's `[NOTICE]` goes to ~20 lanes today by hand. Out of scope unless asked |
 | G9 | The HTTP broker accepted any local process as any peer | Daemon verifies keys | Not a gap; a security improvement (the broker never checked `from_id`) |

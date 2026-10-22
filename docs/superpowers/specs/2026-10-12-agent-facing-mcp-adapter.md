@@ -240,7 +240,7 @@ board 131); the release notes must say so.
 | Presence = pid alive | heartbeat lease, offline roles stay listed | **Done** (`list`, `ONLINE_WINDOW`) |
 | `notifications/claude/channel` at 1 Hz | `synapse-claude-channel` | **Done**, live-tested n=1 (c7 PASS on rc.33); cut-over NOT approved |
 | broker auto-spawn | `Daemon::connect` auto-start | **Done** |
-| lane-restart `notify.rs` posts to 7899 | role `lane-restart@<account>` (M8) | **UNVERIFIED** at current OverMind; OverMind's lane |
+| lane-restart `notify.rs` posts to 7899 | outbox relayed under role `agentlife-launcher` (M8 as built, agentlife #123; amended 2026-10-22, was `lane-restart@<account>`) | built, **not run** against a daemon |
 | auto-summary via OpenAI model | dropped; client sets its own | **Done** (`set_summary`) |
 | `server:claude-peers` approval records | `server:synapse` and the side-by-side pair | OverMind/PM; **UNVERIFIED** whether recorded |
 
