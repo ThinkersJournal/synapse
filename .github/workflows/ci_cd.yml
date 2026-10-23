@@ -640,3 +640,12 @@ jobs:
             cd /opt/synapse
             docker-compose pull
             docker-compose up -d
+
+  # Advisory portfolio check (CireSnave 2026-10-23: "Roll out advisory-only, non-blocking CodeRipper
+  # checks everywhere."). NOT a required check and no rule is silenced here; the PM gate reads it as
+  # advice. Pinned to a commit of the reusable workflow, which this repo (public) runs on hosted runners.
+  portfolio:
+    name: CodeRipper portfolio (advisory)
+    permissions:
+      contents: read
+    uses: ciresnave/coderipper/.github/workflows/portfolio.yml@c665210ad0972cf3ddb7bc81bdd7800c3248a938
