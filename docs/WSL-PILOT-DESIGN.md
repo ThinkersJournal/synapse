@@ -38,3 +38,28 @@ Same family as #236 (the proof, not a process property, should decide). The lane
 1. Linux build of `synapse` + `synapse-claude-channel` (in `lane-spike`, rustup as the lane user).
 2. `synapse id init` in the lane home -> role `lane-commysdk` key; PM/CireSnave registers the account/agent cert per the identity roadmap.
 3. Link per the chosen option; transcript: `lane-commysdk` <-> `pm@ciresnave` and one Windows lane, send + fetch both ways.
+
+## Decision (PM, 2026-10-23): B. Spike code in `tools/wsl-relay/`
+- `relay_win.py <port>`: Windows, listens on AF_HYPERV only, pipes to `127.0.0.1:7920` (refuses any non-loopback target).
+- `guest_proxy.py unix <sock> <port>` (outside the sandbox) and `guest_proxy.py tcp <sock>` (inside, sandbox-private `127.0.0.1:7920`).
+- Client: `SYNAPSE_REMOTE_DAEMON=1` (PR #237) in the lane; `synapsed.json` copied into the lane home (not secret) with the sandbox address.
+
+## GUID plan (the one-time admin step)
+WSL2 maps guest `AF_VSOCK` port `N` to service GUID `{N:08x}-facb-11e6-bd58-64006a7986d3`. One port (so one GUID, one relay
+process, one Unix socket) per lane: `0x53590001` = lane-commysdk (`53590001-facb-11e6-bd58-64006a7986d3`); later lanes `0x53590002`...
+
+Elevated PowerShell, once per lane:
+```powershell
+$g = '53590001-facb-11e6-bd58-64006a7986d3'
+$k = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\$g"
+New-Item $k -Force | Out-Null
+New-ItemProperty $k -Name ElementName -Value 'synapse-lane-commysdk' -PropertyType String -Force | Out-Null
+Get-ItemProperty $k   # read back
+```
+Undo: `Remove-Item $k`. Nothing else needs admin: measured 2026-10-23, the unelevated relay binds the unregistered GUID
+(`relay listening on 53590001-...`), but the guest's `connect((VMADDR_CID_HOST, 0x53590001))` times out (ETIMEDOUT) until the GUID is registered.
+
+## Isolation caveat
+`lane-sandbox` uses `--share-net` (outbound for crates.io/GitHub). AF_VSOCK is not netns-scoped, so a process in the sandbox can dial
+ANY host-registered vsock GUID, not only its own socket. With one lane in the distro this is accepted; registered GUIDs must each be a
+Synapse relay only, and the daemon's per-role key check is what authenticates (the relay adds no identity).
