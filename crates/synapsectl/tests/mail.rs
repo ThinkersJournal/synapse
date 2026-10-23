@@ -989,3 +989,73 @@ fn list_filters_on_reported_cwd_and_repo() {
         "exact, not prefix"
     );
 }
+
+/// Shared state (S2b) through the real binary: new, show, list, a stale set, a good set, history.
+#[test]
+fn state_commands_create_show_list_set_and_refuse_a_stale_revision() {
+    let home = Home::new();
+    let made: Value = serde_json::from_str(&home.ok(&[
+        "state",
+        "new",
+        "--role",
+        "alpha",
+        "--title",
+        "wire it",
+        "--party",
+        "alpha",
+        "--party",
+        "beta",
+        "--owner",
+        "alpha",
+        "--verify",
+        "crate_version:synapse,ge,6.0.0",
+    ]))
+    .unwrap();
+    assert_eq!(
+        (made["id"].as_str(), made["revision"].as_u64()),
+        (Some("T-1"), Some(1))
+    );
+    assert_eq!(made["verify"][0]["fact"], "crate_version:synapse");
+
+    let shown: Value =
+        serde_json::from_str(&home.ok(&["state", "show", "--role", "alpha", "T-1"])).unwrap();
+    assert_eq!(shown["title"], "wire it");
+    let listed = home.ok(&["state", "list", "--role", "alpha", "--state", "open"]);
+    assert_eq!(listed.lines().count(), 1);
+
+    let set = home.ok(&[
+        "state", "set", "--role", "alpha", "T-1", "--rev", "1", "--state", "waiting",
+    ]);
+    assert_eq!(serde_json::from_str::<Value>(&set).unwrap()["revision"], 2);
+    let stale = home.run(&[
+        "state", "set", "--role", "alpha", "T-1", "--rev", "1", "--state", "done",
+    ]);
+    assert_ne!(stale.status.code(), Some(0), "a stale revision must fail");
+    assert!(
+        String::from_utf8_lossy(&stale.stderr).contains("stale_revision"),
+        "{stale:?}"
+    );
+
+    let history = home.ok(&["state", "history", "--role", "alpha", "T-1"]);
+    assert_eq!(
+        history.lines().count(),
+        2,
+        "the refused write left no entry"
+    );
+
+    let bad = home.run(&[
+        "state",
+        "new",
+        "--role",
+        "alpha",
+        "--title",
+        "t",
+        "--party",
+        "alpha",
+        "--owner",
+        "alpha",
+        "--verify",
+        "not a condition",
+    ]);
+    assert_eq!(bad.status.code(), Some(2), "{bad:?}");
+}

@@ -22,6 +22,11 @@ identity resolution; about 1,200 lines) was removed in rc.57 because most of its
 | `synapse requeue --role <role> <message_id>` | puts a dead message back in the inbox with its delivery count reset |
 | `synapse stats --role <role>` | per-role `sent`, `acked`, `redelivered`, `expired` since the daemon started, with `scope` and `since`, one JSON object per line |
 | `synapse list --role <role>` | every role the daemon knows, with presence and pending counts, one JSON object per line |
+| `synapse id grant --role <role> <state-read-all\|state-admin\|state-derive>` / `ungrant` | with the account key: give or take back an extra shared-state grant; it reaches the role's certificate when that is next made |
+| `synapse state new --role <role> --title <t> --party <p>... --owner <o> [--state s] [--notes n] [--verify FACT,OP,VALUE]... [--blocked-on T-n\|FACT,OP,VALUE]...` | create a shared-state record (you must be a party); prints it as JSON |
+| `synapse state show\|history --role <role> <T-n>` | one record, or its hash-chained history one entry per line |
+| `synapse state list --role <role> [--state a,b] [--party p]` | the records you may see, one JSON object per line |
+| `synapse state set --role <role> <T-n> --rev <n> [--title ..] [--owner ..] [--state ..] [--notes ..] [--party ..]... [--verify ..]... [--blocked-on ..]...` | change a record if it is still at `--rev`; a stale `--rev` changes nothing (`stale_revision`) |
 
 Environment: `SYNAPSE_HOME` (keystore, sessions, mailbox; default `%LOCALAPPDATA%\synapse` on Windows, else
 `$XDG_DATA_HOME/synapse` or `~/.local/share/synapse`), `SYNAPSE_ADDR` (daemon address, default `127.0.0.1:7920`, loopback
@@ -47,6 +52,10 @@ Bound to a loopback address only (it refuses any other). Bodies are JSON and **d
 | `/v1/heartbeat` | POST | `summary?` | presence; `summary` at most 500 bytes |
 | `/v1/list` | GET | none | roles with `online` (heard from within 90 s), `summary`, `pending` |
 | `/v1/stats` | GET | none | per-role cumulative counters since this daemon started (a restart begins again from zero); the CLI reader is `synapse stats` |
+| `/v1/state/create` | POST | `title`, `parties`, `owner`, `state?`, `blocked_on?`, `verify?`, `notes?` | shared state (`state.redb`); needs `state-write` and the caller a party; answers `{record}` with id `T-<n>` |
+| `/v1/state/get`, `/v1/state/history` | GET | `?id=T-<n>` | a record, or its hash-chained history; a record the caller may not see answers `404` (`get`) or `403` (`history`) |
+| `/v1/state/list` | GET | `?state=a,b&party=p` | the records the caller may see: its own, or all with `state-read-all` / `state-admin` |
+| `/v1/state/patch` | POST | `id`, `expected_revision`, `patch` | compare-and-set; `409 stale_revision` changes nothing and carries `current` (the revision) and `record`; `403` is recorded as a `state_denied` security event |
 
 Delivery is at-least-once: a fetched message is leased and comes back if not acked before the lease ends. A message leased `max_deliveries` times (default 10) without an ack moves to the role's **dead set**: bounded and visible, never silently dropped. It keeps its body, `from`, attempts and enqueue time for the retention period; `list`'s `pending.dead` counts it; a resend of its id is a duplicate; the receiver's `ack` discards it. `GET /v1/dead` reads the set and `POST /v1/requeue` replays one message; the CLI is `synapse dead` and `synapse requeue <message_id>`. (Library: `Mailbox::dead_letters`, `Mailbox::requeue_dead`.)
 

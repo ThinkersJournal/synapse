@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.144): shared state, slice S2b: `/v1/state/*` and `synapse state`
+
+The daemon opens `state.redb` beside the mailbox and serves `create`, `get`, `list`, `patch` and `history` under `/v1/state/` behind the usual session auth. The caller is built from the session's verified certificate (`state-write`, `state-read-all`, `state-admin`), never from the request; access, compare-and-set and validation are the store's. A stale `patch` is `409 stale_revision` carrying `current` and the winner's `record`; a record the caller may not see is `404` on `get`; a refusal is a new `state_denied` security event. CLI: `synapse state` with `new`, `show`, `list`, `set` and `history`. CI: the portfolio job is repinned to coderipper a48fc6c (it now sweeps workspace members, so expect new advisory findings).
+
 ### Feature (rc.143): shared state, slice S2a: `state-*` permissions and `id grant`
 
 `Permission` gains `state-write` (now in every role's default grants, so certificates re-issue on the next load), `state-read-all`, `state-admin` and `state-derive`. The last three are granted by the account holder: `synapse id grant --role <role> <permission>` / `ungrant`, stored in `roles/<role>/grants`, applied when the certificate is next made (a full home renews on load; `id issue` uses them for a role-only home). A corrupt grants file is refused, never skipped. **Breaking for a parser from before this change:** `Permission::parse` rejects a name it does not know, so it cannot read a certificate that carries the new ones. The design doc is amended (decisions Q1-Q5; four permissions, `state-read` dropped); S2 is split into S2a (this) and S2b (daemon `/v1/state` + `synapse state`). CI: the portfolio job is repinned to coderipper 789b0122 (Windows fix).
