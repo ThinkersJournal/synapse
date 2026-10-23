@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.137): a role-only keystore (`id init-role`, `id issue`, `id install-cert`)
+
+For a sandbox (the WSL pilot) that must not hold the account key, which could mint any role. The role's keys are made where they are used (`synapse id init-role`, which prints their public halves); the account holder certifies them (`synapse id issue --days N`, 1 to 30) and the certificate, which is public, is installed with `synapse id install-cert`. `Keystore::open_role_only` refuses a home that holds an account key; a role-only home never creates keys or certificates and never renews, so an expired certificate is an error that says to ask for a re-issue. `synapse`, `synapsed-client` and the adapters load roles through `keystore::load_role`, which uses the full keystore when the account key is present and the role-only one otherwise. The daemon is unchanged.
+
 ### Docs (rc.136): ROADMAP rows for the open issues
 
 Rows 20-29 schedule or close #5, #20, #21, #22, #49, #61, #105, #106, #110 and #119-#121, each checked at `origin/main` a2e98e2. No code change.
