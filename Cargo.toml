@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.141"
+version = "6.0.0-rc.142"
 
 [package]
 name = "synapse"

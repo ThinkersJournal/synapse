@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.142): shared state between lanes, slice S1 (the store)
+
+`synapse::state`: a `Record` per cross-lane thread (`T-<n>` ids, reserved `uid` for a later ULID), written by compare-and-set on its revision (`StateError::StaleRevision` carries the current record), with an append-only history hash-chained over each entry (`verify_chain`, `fold`). Access by party: `Caller { write, admin, read_all }` (a party with `write` patches; `read_all` reads everything and writes nothing, for the PM and the export role; `admin` does both and may patch terminal records); only the owner or an admin changes parties or owner. `FactSpec` parses the closed fact registry (`crate_version`, `pr_state`, `ref_sha`, `check_state`, `file_at_ref`); free text is bounded and control-character-free. `StateStore` is the transport-neutral trait; `StateEngine` over a `Backend` holds all the logic; `MemoryBackend` and (with `mailbox-redb`) `RedbBackend` (`state.redb`, owner-only, format-stamped) store rows. No daemon, CLI, permission or notification yet (S2-S4). Design: `docs/superpowers/specs/2026-10-23-shared-state-design.md` (#240).
+
 ### CI (rc.141): advisory CodeRipper portfolio check
 
 CireSnave 2026-10-23: "Roll out advisory-only, non-blocking CodeRipper checks everywhere." A `portfolio` job in `ci_cd.yml` calls `ciresnave/coderipper`'s reusable workflow, pinned to commit c665210. It is not a required check and silences no rule.

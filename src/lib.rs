@@ -200,6 +200,7 @@ pub mod config;
 pub mod error;
 pub mod security;
 pub mod security_events;
+pub mod state;
 
 pub mod certificate;
 pub mod circuit_breaker;
