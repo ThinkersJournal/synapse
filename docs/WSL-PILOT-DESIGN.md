@@ -87,3 +87,18 @@ Windows works for 24 h and then dies, and moves a private key across the boundar
   needs a delegation-aware signing path in the client. Unverified: whether the daemon's chain check accepts a leaf under a delegating cert today
   (nesting is enforced in `certificate.rs`, no end-to-end test read).
 - Scope of the lane role: `send`, `ack`, `request-ack` only (`default_permissions()`), confirmed from the cert issued for `lane-commysdk`.
+
+## Transcript (2026-10-23 13:39Z, branch build rc.134 = #238, in `lane-sandbox` as `lane-commysdk`)
+```
+# distro, sandboxed: SYNAPSE_HOME=~/synapse-home (no account key), SYNAPSE_REMOTE_DAEMON=1, SYNAPSE_ADDR=127.0.0.1:7920
+synapse id init-role --account ciresnave --role lane-commysdk      -> prints signing-pub / sealing-pub (public)
+# Windows (pilot home, account key): synapse id issue --role lane-commysdk --signing-pub <hex> --sealing-pub <hex> --days 8 > cert.pem
+synapse id install-cert --role lane-commysdk < cert.pem            -> installed (certificate valid 8 days; send, ack, request-ack)
+synapse claim --role lane-commysdk                                 -> identity: lane-commysdk@ciresnave, epoch: 1
+synapse list  --role lane-commysdk                                 -> agentlife, lane-commysdk (online), overmind, pm (online), synapse (online)
+synapse send  --role lane-commysdk --to pm      "[STATUS] ..."     -> outcome: queued
+synapse send  --role lane-commysdk --to synapse "[READY] ..."      -> outcome: queued; the Windows `synapse` lane received it (push)
+(Windows synapse -> lane-commysdk NOTICE)                          -> `synapse inbox --role lane-commysdk` in the sandbox returned it; `ack` -> removed
+```
+Path: sandbox 127.0.0.1:7920 (`guest_proxy.py tcp`) -> Unix socket `~/synapse-home/relay.sock` -> `guest_proxy.py unix` (outside the sandbox, AF_VSOCK to CID 2)
+-> Windows `relay_win.py` (AF_HYPERV, WSL VM id) -> daemon `127.0.0.1:7920`. No TCP listener was added on Windows.
