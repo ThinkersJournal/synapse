@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### CI (rc.141): advisory CodeRipper portfolio check
+
+CireSnave 2026-10-23: "Roll out advisory-only, non-blocking CodeRipper checks everywhere." A `portfolio` job in `ci_cd.yml` calls `ciresnave/coderipper`'s reusable workflow, pinned to commit c665210. It is not a required check and silences no rule.
+
 ### Docs (rc.139): design for shared state between lanes
 
 `docs/superpowers/specs/2026-10-23-shared-state-design.md` and ROADMAP row 30. No code change.
