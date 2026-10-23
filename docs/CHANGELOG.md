@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fix (rc.138): a daemon renamed aside by an upgrade is still found; no daemon is started onto a held port
+
+On Windows the client treated an announced pid as stale unless its image was named exactly `synapsed.exe`. An in-place upgrade renames the running `synapsed.exe` aside (`synapsed.exe.<tag>.bak`), so every fresh client and reconnect said "no daemon answered" until the daemon restarted. The image name is no longer checked: the HMAC health proof decides. Separately, `Daemon::connect` no longer starts `synapsed` when the announced port is held by something that fails the proof AND the daemon would bind that same address (`SYNAPSE_ADDR`, else the default 127.0.0.1:7920); it reports the failed proof (the spawned daemon could only exit "address in use" and leave a stray `mailbox.redb`). On a free-port configuration (`:0`) a daemon still starts and takes over, as before.
+
 ### Feature (rc.137): a role-only keystore (`id init-role`, `id issue`, `id install-cert`)
 
 For a sandbox (the WSL pilot) that must not hold the account key, which could mint any role. The role's keys are made where they are used (`synapse id init-role`, which prints their public halves); the account holder certifies them (`synapse id issue --days N`, 1 to 30) and the certificate, which is public, is installed with `synapse id install-cert`. `Keystore::open_role_only` refuses a home that holds an account key; a role-only home never creates keys or certificates and never renews, so an expired certificate is an error that says to ask for a re-issue. `synapse`, `synapsed-client` and the adapters load roles through `keystore::load_role`, which uses the full keystore when the account key is present and the role-only one otherwise. The daemon is unchanged.
