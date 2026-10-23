@@ -951,9 +951,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.3"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
 ]
@@ -4353,7 +4353,7 @@ dependencies = [
 
 [[package]]
 name = "synapse"
-version = "6.0.0-rc.130"
+version = "6.0.0-rc.131"
 dependencies = [
  "aes-gcm",
  "ahash",
@@ -4436,7 +4436,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-agent"
-version = "6.0.0-rc.130"
+version = "6.0.0-rc.131"
 dependencies = [
  "genai",
  "serde_json",
@@ -4451,7 +4451,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-claude-channel"
-version = "6.0.0-rc.130"
+version = "6.0.0-rc.131"
 dependencies = [
  "base64 0.23.1",
  "rmcp",
@@ -4466,7 +4466,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mailbox-persistant"
-version = "6.0.0-rc.130"
+version = "6.0.0-rc.131"
 dependencies = [
  "chrono",
  "persistant",
@@ -4482,7 +4482,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mcp-server"
-version = "6.0.0-rc.130"
+version = "6.0.0-rc.131"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4502,7 +4502,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-security"
-version = "6.0.0-rc.130"
+version = "6.0.0-rc.131"
 dependencies = [
  "chrono",
  "serde_json",
@@ -4512,7 +4512,7 @@ dependencies = [
 
 [[package]]
 name = "synapsectl"
-version = "6.0.0-rc.130"
+version = "6.0.0-rc.131"
 dependencies = [
  "chrono",
  "clap",
@@ -4527,7 +4527,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed"
-version = "6.0.0-rc.130"
+version = "6.0.0-rc.131"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4546,7 +4546,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed-client"
-version = "6.0.0-rc.130"
+version = "6.0.0-rc.131"
 dependencies = [
  "base64 0.23.1",
  "chrono",

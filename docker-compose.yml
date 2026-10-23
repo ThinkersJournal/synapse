@@ -14,11 +14,11 @@
 #   docker compose exec synapse synapse send --role alice --to alice "hello"
 #   docker compose exec synapse synapse inbox --role alice
 #
-# Pin a release instead of the moving `main` tag with SYNAPSE_IMAGE=thinkersjournal/synapse:<tag>.
+# Pin a release instead of the moving `main` tag with SYNAPSE_IMAGE=ghcr.io/thinkersjournal/synapse:<tag>.
 
 services:
   synapse:
-    image: ${SYNAPSE_IMAGE:-thinkersjournal/synapse:main}
+    image: ${SYNAPSE_IMAGE:-ghcr.io/thinkersjournal/synapse:main}
     container_name: synapse
     restart: unless-stopped
     environment:

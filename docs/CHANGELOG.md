@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### CI (rc.131): Docker image moves from Docker Hub to GHCR
+
+CireSnave 2026-10-23: all projects' Docker images move from Docker Hub to GHCR "so we don't have secrets stored in two places." `publish-docker` now logs in to `ghcr.io` with the job's `GITHUB_TOKEN` (job permissions `contents: read`, `packages: write`) and pushes `ghcr.io/thinkersjournal/synapse`; no `DOCKERHUB_*` secret is referenced any more. `docker-compose.yml` defaults to `ghcr.io/thinkersjournal/synapse:main`. Not verified: the first GHCR push (it runs only on push to main), and that the package is public (a new GHCR package starts private; visibility is a one-time setting on the package page). The old Docker Hub images are untouched.
+
 ### Fix (rc.130): the MCP adapter never starts a daemon, and re-attaches after a daemon restart
 
 Pilot gates 5 and 6. `synapse-mcp-server` (and so `synapse-claude-channel` and `synapse-agent`) attached with `Daemon::connect`, which starts `synapsed` when nothing answers; the daemon it started inherited the adapter's environment, not the owner's, and ran on the default redb store (seen 2026-10-22: a stray `mailbox.redb` appeared beside the live sqlite store). It now uses the new `Daemon::connect_existing`, which never spawns and fails with "synapsed is not running". After the daemon restarts, the adapter's calls and heartbeat find (new `Daemon::instance_gone`) that the instance it proved is gone, attach to the new one (the same implicit claim startup makes; the call that noticed still reports its failure, the next succeeds). A refusal from the same instance (`superseded`, ...) is still never recovered: taking a role back stays a human `synapse claim`. Breaking for no one: `Daemon::connect` is unchanged. Tests: `the_adapter_never_starts_a_daemon`, `an_adapter_re_attaches_to_a_restarted_daemon_and_not_after_a_takeover` (fails with re-attach disabled).
