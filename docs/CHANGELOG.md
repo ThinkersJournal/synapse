@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.136): ROADMAP rows for the open issues
+
+Rows 20-29 schedule or close #5, #20, #21, #22, #49, #61, #105, #106, #110 and #119-#121, each checked at `origin/main` a2e98e2. No code change.
+
 ### Feature (rc.133): `SYNAPSE_REMOTE_DAEMON` for a daemon on the other side of a boundary
 
 A client in a WSL guest reaching the Windows daemon through a relay reads an announce file naming a Windows pid, which `kill(pid, 0)` can never find, so every announce looked stale. With `SYNAPSE_REMOTE_DAEMON` set (not empty, not `0`) the client skips only that pid check; the HMAC health proof still decides, and `Daemon::connect` behaves as `connect_existing` (it never starts a second daemon with its own store).
