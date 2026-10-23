@@ -245,6 +245,11 @@ impl Daemon {
                 return Ok(Daemon::new(http, home, found));
             }
         }
+        // Something live holds the announced port but failed the proof: a daemon of ours would
+        // exit "address in use" and leave a stray store, so say so instead of starting one.
+        if let Some(addr) = &squat.0 {
+            return Err(MailError::NoDaemon(squat_warning(addr)));
+        }
         // Started at most once per command (PM, #74).
         let (mut child, mut start_log) = spawn_daemon(home)?;
         eprintln!("synapse: started synapsed (pid {})", child.id());
@@ -551,7 +556,7 @@ fn read_announce_with(home: &Path, remote: bool) -> Result<Option<Announce>, Mai
         .filter(|a| remote || daemon_alive(a.pid)))
 }
 
-/// Whether `pid` is a live process of this user (on Windows, a live `synapsed`). Defence in depth
+/// Whether `pid` is a live process of this user. Defence in depth
 /// in front of the health proof (#74): it skips a stale announce file without probing its port, but
 /// a reused pid passes it, which is why the proof is what decides.
 #[cfg(unix)]
@@ -568,8 +573,7 @@ fn daemon_alive(pid: u32) -> bool {
 fn daemon_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     // SAFETY: OpenProcess takes no pointers; a null result is handled.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
@@ -577,24 +581,14 @@ fn daemon_alive(pid: u32) -> bool {
         return false;
     }
     let mut code = 0u32;
-    let mut name = [0u16; 1024];
-    let mut len = name.len() as u32;
-    // SAFETY: `handle` is open until the CloseHandle below; `code`, `name` and `len` are valid for
-    // writes, and `len` is `name`'s capacity in u16s.
-    let (running, named) = unsafe {
-        (
-            GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32,
-            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, name.as_mut_ptr(), &mut len)
-                != 0,
-        )
-    };
+    // SAFETY: `handle` is open until the CloseHandle below; `code` is valid for writes.
+    let running =
+        unsafe { GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32 };
     // SAFETY: opened above and closed exactly once.
     unsafe { CloseHandle(handle) };
-    let image = String::from_utf16_lossy(&name[..len as usize]);
-    let file = Path::new(&image)
-        .file_name()
-        .map(|f| f.to_string_lossy().to_ascii_lowercase());
-    running && named && file.as_deref() == Some("synapsed.exe")
+    // Not the image name: an upgrade renames the running `synapsed.exe` aside (the only way to
+    // replace it on Windows), so a live daemon's image is `synapsed.exe.<tag>.bak` until it restarts.
+    running
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1023,5 +1017,79 @@ mod tests {
         }
         .to_string();
         assert!(!refused.chars().any(char::is_control), "{refused:?}");
+    }
+
+    /// An in-place upgrade on Windows renames the running `synapsed.exe` aside, so the live daemon's
+    /// image is then `synapsed.exe.<tag>.bak`; the health proof, not the image name, decides.
+    #[cfg(windows)]
+    #[test]
+    fn a_daemon_whose_image_was_renamed_aside_is_still_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let system = std::env::var_os("SystemRoot").unwrap();
+        let renamed = dir.path().join("synapsed.exe.rc123.bak");
+        std::fs::copy(
+            Path::new(&system).join("System32").join("ping.exe"),
+            &renamed,
+        )
+        .unwrap();
+        let mut child = Command::new(&renamed)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let alive = daemon_alive(child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(alive);
+        assert!(!daemon_alive(child.id()), "an exited process is not alive");
+    }
+
+    /// Something live holds the announced port but fails the proof: starting another daemon cannot
+    /// help (it would exit "address in use" and leave a stray store), so `connect` must not.
+    #[test]
+    fn connect_does_not_start_a_daemon_when_the_announced_port_is_held() {
+        let home = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().flatten().take(8) {
+                let mut stream = stream;
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"ok":false}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{body}",
+                    body.len()
+                );
+            }
+        });
+        let announce = format!(
+            r#"{{"addr":"{addr}","instance_id":"{}","pid":{}}}"#,
+            "00".repeat(16),
+            std::process::id()
+        );
+        let path = home.path().join(ANNOUNCE_FILE);
+        std::fs::write(&path, announce).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let err = Daemon::connect(home.path())
+            .err()
+            .expect("no daemon can be proven");
+        let text = err.to_string();
+        assert!(text.contains("failed its proof"), "{text}");
+        assert!(
+            !home.path().join("synapsed.log").exists(),
+            "a daemon was started"
+        );
     }
 }
