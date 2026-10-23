@@ -42,6 +42,10 @@ use synapse::security_events::SecurityEventKind;
 
 /// The daemon's announce file in the home, written by `synapsed` (M5a).
 const ANNOUNCE_FILE: &str = "synapsed.json";
+/// Set (to anything but `0` or empty) when the daemon runs on the other side of a boundary this
+/// process cannot see across (a WSL guest reaching a Windows daemon through a relay): its announced
+/// pid is then another machine's, so only the pid check is skipped and the health proof decides.
+const REMOTE_DAEMON_ENV: &str = "SYNAPSE_REMOTE_DAEMON";
 /// How long a started daemon gets to announce itself and answer health.
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// A starting daemon's stderr, in the home; truncated at each start.
@@ -228,6 +232,11 @@ impl Daemon {
 
     /// Find this home's daemon, starting it if nothing answers.
     pub fn connect(home: &Path) -> Result<Daemon, MailError> {
+        // A remote daemon is run by its owner, on the other side: starting one here would be a
+        // second daemon with its own store.
+        if remote_daemon() {
+            return Self::connect_existing(home);
+        }
         let http = Self::http_client()?;
         let mut squat = Squat::default();
         // Two tries, so one slow answer from a live daemon doesn't start a doomed second one.
@@ -517,6 +526,19 @@ fn answering(http: &reqwest::blocking::Client, home: &Path) -> Result<Answer, Ma
 /// dead daemon is ignored, so a process that took its port gets no token (#74); a file others can
 /// reach is an error, since whoever can write it chooses where the token goes.
 fn read_announce(home: &Path) -> Result<Option<Announce>, MailError> {
+    read_announce_with(home, remote_daemon())
+}
+
+fn remote_daemon() -> bool {
+    is_remote(std::env::var_os(REMOTE_DAEMON_ENV).as_deref())
+}
+
+fn is_remote(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// `read_announce`, with `remote` skipping the liveness check of the announced pid.
+fn read_announce_with(home: &Path, remote: bool) -> Result<Option<Announce>, MailError> {
     let path = home.join(ANNOUNCE_FILE);
     if !path.try_exists()? {
         return Ok(None);
@@ -527,7 +549,7 @@ fn read_announce(home: &Path) -> Result<Option<Announce>, MailError> {
     };
     Ok(serde_json::from_str::<Announce>(&text)
         .ok()
-        .filter(|a| daemon_alive(a.pid)))
+        .filter(|a| remote || daemon_alive(a.pid)))
 }
 
 /// Whether `pid` is a live process of this user (on Windows, a live `synapsed`). Defence in depth
@@ -954,6 +976,42 @@ pub fn printable(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn announce_file(home: &Path, pid: u32) {
+        let text = format!(
+            r#"{{"addr":"127.0.0.1:1","instance_id":"{}","pid":{pid}}}"#,
+            "00".repeat(16)
+        );
+        let path = home.join(ANNOUNCE_FILE);
+        std::fs::write(&path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    /// The announce names a pid of another machine (a Windows daemon seen from a WSL guest): no such
+    /// local process, yet with the remote marker the announce is still read, so the proof can decide.
+    #[test]
+    fn a_remote_daemons_announced_pid_is_not_checked_locally() {
+        let home = tempfile::tempdir().unwrap();
+        announce_file(home.path(), u32::MAX - 1);
+        assert!(read_announce_with(home.path(), false).unwrap().is_none());
+        let found = read_announce_with(home.path(), true)
+            .unwrap()
+            .expect("announce read");
+        assert_eq!(found.addr, "127.0.0.1:1");
+    }
+
+    #[test]
+    fn only_a_set_non_zero_value_marks_the_daemon_remote() {
+        use std::ffi::OsStr;
+        assert!(!is_remote(None));
+        assert!(!is_remote(Some(OsStr::new(""))));
+        assert!(!is_remote(Some(OsStr::new("0"))));
+        assert!(is_remote(Some(OsStr::new("1"))));
+    }
 
     #[test]
     fn daemon_text_reaches_the_terminal_without_control_characters() {
