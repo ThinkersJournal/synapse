@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.139): design for shared state between lanes
+
+`docs/superpowers/specs/2026-10-23-shared-state-design.md` and ROADMAP row 30. No code change.
+
 ### Fix (rc.138): a daemon renamed aside by an upgrade is still found; no daemon is started onto a held port
 
 On Windows the client treated an announced pid as stale unless its image was named exactly `synapsed.exe`. An in-place upgrade renames the running `synapsed.exe` aside (`synapsed.exe.<tag>.bak`), so every fresh client and reconnect said "no daemon answered" until the daemon restarted. The image name is no longer checked: the HMAC health proof decides. Separately, `Daemon::connect` no longer starts `synapsed` when the announced port is held by something that fails the proof AND the daemon would bind that same address (`SYNAPSE_ADDR`, else the default 127.0.0.1:7920); it reports the failed proof (the spawned daemon could only exit "address in use" and leave a stray `mailbox.redb`). On a free-port configuration (`:0`) a daemon still starts and takes over, as before.
