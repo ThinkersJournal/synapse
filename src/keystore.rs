@@ -541,6 +541,16 @@ impl Keystore {
             account: read_account_name(home)?,
         })
     }
+
+    /// The public view of any home, whether or not it holds the account key: reads only the
+    /// account name, the role's keys and its certificate, and never loads the account key. For
+    /// reporting an identity that [`Keystore::role`] has already made or renewed.
+    pub fn open_public_view(home: &Path) -> Result<RoleOnlyKeystore> {
+        Ok(RoleOnlyKeystore {
+            home: home.to_path_buf(),
+            account: read_account_name(home)?,
+        })
+    }
 }
 
 impl RoleOnlyKeystore {

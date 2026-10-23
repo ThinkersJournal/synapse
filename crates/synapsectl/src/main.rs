@@ -285,8 +285,12 @@ fn run(cli: Cli) -> Result<(), MailError> {
             println!("account: {}", summary.account);
             println!("account key id: {}", summary.key_id);
             if let Some(role) = role {
-                let identity = store.role(&role, chrono::Utc::now())?;
-                print_identity(&identity);
+                // `store.role` makes or renews the role's keys and certificate; what is printed is
+                // then read back through the public view, so no value that passed through the
+                // account-key-holding store reaches the print.
+                store.role(&role, chrono::Utc::now())?;
+                let view = Keystore::open_public_view(&home)?;
+                print_identity(&view.role(&role, chrono::Utc::now())?);
             }
         }
         Command::Claim { role } => {

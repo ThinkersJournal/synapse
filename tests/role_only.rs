@@ -161,3 +161,20 @@ fn load_role_uses_whichever_keystore_the_home_is() {
         "other@acct"
     );
 }
+
+#[test]
+fn the_public_view_reads_a_full_home_without_the_account_key() {
+    let a = tempfile::tempdir().unwrap();
+    Keystore::init_account(a.path(), "acct").unwrap();
+    let full = Keystore::open(a.path())
+        .unwrap()
+        .role("lane-x", Utc::now())
+        .unwrap();
+    let viewed = Keystore::open_public_view(a.path())
+        .unwrap()
+        .role("lane-x", Utc::now())
+        .unwrap();
+    assert_eq!(full.global_id, viewed.global_id);
+    assert_eq!(full.signing_key_id, viewed.signing_key_id);
+    assert_eq!(full.not_after.timestamp(), viewed.not_after.timestamp());
+}
