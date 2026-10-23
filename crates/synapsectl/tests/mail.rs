@@ -1059,3 +1059,43 @@ fn state_commands_create_show_list_set_and_refuse_a_stale_revision() {
     ]);
     assert_eq!(bad.status.code(), Some(2), "{bad:?}");
 }
+
+/// A claim never loads the account key: with a valid certificate already in the home, the account
+/// key file can be garbage and the state commands (which claim) still work. The old path, which
+/// opened the full keystore on every claim, fails here with a corrupt account key.
+#[test]
+fn the_state_commands_never_load_the_account_key() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    let key = home.path().join("account").join("account.key.pem");
+    assert!(key.exists());
+    std::fs::write(&key, b"not a key").unwrap();
+    // A fresh claim (the cached session would hide the keystore): it must not open the key.
+    home.ok(&["claim", "--role", "alpha"]);
+
+    let made = home.ok(&[
+        "state",
+        "new",
+        "--role",
+        "alpha",
+        "--title",
+        "no key needed",
+        "--party",
+        "alpha",
+        "--owner",
+        "alpha",
+    ]);
+    assert_eq!(serde_json::from_str::<Value>(&made).unwrap()["id"], "T-1");
+    let shown = home.ok(&["state", "show", "--role", "alpha", "T-1"]);
+    assert_eq!(
+        serde_json::from_str::<Value>(&shown).unwrap()["title"],
+        "no key needed"
+    );
+    // Control: the commands that do need the key say so, so the garbage really is in effect.
+    let id = home.run(&["id", "show", "--role", "alpha"]);
+    assert_ne!(
+        id.status.code(),
+        Some(0),
+        "the corrupted key must be unreadable: {id:?}"
+    );
+}

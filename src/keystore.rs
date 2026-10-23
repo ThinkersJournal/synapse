@@ -676,12 +676,15 @@ impl RoleOnlyKeystore {
         if !exists(&cert_path, "role certificate")? {
             return Err(KeystoreError::NoRoleCertificate);
         }
-        let global_id = format!("{role}@{}", self.account);
+        let expected = format!("{role}@{}", self.account);
         let chain = leaf_for(
             &read_checked(&cert_path, "role certificate")?,
-            &global_id,
+            &expected,
             &keys,
         )?;
+        // The certificate has just been checked to certify `expected`; the identity carries the
+        // certificate's own subject, so it is the certificate's data and not the account field's.
+        let global_id = chain[0].subject_global_id.clone();
         let leaf = &chain[0];
         if now >= leaf.not_after {
             return Err(KeystoreError::CertificateExpired);
@@ -705,14 +708,31 @@ impl RoleOnlyKeystore {
     }
 }
 
-/// `role`'s identity from `home`: through the full keystore when the home holds the account key
-/// (keys and certificate made or renewed as needed), else through a role-only one.
+/// `role`'s identity from `home`, always read through the public view, so a claim, a signature or
+/// anything else built from it never derives from the account key (a claim has no business holding
+/// it). A home that holds the account key reaches for it only when the role has no usable
+/// certificate: none, expired, within [`RENEW_BELOW`] of expiry, or not carrying the grants the
+/// account holder set. Otherwise the key file is not opened at all. (The public view does not check
+/// the certificate's signature, which needs the account key; the daemon does, at claim.)
 pub fn load_role(home: &Path, role: &str, now: DateTime<Utc>) -> Result<RoleIdentity> {
     if account_key_exists(home)? {
-        Keystore::open(home)?.role(role, now)
-    } else {
-        Keystore::open_role_only(home)?.role(role, now)
+        let wanted = with_grants(&read_grants(home, role)?);
+        let usable = Keystore::open_public_view(home)?
+            .role(role, now)
+            .ok()
+            .filter(|id| id.permissions == wanted && id.not_after - now >= RENEW_BELOW);
+        if let Some(identity) = usable {
+            return Ok(identity);
+        }
+        ensure_role_certificate(home, role, now)?;
     }
+    Keystore::open_public_view(home)?.role(role, now)
+}
+
+/// Make or renew `role`'s keys and certificate with the account key, and return nothing: the one
+/// place a read-only caller crosses into the account key.
+fn ensure_role_certificate(home: &Path, role: &str, now: DateTime<Utc>) -> Result<()> {
+    Keystore::open(home)?.role(role, now).map(drop)
 }
 
 /// The account's name in `home`, whether or not the home holds the account key.
