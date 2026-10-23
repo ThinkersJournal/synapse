@@ -169,6 +169,19 @@ enum IdCommand {
         #[arg(long)]
         role: String,
     },
+    /// With the account key: give --role an extra grant (state-read-all, state-admin or
+    /// state-derive). It takes effect when the role's certificate is next made.
+    Grant {
+        #[arg(long)]
+        role: String,
+        permission: String,
+    },
+    /// With the account key: take an extra grant back.
+    Ungrant {
+        #[arg(long)]
+        role: String,
+        permission: String,
+    },
     /// Show the account, and with --role, that role's identity (creating its keys on first use; a
     /// role-only home creates nothing and never renews).
     Show {
@@ -192,6 +205,17 @@ fn print_identity(identity: &synapse::keystore::RoleIdentity) {
         .map(Permission::as_str)
         .collect();
     println!("permissions: {}", permissions.join(", "));
+}
+
+fn parse_grant(text: &str) -> Result<Permission, MailError> {
+    match Permission::parse(text) {
+        Some(p @ (Permission::StateReadAll | Permission::StateAdmin | Permission::StateDerive)) => {
+            Ok(p)
+        }
+        _ => Err(MailError::Usage(
+            "a grant is state-read-all, state-admin or state-derive".to_string(),
+        )),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -269,6 +293,16 @@ fn run(cli: Cli) -> Result<(), MailError> {
             std::io::stdin().read_to_string(&mut pem)?;
             Keystore::install_role_certificate(&home, &role, &pem)?;
             println!("installed: {role}");
+        }
+        Command::Id(IdCommand::Grant { role, permission }) => {
+            let permission = parse_grant(&permission)?;
+            Keystore::open(&home)?.grant(&role, &permission)?;
+            println!("granted: {} to {role}", permission.as_str());
+        }
+        Command::Id(IdCommand::Ungrant { role, permission }) => {
+            let permission = parse_grant(&permission)?;
+            Keystore::open(&home)?.ungrant(&role, &permission)?;
+            println!("ungranted: {} from {role}", permission.as_str());
         }
         Command::Id(IdCommand::Show { role }) => {
             if let Some(role) = &role
