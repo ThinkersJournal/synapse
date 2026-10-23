@@ -245,9 +245,12 @@ impl Daemon {
                 return Ok(Daemon::new(http, home, found));
             }
         }
-        // Something live holds the announced port but failed the proof: a daemon of ours would
-        // exit "address in use" and leave a stray store, so say so instead of starting one.
-        if let Some(addr) = &squat.0 {
+        // Something live holds the announced port but failed the proof. A daemon of ours that
+        // would bind that very address exits "address in use" and leaves a stray store, so say so
+        // instead of starting one; on any other address it can start and take over.
+        if let Some(addr) = &squat.0
+            && daemon_would_bind(std::env::var("SYNAPSE_ADDR").ok().as_deref(), addr)
+        {
             return Err(MailError::NoDaemon(squat_warning(addr)));
         }
         // Started at most once per command (PM, #74).
@@ -503,6 +506,19 @@ impl Squat {
             }
             Answer::Nothing => None,
         }
+    }
+}
+
+/// Whether a daemon started with `SYNAPSE_ADDR` = `configured` (unset: the daemon's default,
+/// `synapsed`'s `DEFAULT_ADDR`) would bind `addr`.
+fn daemon_would_bind(configured: Option<&str>, addr: &str) -> bool {
+    let configured = configured.unwrap_or("127.0.0.1:7920");
+    match (
+        configured.parse::<std::net::SocketAddr>(),
+        addr.parse::<std::net::SocketAddr>(),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -1044,52 +1060,14 @@ mod tests {
         assert!(!daemon_alive(child.id()), "an exited process is not alive");
     }
 
-    /// Something live holds the announced port but fails the proof: starting another daemon cannot
-    /// help (it would exit "address in use" and leave a stray store), so `connect` must not.
+    /// A held announced port is only a reason not to start a daemon when that daemon would bind
+    /// the same address; on a free-port configuration (`:0`) it can start and take over.
     #[test]
-    fn connect_does_not_start_a_daemon_when_the_announced_port_is_held() {
-        let home = tempfile::tempdir().unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        std::thread::spawn(move || {
-            use std::io::{Read, Write};
-            for stream in listener.incoming().flatten().take(8) {
-                let mut stream = stream;
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
-                let body = r#"{"ok":false}"#;
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK
-Content-Type: application/json
-Content-Length: {}
-Connection: close
-
-{body}",
-                    body.len()
-                );
-            }
-        });
-        let announce = format!(
-            r#"{{"addr":"{addr}","instance_id":"{}","pid":{}}}"#,
-            "00".repeat(16),
-            std::process::id()
-        );
-        let path = home.path().join(ANNOUNCE_FILE);
-        std::fs::write(&path, announce).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        let err = Daemon::connect(home.path())
-            .err()
-            .expect("no daemon can be proven");
-        let text = err.to_string();
-        assert!(text.contains("failed its proof"), "{text}");
-        assert!(
-            !home.path().join("synapsed.log").exists(),
-            "a daemon was started"
-        );
+    fn a_held_port_blocks_a_daemon_only_if_it_would_bind_it() {
+        assert!(daemon_would_bind(None, "127.0.0.1:7920"), "the default");
+        assert!(daemon_would_bind(Some("127.0.0.1:9000"), "127.0.0.1:9000"));
+        assert!(!daemon_would_bind(Some("127.0.0.1:0"), "127.0.0.1:9000"));
+        assert!(!daemon_would_bind(Some("127.0.0.1:9001"), "127.0.0.1:9000"));
+        assert!(!daemon_would_bind(Some("not an address"), "127.0.0.1:9000"));
     }
 }
