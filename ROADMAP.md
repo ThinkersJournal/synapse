@@ -17,11 +17,11 @@ It moves bytes between processes; it does not put them into an agent (that is ea
 | # | Item | State at f506140 | Blocks flip? |
 |---|------|------------------|--------------|
 | 1 | CI green and protected: required checks, `--locked`, Cargo.lock tracked, actions on newest majors | done (rc.43-rc.46) | no |
-| 2 | Docker image push to `thinkersjournal/synapse` | works (sha-f506140 on Hub, per PM 2026-10-14) | no |
+| 2 | Docker image push to `ghcr.io/thinkersjournal/synapse` | moved from Docker Hub in rc.131 (one secret store: `GITHUB_TOKEN`); first GHCR push not yet read back | no |
 | 3 | Coverage upload | done (org-level `CODECOV_TOKEN`, 2026-10-12) | no |
 | 4 | **`cargo publish --dry-run` in dependency order**: `synapse` (root) -> `synapse-security` -> `synapsed-client` -> `synapse-mcp-server` -> `synapse-claude-channel`; `synapsed` and `synapsectl` after `synapsed-client` | **DONE**: the PM published the family at 6.0.0-rc.97 on 2026-10-16 (PM notice: 7 crates, none yanked; `synapse` 6.0.0-rc.97 read back from the crates.io API as `max_version`). The other six were not re-read by this lane | no |
 | 5 | **Cold first run from the README** | done at rc.48 (#146): CLI sequence runs end to end; README no longer names `message_routing_system`/`register_peer` | no |
-| 6 | `docker-compose.yml` matches the daemon | done: one loopback-only daemon service with a volume, run against `thinkersjournal/synapse:main` (the old `:latest` tag does not exist on Hub). `ci_cd.yml` deploy jobs still `docker-compose pull/up` over ssh: unchanged, not exercised | no |
+| 6 | `docker-compose.yml` matches the daemon | done: one loopback-only daemon service with a volume, run against `ghcr.io/thinkersjournal/synapse:main` (the old `:latest` tag never existed). `ci_cd.yml` deploy jobs still `docker-compose pull/up` over ssh: unchanged, not exercised | no |
 | 7 | `whoami` push advertisement | done in rc.52: `push: {capability_key, method}` on the channel adapter, `null` on the generic one | no |
 | 8 | Soak ends with `sent.log` matching the transcript | running (rc.33 daemon, 1 msg/10 min since 2026-10-12T18:31Z) | no (evidence) |
 | 9 | Alert delivery: `AlertTransport` had no implementation (board 131); alerts were logged only | **DONE as an internal transport in rc.101 (PM-ruled 2026-10-17)**: `SYNAPSE_ALERT_ROLES` names the roles that receive alerts as mail from `daemon:alerts@<account>`; unset, nothing changes. **Which external channel carries an alert to a person stays board 131 (CireSnave's)** | no |
