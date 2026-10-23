@@ -63,3 +63,27 @@ Undo: `Remove-Item $k`. Nothing else needs admin: measured 2026-10-23, the unele
 `lane-sandbox` uses `--share-net` (outbound for crates.io/GitHub). AF_VSOCK is not netns-scoped, so a process in the sandbox can dial
 ANY host-registered vsock GUID, not only its own socket. With one lane in the distro this is accepted; registered GUIDs must each be a
 Synapse relay only, and the daemon's per-role key check is what authenticates (the relay adds no identity).
+
+## Relay finding: bind the WSL VM id, not the wildcard
+With the GUID registered, a relay bound to `HV_GUID_WILDCARD` is NOT reachable from the guest (ETIMEDOUT); bound to the running WSL VM's id
+it is. The id changes on every WSL boot, so `relay_win.py` reads it (`hcsdiag list`, the `WSL` VM) and rebinds when it changes
+(`SYNAPSE_RELAY_VMID` pins it). Measured 2026-10-23: guest `AF_VSOCK` connect -> relay -> daemon, HTTP reply received.
+
+## The 24 h certificate problem (and why no key needs to cross)
+Read at `origin/main`: `Keystore::open` requires `account/account.key.pem` (it returns `NoAccount` without it), and `Keystore::role` signs a
+24 h leaf certificate with the account key, renewing when under 12 h remain (`RENEW_BELOW`). So a Linux home without the account key cannot even
+open its keystore, and copying the account key into the distro would let that lane mint ANY role (including `pm`). Copying a role key made on
+Windows works for 24 h and then dies, and moves a private key across the boundary. Both are wrong. The certificate model already has what is needed
+(`may_delegate`, chain validity nesting in `chain verify`), so:
+
+- **P1 (recommended, small): in-distro keys + Windows-side issuing.** `synapse id init-role <role>` in the distro generates the signing and
+  sealing keys THERE (private halves never leave) and prints the public halves. On Windows, `synapse id issue --role <role> --signing-pub <hex>
+  --sealing-pub <hex> --days 8` signs a leaf with the account key (permissions `send, ack, request-ack`, `may_delegate = 0`) and the PM places the
+  `cert.pem` in the lane home (a certificate is public; the classifier concern disappears). Client: a role-only keystore mode (no account key,
+  uses the supplied chain, never renews; at expiry the error says "ask the PM to re-issue"). The daemon needs no change. Cost: two CLI subcommands +
+  `Keystore::open_role_only`, red-first. Re-issue weekly during the pilot (a Windows scheduled `synapse id issue` can automate it).
+- **P2 (later): delegation.** The account key issues a `may_delegate = 1`, 7-day cert to an issuer key held by the proxy Linux user (outside the
+  sandbox, unreadable by the lane user), which signs the lane's 24 h leaves in the distro. Automatic renewal; account key still never in the distro;
+  needs a delegation-aware signing path in the client. Unverified: whether the daemon's chain check accepts a leaf under a delegating cert today
+  (nesting is enforced in `certificate.rs`, no end-to-end test read).
+- Scope of the lane role: `send`, `ack`, `request-ack` only (`default_permissions()`), confirmed from the cert issued for `lane-commysdk`.
