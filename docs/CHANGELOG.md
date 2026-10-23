@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.133): `SYNAPSE_REMOTE_DAEMON` for a daemon on the other side of a boundary
+
+A client in a WSL guest reaching the Windows daemon through a relay reads an announce file naming a Windows pid, which `kill(pid, 0)` can never find, so every announce looked stale. With `SYNAPSE_REMOTE_DAEMON` set (not empty, not `0`) the client skips only that pid check; the HMAC health proof still decides, and `Daemon::connect` behaves as `connect_existing` (it never starts a second daemon with its own store).
+
 ### CI (rc.131): Docker image moves from Docker Hub to GHCR
 
 CireSnave 2026-10-23: all projects' Docker images move from Docker Hub to GHCR "so we don't have secrets stored in two places." `publish-docker` now logs in to `ghcr.io` with the job's `GITHUB_TOKEN` (job permissions `contents: read`, `packages: write`) and pushes `ghcr.io/thinkersjournal/synapse`; no `DOCKERHUB_*` secret is referenced any more. `docker-compose.yml` defaults to `ghcr.io/thinkersjournal/synapse:main`. Not verified: the first GHCR push (it runs only on push to main), and that the package is public (a new GHCR package starts private; visibility is a one-time setting on the package page). The old Docker Hub images are untouched.
