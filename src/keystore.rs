@@ -163,9 +163,53 @@ impl fmt::Debug for Keystore {
 /// The grants a role certificate carries (PM-approved, spec §4 Q4), in the order a parsed
 /// certificate holds them (sorted by name), so a reloaded certificate compares equal.
 fn default_permissions() -> Vec<Permission> {
-    let mut permissions = vec![Permission::Send, Permission::RequestAck, Permission::Ack];
+    let mut permissions = vec![
+        Permission::Send,
+        Permission::RequestAck,
+        Permission::Ack,
+        Permission::StateWrite,
+    ];
     permissions.sort_by_key(Permission::as_str);
     permissions
+}
+
+/// The extra grants an account holder may give a role, beyond the defaults. `state-write` is a
+/// default; these three are not.
+const GRANTABLE: [Permission; 3] = [
+    Permission::StateReadAll,
+    Permission::StateAdmin,
+    Permission::StateDerive,
+];
+const GRANTS: &str = "grants";
+
+/// The defaults plus `grants`, in the order a parsed certificate holds them (sorted by name).
+fn with_grants(grants: &[Permission]) -> Vec<Permission> {
+    let mut permissions = default_permissions();
+    permissions.extend(grants.iter().cloned());
+    permissions.sort_by_key(Permission::as_str);
+    permissions.dedup();
+    permissions
+}
+
+/// `role`'s extra grants from `<home>/roles/<role>/grants` (one permission per line). A missing file
+/// is no grants; a name that is not grantable is `Corrupt`, never skipped.
+fn read_grants(home: &Path, role: &str) -> Result<Vec<Permission>> {
+    let path = home.join(ROLES_DIR).join(role).join(GRANTS);
+    if !exists(&path, "role grants")? {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8(read_checked(&path, "role grants")?)
+        .map_err(|_| KeystoreError::Corrupt("role grants"))?;
+    let mut out = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match Permission::parse(line) {
+            Some(p) if GRANTABLE.contains(&p) => out.push(p),
+            _ => return Err(KeystoreError::Corrupt("role grants")),
+        }
+    }
+    out.sort_by_key(Permission::as_str);
+    out.dedup();
+    Ok(out)
 }
 
 /// A role, loaded: its identity, its keys in a ready [`CryptoManager`], and its certificate.
@@ -308,6 +352,7 @@ impl Keystore {
             .as_bytes();
 
         let global_id = format!("{role}@{}", self.account);
+        let grants = read_grants(&self.home, role)?;
         let cert_path = dir.join(CERT);
         let current = if exists(&cert_path, "role certificate")? {
             read_checked(&cert_path, "role certificate")?
@@ -324,7 +369,7 @@ impl Keystore {
                     && chain[0].subject_sealing_key == sealing_public
                     && chain[0].issuer_key_id == self.account().key_id
                     && chain[0].may_delegate == 0
-                    && chain[0].permissions == default_permissions()
+                    && chain[0].permissions == with_grants(&grants)
                     && chain[0].verify_signature(&self.account_public_key())
                     && chain[0].not_before <= now
                     && chain[0].not_after - now >= RENEW_BELOW
@@ -342,7 +387,7 @@ impl Keystore {
                     subject_sealing_key: sealing_public,
                     not_before: now,
                     not_after: now + CERT_VALIDITY,
-                    permissions: default_permissions(),
+                    permissions: with_grants(&grants),
                     may_delegate: 0,
                     signature: [0; 64],
                 };
@@ -507,7 +552,7 @@ impl Keystore {
             subject_sealing_key: keys.sealing,
             not_before: now,
             not_after: now + valid_for,
-            permissions: default_permissions(),
+            permissions: with_grants(&read_grants(&self.home, role)?),
             may_delegate: 0,
             signature: [0; 64],
         };
@@ -515,6 +560,51 @@ impl Keystore {
             unsigned,
             &self.account_key,
         )]))
+    }
+
+    /// Give `role` an extra grant (`state-read-all`, `state-admin` or `state-derive`). Takes effect
+    /// when the role's certificate is next made: a full home renews it on the next load, and
+    /// `issue_role_certificate` uses it from now on. Idempotent.
+    pub fn grant(&self, role: &str, permission: &Permission) -> Result<()> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        if !GRANTABLE.contains(permission) {
+            return Err(KeystoreError::InvalidName);
+        }
+        let dir = self.home.join(ROLES_DIR).join(role);
+        ensure_dir(&self.home.join(ROLES_DIR), "roles directory")?;
+        ensure_dir(&dir, "role directory")?;
+        let mut grants = read_grants(&self.home, role)?;
+        if !grants.contains(permission) {
+            grants.push(permission.clone());
+        }
+        grants.sort_by_key(Permission::as_str);
+        let text: String = grants.iter().map(|p| format!("{}\n", p.as_str())).collect();
+        replace(&dir.join(GRANTS), text.as_bytes(), "role grants")
+    }
+
+    /// Remove an extra grant. Idempotent.
+    pub fn ungrant(&self, role: &str, permission: &Permission) -> Result<()> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        let dir = self.home.join(ROLES_DIR).join(role);
+        let mut grants = read_grants(&self.home, role)?;
+        grants.retain(|p| p != permission);
+        let text: String = grants.iter().map(|p| format!("{}\n", p.as_str())).collect();
+        if exists(&dir, "role directory")? {
+            replace(&dir.join(GRANTS), text.as_bytes(), "role grants")?;
+        }
+        Ok(())
+    }
+
+    /// `role`'s extra grants, as set by [`Keystore::grant`].
+    pub fn grants(&self, role: &str) -> Result<Vec<Permission>> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        read_grants(&self.home, role)
     }
 
     /// Store an issued certificate for `role` in a role-only `home`, after checking that it

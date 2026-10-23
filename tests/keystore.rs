@@ -208,7 +208,7 @@ fn a_fresh_certificate_validates_against_the_account_key() {
         .map(Permission::as_str)
         .collect();
     names.sort();
-    assert_eq!(names, ["ack", "request-ack", "send"]);
+    assert_eq!(names, ["ack", "request-ack", "send", "state-write"]);
     assert_eq!(role.not_before, t0());
     assert_eq!(role.not_after, t0() + Duration::hours(24));
     assert_eq!(

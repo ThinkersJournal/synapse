@@ -64,13 +64,14 @@ Derived, read-only fields, computed at read time and never stored as typed:
 
 ## 5. Access
 
-Four new permissions in the certificate (slice f). Unlike `x-` extensions, Synapse interprets these:
+Four new permissions in the certificate (slice f; amended in S2, see below). Unlike `x-` extensions, Synapse interprets these:
 
 | permission | allows |
 |---|---|
-| `state-read` | `get`, `list`, `history`, `export` on records the role is a party to |
-| `state-write` | `create`, and `patch` on records the role is a party to (the owner, or any listed party) |
-| `state-admin` | read and patch any record; change `owner`; cancel |
+| (no permission) | `get`, `list`, `history` on records the role is a party to: being a party is the read grant |
+| `state-write` | `create`, and `patch` on records the role is a party to (the owner, or any listed party). **Every role holds it by default** |
+| `state-read-all` | read every record; no write. The PM and the export role (decided 2026-10-23) |
+| `state-admin` | read and patch any record; change `owner`; patch terminal records |
 | `state-derive` | write facts (section 7). **Held only by the checker role.** No other grant lets a role write a fact |
 
 - **Visibility is by party.** A role sees a record only if it is a party (or holds `state-admin`). Recommended over world-readable: a record names who is blocked on whom, and leaking that across accounts is a default we cannot take back. Open question Q2.
@@ -154,7 +155,8 @@ Each is its own PR with a version bump (PM allocates).
 | slice | content | exit test |
 |---|---|---|
 | S1 | `StateStore` trait, `Record`, `Patch`, memory + redb stores, CAS, history with hash chain, access by party, conformance suite | two writers race on one revision: exactly one wins, the other gets the current record; a tampered history entry is detected |
-| S2 | permissions (`state-*`) in the certificate; daemon `/v1/state/*` + `synapse state` CLI; security events on refusal; `state.redb` opened by the daemon | a non-party is refused and the refusal is an event; roles without `state-write` cannot create |
+| S2a | permissions (`state-*`) in the certificate, `synapse id grant`/`ungrant` (**done**, split from S2) | every role holds `state-write`; a grant reaches the certificate |
+| S2b | daemon `/v1/state/*` + `synapse state` CLI; security events on refusal; `state.redb` opened by the daemon | a non-party is refused and the refusal is an event; roles without `state-write` cannot create |
 | S3 | outbox and `daemon:state` notifications, ids only | a patch notifies each other party once; a crash between commit and enqueue yields one message, not two or none |
 | S4 | `FactSpec` registry; checker role + `put_facts`; derived `facts`/`satisfied`/`last_verified`/`stale`/`unblocked`; stale timer | a recorded forge response flips `satisfied`; a failed fetch never satisfies `absent`; a record turns stale exactly once |
 | S5 | MCP/channel tools (read first); needs #106 closed | a channel event shows an id and field names, never a title |
@@ -167,7 +169,16 @@ S1-S3 give a usable shared ledger with typed facts only. **S4 is the part that f
 
 This work does not touch `mailbox.redb`, the daemon's mailbox code or the pilot daemon, so it **does not restart the soak clock** while it is unreleased; an upgrade of the pilot daemon to a build containing it does, as any upgrade does. It is not queued behind soak work silently: it is ahead of the unstarted rows 20-29 of the ROADMAP, except #61 (mechanical, small) and #106 (a prerequisite of S5). Order after #236 merges: design (this PR) -> S1 -> S2 -> S3 -> S4 -> #106 -> S5 -> S6 -> S7. Estimates are in PRs, not days, because gate time is the PM's: seven code PRs, S1 and S4 the large ones.
 
-## 13. Questions for the PM
+## 13. Decided (PM, 2026-10-23) and amended in S2
+
+- **Q1** checker: a PM-run process as `checker@ciresnave`, now. CireSnave prefers a read-only GitHub App to a token later, so the checker's forge-credential source is a pluggable interface from S4 (token today, App installation token later).
+- **Q2** visibility: by party; `pm` and CireSnave's export role read everything (`state-read-all`).
+- **Q3** ids: `T-<n>`, daemon-allocated, with a reserved `uid` field so a ULID can replace it.
+- **Q4** staleness: 6 h default, per-kind override.
+- **Q5** seeding: a one-off script after S4; the PM owns the content.
+- **Amended in S2:** `state-read` is gone (party membership is the read grant) and `state-read-all` is new, so there are four permissions again: `state-write` (default for every role), `state-read-all`, `state-admin`, `state-derive`. The three non-default ones are granted by the account holder with `synapse id grant --role <role> <permission>`, stored in `roles/<role>/grants`, and reach the certificate on its next issue (a full home renews on the next load; `id issue` uses them for a role-only home). Adding the names makes certificates that carry them unreadable to a parser from before S2 (`Permission::parse` rejects an unknown non-`x-` name): Breaking for such parsers, in a pre-release line.
+
+## 14. The questions as asked
 
 - **Q1. Checker host.** Recommended: a small process run by the PM lane (it already holds forge access) as `checker@ciresnave`. Alternative: a daemon-side checker with its own token, rejected above for credential reasons.
 - **Q2. Visibility.** Recommended: by party (section 5). Alternative: every claimed role reads everything, simpler and what the board does today.
