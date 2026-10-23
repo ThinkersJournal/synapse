@@ -36,7 +36,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use synapse::certificate::chain_to_pem;
-use synapse::keystore::{Keystore, KeystoreError, check_owner_only};
+use synapse::keystore::{KeystoreError, check_owner_only, load_role};
 use synapse::roles::sign_claim_for;
 use synapse::security_events::SecurityEventKind;
 
@@ -321,8 +321,7 @@ impl Daemon {
     }
 
     fn claim_session(&self, role: &str) -> Result<Cached, MailError> {
-        let store = Keystore::open(&self.home)?;
-        let identity = store.role(role, Utc::now())?;
+        let identity = load_role(&self.home, role, Utc::now())?;
         let nonce = random_bytes::<16>()?;
         // M3 refuses claims signed at or before the daemon's start.
         let signed_at = Utc::now().max(self.started_at + chrono::Duration::seconds(1));

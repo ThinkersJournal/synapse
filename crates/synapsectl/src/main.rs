@@ -15,7 +15,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use synapse::certificate::Permission;
-use synapse::keystore::{Keystore, KeystoreError, default_home, valid_name};
+use synapse::keystore::{
+    Keystore, KeystoreError, RolePublicKeys, account_name, default_home, load_role, valid_name,
+};
 use synapse::security_events::SecurityEventKind;
 
 use synapsed_client::{Daemon, MailError, encode_body, events, inbox_line, printable};
@@ -140,11 +142,72 @@ enum IdCommand {
         #[arg(long)]
         account: String,
     },
-    /// Show the account, and with --role, that role's identity (creating its keys on first use).
+    /// Make a role's keys in a home that does NOT hold the account key (a sandbox that must not be
+    /// able to mint roles), and print their public halves for the account holder to `issue`.
+    InitRole {
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        role: String,
+    },
+    /// With the account key: certify a role's public keys (from `init-role`) and print the
+    /// certificate. The certificate is public; the role's private keys never reach this home.
+    Issue {
+        #[arg(long)]
+        role: String,
+        #[arg(long, value_name = "HEX")]
+        signing_pub: String,
+        #[arg(long, value_name = "HEX")]
+        sealing_pub: String,
+        /// Validity in days (1 to 30).
+        #[arg(long, default_value_t = 8)]
+        days: i64,
+    },
+    /// In a role-only home: store the certificate read from standard input for --role, after
+    /// checking that it certifies this home's keys.
+    InstallCert {
+        #[arg(long)]
+        role: String,
+    },
+    /// Show the account, and with --role, that role's identity (creating its keys on first use; a
+    /// role-only home creates nothing and never renews).
     Show {
         #[arg(long)]
         role: Option<String>,
     },
+}
+
+fn print_identity(identity: &synapse::keystore::RoleIdentity) {
+    println!("identity: {}", identity.global_id);
+    println!("signing key id: {}", identity.signing_key_id);
+    println!("sealing key id: {}", identity.sealing_key_id);
+    println!(
+        "certificate valid: {} to {}",
+        identity.not_before.to_rfc3339(),
+        identity.not_after.to_rfc3339()
+    );
+    let permissions: Vec<String> = identity
+        .permissions
+        .iter()
+        .map(Permission::as_str)
+        .collect();
+    println!("permissions: {}", permissions.join(", "));
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex32(s: &str, flag: &str) -> Result<[u8; 32], MailError> {
+    let bad = || MailError::Usage(format!("{flag} must be 64 hex digits"));
+    if s.len() != 64 || !s.is_ascii() {
+        return Err(bad());
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
+    }
+    Ok(out)
 }
 
 fn main() -> ExitCode {
@@ -177,27 +240,53 @@ fn run(cli: Cli) -> Result<(), MailError> {
             println!("account: {}", summary.account);
             println!("account key id: {}", summary.key_id);
         }
+        Command::Id(IdCommand::InitRole { account, role }) => {
+            let keys = Keystore::init_role(&home, &account, &role)?;
+            println!("identity: {role}@{account}");
+            println!("signing-pub: {}", hex(&keys.signing));
+            println!("sealing-pub: {}", hex(&keys.sealing));
+        }
+        Command::Id(IdCommand::Issue {
+            role,
+            signing_pub,
+            sealing_pub,
+            days,
+        }) => {
+            let keys = RolePublicKeys {
+                signing: unhex32(&signing_pub, "--signing-pub")?,
+                sealing: unhex32(&sealing_pub, "--sealing-pub")?,
+            };
+            let pem = Keystore::open(&home)?.issue_role_certificate(
+                &role,
+                keys,
+                chrono::Utc::now(),
+                chrono::Duration::days(days),
+            )?;
+            print!("{pem}");
+        }
+        Command::Id(IdCommand::InstallCert { role }) => {
+            let mut pem = String::new();
+            std::io::stdin().read_to_string(&mut pem)?;
+            Keystore::install_role_certificate(&home, &role, &pem)?;
+            println!("installed: {role}");
+        }
         Command::Id(IdCommand::Show { role }) => {
+            if let Some(role) = &role
+                && !home.join("account").join("account.key.pem").exists()
+            {
+                // A role-only home: no account key to show, nothing created, nothing renewed.
+                println!("account: {}", account_name(&home)?);
+                print_identity(&load_role(&home, role, chrono::Utc::now())?);
+                return Ok(());
+            }
+
             let store = Keystore::open(&home)?;
             let summary = store.account();
             println!("account: {}", summary.account);
             println!("account key id: {}", summary.key_id);
             if let Some(role) = role {
                 let identity = store.role(&role, chrono::Utc::now())?;
-                println!("identity: {}", identity.global_id);
-                println!("signing key id: {}", identity.signing_key_id);
-                println!("sealing key id: {}", identity.sealing_key_id);
-                println!(
-                    "certificate valid: {} to {}",
-                    identity.not_before.to_rfc3339(),
-                    identity.not_after.to_rfc3339()
-                );
-                let permissions: Vec<String> = identity
-                    .permissions
-                    .iter()
-                    .map(Permission::as_str)
-                    .collect();
-                println!("permissions: {}", permissions.join(", "));
+                print_identity(&identity);
             }
         }
         Command::Claim { role } => {
@@ -216,7 +305,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
             let to = if to.contains('@') {
                 to
             } else {
-                format!("{to}@{}", Keystore::open(&home)?.account().account)
+                format!("{to}@{}", account_name(&home)?)
             };
             let body = match message {
                 Some(text) => text.into_bytes(),

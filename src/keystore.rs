@@ -44,6 +44,15 @@ pub enum KeystoreError {
     AccountExists,
     /// `open` found no account; run `init_account` first.
     NoAccount,
+    /// A role-only operation found an account key in the home. A role-only home must never hold
+    /// one (it could mint any role), so it refuses rather than quietly using it.
+    AccountKeyPresent,
+    /// A role-only home has keys but no certificate: the account holder has to issue one.
+    NoRoleCertificate,
+    /// A role-only home's certificate has expired. It never renews itself (that needs the account key).
+    CertificateExpired,
+    /// A certificate's validity must be between 1 and 30 days.
+    InvalidValidity,
     /// The item is accessible to more than its owner (read, or on Windows also write or re-ACL).
     PermissionsTooOpen(&'static str),
     /// The item exists but does not parse.
@@ -64,6 +73,21 @@ impl fmt::Display for KeystoreError {
             KeystoreError::NoHome => write!(f, "no keystore home: set SYNAPSE_HOME"),
             KeystoreError::AccountExists => write!(f, "an account already exists"),
             KeystoreError::NoAccount => write!(f, "no account: run `synapse id init` first"),
+            KeystoreError::AccountKeyPresent => write!(
+                f,
+                "this home holds an account key; a role-only keystore must not"
+            ),
+            KeystoreError::NoRoleCertificate => write!(
+                f,
+                "no role certificate: ask the PM to issue one for this role's public keys (`synapse id init-role` prints them)"
+            ),
+            KeystoreError::CertificateExpired => write!(
+                f,
+                "the role certificate has expired; ask the PM to re-issue it (this home has no account key to renew it)"
+            ),
+            KeystoreError::InvalidValidity => {
+                write!(f, "certificate validity must be 1 to 30 days")
+            }
             KeystoreError::PermissionsTooOpen(item) => {
                 write!(f, "the {item} is accessible to more than its owner")
             }
@@ -354,6 +378,246 @@ impl Keystore {
     pub fn account_public_key(&self) -> [u8; 32] {
         self.account_key.verifying_key().to_bytes()
     }
+}
+
+/// The public halves of a role's keys: what the account holder certifies. Not secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RolePublicKeys {
+    pub signing: [u8; 32],
+    pub sealing: [u8; 32],
+}
+
+/// A keystore that holds role keys and their certificates but NOT the account key (the WSL pilot:
+/// a Linux sandbox that must not be able to mint roles). It never creates keys or certificates and
+/// never renews: an expired certificate is an error, for the account holder to answer by re-issuing.
+#[derive(Debug)]
+pub struct RoleOnlyKeystore {
+    home: PathBuf,
+    account: String,
+}
+
+fn account_key_exists(home: &Path) -> Result<bool> {
+    exists(&home.join(ACCOUNT_DIR).join(ACCOUNT_KEY), "account key")
+}
+
+fn read_account_name(home: &Path) -> Result<String> {
+    let dir = home.join(ACCOUNT_DIR);
+    check_dir(&dir, "account directory")?;
+    let name_path = dir.join(ACCOUNT_NAME);
+    if !exists(&name_path, "account name")? {
+        return Err(KeystoreError::NoAccount);
+    }
+    String::from_utf8(read_checked(&name_path, "account name")?)
+        .ok()
+        .filter(|n| valid_name(n))
+        .ok_or(KeystoreError::Corrupt("account name"))
+}
+
+/// Signing and sealing keys loaded from PEM, with their public halves.
+fn crypto_from_pems(
+    signing_pem: &str,
+    sealing_pem: &str,
+) -> Result<(CryptoManager, RolePublicKeys)> {
+    let mut crypto = CryptoManager::new();
+    crypto
+        .load_private_key(signing_pem)
+        .map_err(|_| KeystoreError::Corrupt("role signing key"))?;
+    crypto
+        .load_sealing_key_pem(sealing_pem)
+        .map_err(|_| KeystoreError::Corrupt("role sealing key"))?;
+    let signing = crypto
+        .public_key_bytes()
+        .map_err(|_| KeystoreError::Corrupt("role signing key"))?;
+    let sealing = *crypto
+        .sealing_key()
+        .ok_or(KeystoreError::Corrupt("role sealing key"))?
+        .public_key()
+        .as_bytes();
+    Ok((crypto, RolePublicKeys { signing, sealing }))
+}
+
+/// A certificate chain read from `pem` that certifies exactly `global_id` with `keys`.
+fn leaf_for(pem: &[u8], global_id: &str, keys: &RolePublicKeys) -> Result<Vec<AgentCertificate>> {
+    let chain = std::str::from_utf8(pem)
+        .ok()
+        .and_then(|pem| chain_from_pem(pem).ok())
+        .filter(|chain| {
+            chain.len() == 1
+                && chain[0].subject_global_id == global_id
+                && chain[0].subject_signing_key == keys.signing
+                && chain[0].subject_sealing_key == keys.sealing
+                && chain[0].may_delegate == 0
+        });
+    chain.ok_or(KeystoreError::Corrupt("role certificate"))
+}
+
+impl Keystore {
+    /// Make `role`'s keys in `home` for an account named `account` whose key is NOT here, and return
+    /// their public halves for the account holder to certify. Repeatable: existing keys are kept.
+    /// Refuses a home that holds an account key.
+    pub fn init_role(home: &Path, account: &str, role: &str) -> Result<RolePublicKeys> {
+        if !valid_name(role) || !valid_name(account) {
+            return Err(KeystoreError::InvalidName);
+        }
+        if account_key_exists(home)? {
+            return Err(KeystoreError::AccountKeyPresent);
+        }
+        let dir = home.join(ACCOUNT_DIR);
+        ensure_dir(&dir, "account directory")?;
+        write_new(&dir.join(ACCOUNT_NAME), account.as_bytes(), "account name")?;
+        if read_account_name(home)? != account {
+            return Err(KeystoreError::AccountExists);
+        }
+        let dir = home.join(ROLES_DIR).join(role);
+        ensure_dir(&dir, "role directory")?;
+        let signing_pem = load_or_create(&dir.join(SIGNING_KEY), "role signing key", || {
+            CryptoManager::new()
+                .generate_keypair()
+                .map(|(private, _public)| private)
+                .map_err(|_| KeystoreError::Io("role signing key", io::ErrorKind::Other))
+        })?;
+        let sealing_pem = load_or_create(&dir.join(SEALING_KEY), "role sealing key", || {
+            Ok(SealingKeyPair::generate().to_pkcs8_pem())
+        })?;
+        Ok(crypto_from_pems(&signing_pem, &sealing_pem)?.1)
+    }
+
+    /// Certify `keys` as `role@<this account>` for `valid_for` (1 to 30 days) with the default
+    /// permissions and no delegation, and return the certificate chain as PEM. It holds no secret.
+    pub fn issue_role_certificate(
+        &self,
+        role: &str,
+        keys: RolePublicKeys,
+        now: DateTime<Utc>,
+        valid_for: Duration,
+    ) -> Result<String> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        if valid_for < Duration::days(1) || valid_for > Duration::days(30) {
+            return Err(KeystoreError::InvalidValidity);
+        }
+        let unsigned = AgentCertificate {
+            version: 1,
+            serial: random_bytes::<16>()?,
+            issuer_key_id: self.account().key_id,
+            subject_label: role.to_string(),
+            subject_global_id: format!("{role}@{}", self.account),
+            subject_signing_key: keys.signing,
+            subject_sealing_key: keys.sealing,
+            not_before: now,
+            not_after: now + valid_for,
+            permissions: default_permissions(),
+            may_delegate: 0,
+            signature: [0; 64],
+        };
+        Ok(chain_to_pem(&[AgentCertificate::sign(
+            unsigned,
+            &self.account_key,
+        )]))
+    }
+
+    /// Store an issued certificate for `role` in a role-only `home`, after checking that it
+    /// certifies THIS home's keys for `role@<account>`. (The signature is the daemon's to verify:
+    /// this home has no account key to check it with.)
+    pub fn install_role_certificate(home: &Path, role: &str, pem: &str) -> Result<()> {
+        let store = Keystore::open_role_only(home)?;
+        let (_, keys) = store.role_keys(role)?;
+        leaf_for(pem.as_bytes(), &format!("{role}@{}", store.account), &keys)?;
+        replace(
+            &home.join(ROLES_DIR).join(role).join(CERT),
+            pem.as_bytes(),
+            "role certificate",
+        )
+    }
+
+    /// Open a home that must NOT hold an account key. Refuses one that does.
+    pub fn open_role_only(home: &Path) -> Result<RoleOnlyKeystore> {
+        if account_key_exists(home)? {
+            return Err(KeystoreError::AccountKeyPresent);
+        }
+        Ok(RoleOnlyKeystore {
+            home: home.to_path_buf(),
+            account: read_account_name(home)?,
+        })
+    }
+}
+
+impl RoleOnlyKeystore {
+    #[must_use]
+    pub fn account_name(&self) -> &str {
+        &self.account
+    }
+
+    fn role_keys(&self, role: &str) -> Result<(CryptoManager, RolePublicKeys)> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        let dir = self.home.join(ROLES_DIR).join(role);
+        let read = |name: &str, item: &'static str| -> Result<String> {
+            let path = dir.join(name);
+            if !exists(&path, item)? {
+                return Err(KeystoreError::NoRoleCertificate);
+            }
+            String::from_utf8(read_checked(&path, item)?).map_err(|_| KeystoreError::Corrupt(item))
+        };
+        crypto_from_pems(
+            &read(SIGNING_KEY, "role signing key")?,
+            &read(SEALING_KEY, "role sealing key")?,
+        )
+    }
+
+    /// Load `role` with the certificate the account holder issued. Never creates or renews anything:
+    /// a missing certificate is [`KeystoreError::NoRoleCertificate`], an expired one
+    /// [`KeystoreError::CertificateExpired`].
+    pub fn role(&self, role: &str, now: DateTime<Utc>) -> Result<RoleIdentity> {
+        let (mut crypto, keys) = self.role_keys(role)?;
+        let cert_path = self.home.join(ROLES_DIR).join(role).join(CERT);
+        if !exists(&cert_path, "role certificate")? {
+            return Err(KeystoreError::NoRoleCertificate);
+        }
+        let global_id = format!("{role}@{}", self.account);
+        let chain = leaf_for(
+            &read_checked(&cert_path, "role certificate")?,
+            &global_id,
+            &keys,
+        )?;
+        let leaf = &chain[0];
+        if now >= leaf.not_after {
+            return Err(KeystoreError::CertificateExpired);
+        }
+        if now < leaf.not_before {
+            return Err(KeystoreError::Corrupt("role certificate"));
+        }
+        Ok(RoleIdentity {
+            global_id,
+            signing_key_id: crate::sender_auth::key_id(&keys.signing),
+            sealing_key_id: crate::sender_auth::key_id(&keys.sealing),
+            not_before: leaf.not_before,
+            not_after: leaf.not_after,
+            permissions: leaf.permissions.clone(),
+            chain: chain.clone(),
+            crypto: {
+                crypto.set_certificate_chain(chain);
+                crypto
+            },
+        })
+    }
+}
+
+/// `role`'s identity from `home`: through the full keystore when the home holds the account key
+/// (keys and certificate made or renewed as needed), else through a role-only one.
+pub fn load_role(home: &Path, role: &str, now: DateTime<Utc>) -> Result<RoleIdentity> {
+    if account_key_exists(home)? {
+        Keystore::open(home)?.role(role, now)
+    } else {
+        Keystore::open_role_only(home)?.role(role, now)
+    }
+}
+
+/// The account's name in `home`, whether or not the home holds the account key.
+pub fn account_name(home: &Path) -> Result<String> {
+    read_account_name(home)
 }
 
 fn load_account_key(path: &Path) -> Result<SigningKey> {

@@ -10,6 +10,9 @@ identity resolution; about 1,200 lines) was removed in rc.57 because most of its
 | command | what it does |
 |---|---|
 | `synapse id init --account <name>` | create the account key (`<name>`: letters, digits, `-`, `_`, 1 to 64); refuses if one exists |
+| `synapse id init-role --account <name> --role <role>` | in a home WITHOUT the account key (a sandbox): make the role's keys there and print their public halves (`signing-pub`, `sealing-pub`) |
+| `synapse id issue --role <role> --signing-pub <hex> --sealing-pub <hex> [--days 8]` | with the account key: certify those public keys (1 to 30 days; send, ack, request-ack) and print the certificate |
+| `synapse id install-cert --role <role>` | in the role-only home: store the certificate from stdin after checking it certifies this home's keys. Never renews: when it expires, ask for a re-issue |
 | `synapse id show [--role <role>]` | show the account, and with `--role` that role's identity (creates its keys on first use) |
 | `synapse claim --role <role>` | take the role on the daemon (starts `synapsed` on demand; takes it over if another holder has it) |
 | `synapse send --role <role> --to <to> [MESSAGE]` | send (`MESSAGE`, else stdin); `<to>` is `<role>` or `<role>@<account>`; `--id` for an idempotent resend |
