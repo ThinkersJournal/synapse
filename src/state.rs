@@ -477,7 +477,7 @@ impl fmt::Display for StateError {
 
 impl std::error::Error for StateError {}
 
-/// Who is calling and what its certificate grants. The binding (daemon, CLI, MCP) fills this from
+/// Who is calling and what its certificate grants. The binding (daemon, CLI, a tool server) fills this from
 /// the verified session; a request never supplies it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Caller {
@@ -505,7 +505,7 @@ pub struct Filter {
     pub party: Option<String>,
 }
 
-/// The transport-neutral API. Daemon, CLI, MCP tools and a future Commy binding all call this.
+/// The transport-neutral API. The daemon, the CLI, agent tool servers and a future Commy binding all call this.
 pub trait StateStore {
     fn create(
         &self,
