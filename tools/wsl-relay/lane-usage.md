@@ -18,9 +18,10 @@ If the Windows relay is not running you get "no daemon answered"; tell the PM.
 ## Launch (inside the sandbox, Sonnet pinned)
 ```
 lane-sandbox -- env SYNAPSE_HOME=$HOME/synapse-home SYNAPSE_ADDR=127.0.0.1:7920 SYNAPSE_REMOTE_DAEMON=1 \
-  claude --model sonnet --mcp-config $HOME/synapse-home/lane.mcp.json \
+  claude "<prompt>" --model sonnet --permission-mode auto --mcp-config $HOME/synapse-home/lane.mcp.json \
   --dangerously-load-development-channels server:synapse
 ```
+`--dangerously-load-development-channels` is variadic: it MUST be the last flag, prompt first. A prompt after it is swallowed as a channel entry ("entries must be tagged: ...").
 The MCP server MUST be named `synapse`. `claude-peers` is a Windows loopback service and is not reachable from here: do not load it.
 
 ## Use
