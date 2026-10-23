@@ -322,3 +322,67 @@ async fn the_grants_in_the_certificate_decide_what_a_role_reads_and_writes() {
     );
     d.stop().await;
 }
+
+async fn fetch_all(d: &Running, token: &str) -> Vec<Value> {
+    // The notice is handed to the mailbox by a task the write wakes: give it a moment.
+    for _ in 0..100 {
+        let (_, reply) = call(d, Some(token), "/v1/fetch", Some(json!({ "max": 10 }))).await;
+        let messages = reply["messages"].as_array().cloned().unwrap_or_default();
+        if !messages.is_empty() {
+            return messages;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Vec::new()
+}
+
+fn body_of(message: &Value) -> Value {
+    let bytes = B64.decode(message["body_b64"].as_str().unwrap()).unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn a_change_reaches_the_other_parties_as_id_only_mail_from_the_daemon() {
+    let d = start(&[]).await;
+    let (a, b) = (claim(&d, "alpha").await, claim(&d, "beta").await);
+    call(
+        &d,
+        Some(&a),
+        "/v1/state/create",
+        Some(new_record("a confidential title")),
+    )
+    .await;
+
+    let for_beta = fetch_all(&d, &b).await;
+    assert_eq!(for_beta.len(), 1);
+    assert_eq!(for_beta[0]["from"], "daemon:state@acct");
+    assert_eq!(for_beta[0]["message_id"], "state:T-1:1:beta");
+    let body = body_of(&for_beta[0]);
+    assert_eq!(
+        (
+            body["id"].as_str(),
+            body["revision"].as_u64(),
+            body["changed_by"].as_str()
+        ),
+        (Some("T-1"), Some(1), Some("alpha"))
+    );
+    assert_eq!(body["fields"], json!(["created"]));
+    assert!(
+        !body.to_string().contains("confidential"),
+        "ids only, no title"
+    );
+
+    let patch = json!({ "id": "T-1", "expected_revision": 1, "patch": { "state": "waiting" } });
+    assert_eq!(
+        call(&d, Some(&b), "/v1/state/patch", Some(patch)).await.0,
+        200
+    );
+    let for_alpha = fetch_all(&d, &a).await;
+    assert_eq!(
+        for_alpha.len(),
+        1,
+        "alpha hears about beta's write, not its own create"
+    );
+    assert_eq!(body_of(&for_alpha[0])["fields"], json!(["state"]));
+    d.stop().await;
+}

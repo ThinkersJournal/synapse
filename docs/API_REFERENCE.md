@@ -54,6 +54,7 @@ Bound to a loopback address only (it refuses any other). Bodies are JSON and **d
 | `/v1/stats` | GET | none | per-role cumulative counters since this daemon started (a restart begins again from zero); the CLI reader is `synapse stats` |
 | `/v1/state/create` | POST | `title`, `parties`, `owner`, `state?`, `blocked_on?`, `verify?`, `notes?` | shared state (`state.redb`); needs `state-write` and the caller a party; answers `{record}` with id `T-<n>` |
 | `/v1/state/get`, `/v1/state/history` | GET | `?id=T-<n>` | a record, or its hash-chained history; a record the caller may not see answers `404` (`get`) or `403` (`history`) |
+| (mail from `daemon:state@<account>`) | | | every state write queues one message per other party, body `{"kind":"state","id","revision","changed_by","fields"}`: ids and field names only, never a title or note; message id `state:<id>:<revision>:<role>` so a crash cannot double it. Read the content with `/v1/state/get` |
 | `/v1/state/list` | GET | `?state=a,b&party=p` | the records the caller may see: its own, or all with `state-read-all` / `state-admin` |
 | `/v1/state/patch` | POST | `id`, `expected_revision`, `patch` | compare-and-set; `409 stale_revision` changes nothing and carries `current` (the revision) and `record`; `403` is recorded as a `state_denied` security event |
 

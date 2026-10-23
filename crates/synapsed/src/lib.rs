@@ -217,6 +217,8 @@ struct Shared {
     sessions: Mutex<HashMap<[u8; 32], Session>>,
     /// Shared state between lanes (`state.redb`); interior-locked, so no `Mutex` here.
     state: synapse::state::StateEngine<synapse::state::RedbBackend>,
+    /// Woken after a state write, so its notices go out at once rather than on the retry tick.
+    state_nudge: tokio::sync::Notify,
     presence: Mutex<HashMap<String, Presence>>,
     /// Cumulative per-role counters for `/v1/stats`. In memory: a restart zeroes them, and the
     /// answer says so (`scope`, `since`).
@@ -486,6 +488,58 @@ fn queue_alert(shared: &Shared, roles: &[String], fallback: &Arc<dyn SecuritySin
     }
 }
 
+/// The sender of shared-state change notices (see [`synapse::state::Notice`]). Like
+/// [`ALERT_SENDER`], not a valid role name, so no role can claim it.
+const STATE_SENDER: &str = "daemon:state";
+/// Notices handed to the mailbox per pass.
+const NOTICE_BATCH: usize = 100;
+/// How long an undelivered notice (a full queue, say) waits before the next pass.
+const NOTICE_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One pass over the undelivered notices: each becomes mail from `daemon:state@<account>` and is
+/// then marked delivered. The message id is fixed per (record, revision, party), so a crash between
+/// the two steps re-enqueues the same message, which the mailbox drops as a duplicate. A notice that
+/// cannot be queued stays, and does not hold up the ones behind it. True if the pass was full and
+/// clean, so another may be waiting.
+fn deliver_state_notices_once(shared: &Shared) -> bool {
+    use synapse::state::StateStore;
+    let Ok(notices) = shared.state.pending_notices(NOTICE_BATCH) else {
+        return false;
+    };
+    let mut clean = true;
+    let full = notices.len() == NOTICE_BATCH;
+    for notice in notices {
+        let envelope = Envelope {
+            message_id: notice.message_id(),
+            to: format!("{}@{}", notice.to, shared.account),
+            from: format!("{STATE_SENDER}@{}", shared.account),
+            body: notice.body().into_bytes(),
+        };
+        let queued = match shared.mailbox.lock() {
+            Ok(mut mailbox) => mailbox.enqueue(envelope, Utc::now()).is_ok(),
+            Err(_) => false,
+        };
+        if queued && shared.state.notice_delivered(notice.seq).is_ok() {
+            continue;
+        }
+        clean = false;
+    }
+    clean && full
+}
+
+async fn deliver_state_notices(shared: Arc<Shared>) {
+    let mut tick = tokio::time::interval(NOTICE_RETRY);
+    loop {
+        if deliver_state_notices_once(&shared) {
+            continue;
+        }
+        tokio::select! {
+            () = shared.state_nudge.notified() => {}
+            _ = tick.tick() => {}
+        }
+    }
+}
+
 async fn deliver_alerts(shared: Arc<Shared>, mut delivery: AlertDelivery) {
     let mut tick = tokio::time::interval(ALERT_FLUSH_EVERY);
     loop {
@@ -586,6 +640,7 @@ impl Daemon {
                     synapse::state::RedbBackend::open(&cfg.home.join(STATE_FILE))
                         .map_err(|e| DaemonError::Store(StoreError(e.to_string())))?,
                 ),
+                state_nudge: tokio::sync::Notify::new(),
                 sessions: Mutex::new(HashMap::new()),
                 presence: Mutex::new(HashMap::new()),
                 stats: Mutex::new(HashMap::new()),
@@ -712,6 +767,7 @@ impl Daemon {
         };
         let alert_task =
             alerts.map(|delivery| tokio::spawn(deliver_alerts(shared.clone(), delivery)));
+        let notice_task = tokio::spawn(deliver_state_notices(shared.clone()));
         let app = Router::new()
             .route(
                 "/v1/health",
@@ -746,6 +802,7 @@ impl Daemon {
             .with_graceful_shutdown(shutdown)
             .await;
         sweeper.abort();
+        notice_task.abort();
         if let Some(task) = alert_task {
             task.abort();
         }

@@ -78,6 +78,7 @@ pub(crate) async fn create(
         .state
         .create(&caller(&session), new, Utc::now())
         .map_err(|e| refuse(&shared, &session, "create", e))?;
+    shared.state_nudge.notify_one();
     Ok(reply(json!({ "record": record })))
 }
 
@@ -152,6 +153,7 @@ pub(crate) async fn patch(
             Utc::now(),
         )
         .map_err(|e| refuse(&shared, &session, "patch", e))?;
+    shared.state_nudge.notify_one();
     Ok(reply(json!({ "record": record })))
 }
 

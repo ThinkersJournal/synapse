@@ -3,13 +3,15 @@
 
 use redb::{ReadableTable, TableDefinition};
 
-use super::{Backend, HistoryEntry, Record, StateError, Txn, TxnRead};
+use super::{Backend, HistoryEntry, Notice, Record, StateError, Txn, TxnRead};
 
 /// `id` -> serde_json [`Record`].
 const RECORDS: TableDefinition<&str, &[u8]> = TableDefinition::new("records");
 /// `(id, revision)` -> serde_json [`HistoryEntry`].
 const HISTORY: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("history");
-/// `"record"` -> the last record number issued; `"format"` -> the file format stamp.
+/// `seq` -> serde_json [`Notice`]: not yet delivered.
+const NOTICES: TableDefinition<u64, &[u8]> = TableDefinition::new("notices");
+/// `"record"` -> the last record number issued; `"notice"` -> the last notice seq; `"format"` -> the file format stamp.
 const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters");
 const FORMAT: u64 = 1;
 
@@ -43,6 +45,7 @@ impl RedbBackend {
         {
             txn.open_table(RECORDS).map_err(|e| err("table")(&e))?;
             txn.open_table(HISTORY).map_err(|e| err("table")(&e))?;
+            txn.open_table(NOTICES).map_err(|e| err("table")(&e))?;
             let mut counters = txn.open_table(COUNTERS).map_err(|e| err("table")(&e))?;
             let stamped = counters
                 .get("format")
@@ -108,6 +111,16 @@ impl TxnRead for RedbTxn {
         }
         Ok(out)
     }
+
+    fn notices(&self, max: usize) -> Result<Vec<Notice>, StateError> {
+        let table = self.txn.open_table(NOTICES).map_err(|e| err("table")(&e))?;
+        let mut out = Vec::new();
+        for row in table.iter().map_err(|e| err("scan")(&e))?.take(max) {
+            let (_, value) = row.map_err(|e| err("scan")(&e))?;
+            out.push(decode(value.value())?);
+        }
+        Ok(out)
+    }
 }
 
 impl Txn for RedbTxn {
@@ -132,6 +145,37 @@ impl Txn for RedbTxn {
         table
             .insert(record.id.as_str(), encode(record)?.as_slice())
             .map_err(|e| err("write")(&e))?;
+        Ok(())
+    }
+
+    fn push_notice(&mut self, notice: &Notice) -> Result<(), StateError> {
+        let seq = {
+            let mut table = self
+                .txn
+                .open_table(COUNTERS)
+                .map_err(|e| err("table")(&e))?;
+            let next = table
+                .get("notice")
+                .map_err(|e| err("counter")(&e))?
+                .map_or(0, |v| v.value())
+                + 1;
+            table
+                .insert("notice", next)
+                .map_err(|e| err("counter")(&e))?;
+            next
+        };
+        let mut stored = notice.clone();
+        stored.seq = seq;
+        let mut table = self.txn.open_table(NOTICES).map_err(|e| err("table")(&e))?;
+        table
+            .insert(seq, encode(&stored)?.as_slice())
+            .map_err(|e| err("write")(&e))?;
+        Ok(())
+    }
+
+    fn remove_notice(&mut self, seq: u64) -> Result<(), StateError> {
+        let mut table = self.txn.open_table(NOTICES).map_err(|e| err("table")(&e))?;
+        table.remove(seq).map_err(|e| err("write")(&e))?;
         Ok(())
     }
 
