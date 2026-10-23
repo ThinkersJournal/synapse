@@ -225,7 +225,13 @@ fn state_command(home: &std::path::Path, command: StateCommand) -> Result<(), Ma
             .collect::<Result<Vec<_>, _>>()
     };
     let query = |id: &str| id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
-    let print_record = |reply: &serde_json::Value| println!("{}", reply["record"]);
+    // The record is the command's output, written as data rather than formatted into a log line.
+    let print_record = |reply: &serde_json::Value| -> Result<(), MailError> {
+        let mut out = std::io::stdout().lock();
+        out.write_all(reply["record"].to_string().as_bytes())?;
+        out.write_all(b"\n")?;
+        Ok(())
+    };
     match command {
         StateCommand::New {
             role,
@@ -251,14 +257,14 @@ fn state_command(home: &std::path::Path, command: StateCommand) -> Result<(), Ma
                 body["notes"] = json!(notes);
             }
             let daemon = connect(home, &role)?;
-            print_record(&daemon.call(&role.role, "/v1/state/create", Some(&body))?);
+            print_record(&daemon.call(&role.role, "/v1/state/create", Some(&body))?)?;
         }
         StateCommand::Show { role, id } => {
             if !query(&id) {
                 return Err(MailError::Usage("not a record id".into()));
             }
             let daemon = connect(home, &role)?;
-            print_record(&daemon.call(&role.role, &format!("/v1/state/get?id={id}"), None)?);
+            print_record(&daemon.call(&role.role, &format!("/v1/state/get?id={id}"), None)?)?;
         }
         StateCommand::List { role, state, party } => {
             let mut path = String::from("/v1/state/list?");
@@ -323,7 +329,7 @@ fn state_command(home: &std::path::Path, command: StateCommand) -> Result<(), Ma
             }
             let body = json!({ "id": id, "expected_revision": rev, "patch": patch });
             let daemon = connect(home, &role)?;
-            print_record(&daemon.call(&role.role, "/v1/state/patch", Some(&body))?);
+            print_record(&daemon.call(&role.role, "/v1/state/patch", Some(&body))?)?;
         }
         StateCommand::History { role, id } => {
             if !query(&id) {
