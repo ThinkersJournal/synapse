@@ -9,14 +9,14 @@
 //! `synapse claim|send|inbox|ack|dead|requeue|list|stats --role <role>` (or `SYNAPSE_ROLE`).
 //! `inbox`, `dead`, `list` and `stats` print one JSON object per line. Session tokens are never printed.
 
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use synapse::certificate::Permission;
 use synapse::keystore::{
-    Keystore, KeystoreError, RolePublicKeys, account_name, default_home, load_role, valid_name,
+    Keystore, KeystoreError, RolePublicKeys, account_name, default_home, valid_name,
 };
 use synapse::security_events::SecurityEventKind;
 
@@ -178,7 +178,7 @@ enum IdCommand {
 }
 
 fn print_identity(identity: &synapse::keystore::RoleIdentity) {
-    println!("identity: {}", identity.global_id);
+    println!("identity: {}", identity.chain[0].subject_global_id);
     println!("signing key id: {}", identity.signing_key_id);
     println!("sealing key id: {}", identity.sealing_key_id);
     println!(
@@ -242,7 +242,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
         }
         Command::Id(IdCommand::InitRole { account, role }) => {
             let keys = Keystore::init_role(&home, &account, &role)?;
-            println!("identity: {role}@{account}");
+            println!("role: {role}");
             println!("signing-pub: {}", hex(&keys.signing));
             println!("sealing-pub: {}", hex(&keys.sealing));
         }
@@ -262,7 +262,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 chrono::Utc::now(),
                 chrono::Duration::days(days),
             )?;
-            print!("{pem}");
+            std::io::stdout().write_all(pem.as_bytes())?;
         }
         Command::Id(IdCommand::InstallCert { role }) => {
             let mut pem = String::new();
@@ -275,8 +275,8 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 && !home.join("account").join("account.key.pem").exists()
             {
                 // A role-only home: no account key to show, nothing created, nothing renewed.
-                println!("account: {}", account_name(&home)?);
-                print_identity(&load_role(&home, role, chrono::Utc::now())?);
+                let store = Keystore::open_role_only(&home)?;
+                print_identity(&store.role(role, chrono::Utc::now())?);
                 return Ok(());
             }
 

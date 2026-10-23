@@ -44,7 +44,7 @@ fn init_role_refuses_a_home_that_holds_an_account_key() {
     let got = Keystore::init_role(a.path(), "acct", "lane-x");
     assert!(
         matches!(got, Err(KeystoreError::AccountKeyPresent)),
-        "{got:?}"
+        "init_role must refuse a home holding an account key"
     );
 }
 
@@ -118,7 +118,7 @@ fn a_certificate_for_other_keys_or_none_is_refused() {
     let got = Keystore::install_role_certificate(b.path(), "lane-x", &pem);
     assert!(
         matches!(got, Err(KeystoreError::Corrupt("role certificate"))),
-        "{got:?}"
+        "a certificate for other keys must be refused as corrupt"
     );
 
     let c = tempfile::tempdir().unwrap();
@@ -144,7 +144,7 @@ fn validity_outside_one_to_thirty_days_is_refused() {
         let got = store.issue_role_certificate("lane-x", pubs, Utc::now(), Duration::days(days));
         assert!(
             matches!(got, Err(KeystoreError::InvalidValidity)),
-            "{days}: {got:?}"
+            "{days} days must be refused as an invalid validity"
         );
     }
 }
