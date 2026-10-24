@@ -12,6 +12,8 @@
 use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 
+mod checker;
+
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use synapse::certificate::Permission;
@@ -189,6 +191,26 @@ enum StateCommand {
         role: RoleArg,
         id: String,
     },
+    /// Run the checker: look up the facts open records name (crates.io, GitHub) and report them.
+    /// Needs the `state-derive` grant (`synapse id grant --role <role> state-derive`); run it as
+    /// the checker role. Nothing else may write a fact.
+    Check {
+        #[command(flatten)]
+        role: RoleArg,
+        /// One pass, then exit (default: repeat).
+        #[arg(long)]
+        once: bool,
+        /// Seconds between passes.
+        #[arg(long, default_value_t = 300)]
+        interval: u64,
+        /// The environment variable holding a GitHub token (none: GitHub's unauthenticated limits).
+        #[arg(long, default_value = "SYNAPSE_CHECKER_GITHUB_TOKEN")]
+        github_token_env: String,
+        #[arg(long, default_value = "https://crates.io")]
+        crates_url: String,
+        #[arg(long, default_value = "https://api.github.com")]
+        github_url: String,
+    },
 }
 
 fn condition_json(text: &str) -> Result<serde_json::Value, MailError> {
@@ -330,6 +352,40 @@ fn state_command(home: &std::path::Path, command: StateCommand) -> Result<(), Ma
             let body = json!({ "id": id, "expected_revision": rev, "patch": patch });
             let daemon = connect(home, &role)?;
             print_record(&daemon.call(&role.role, "/v1/state/patch", Some(&body))?)?;
+        }
+        StateCommand::Check {
+            role,
+            once,
+            interval,
+            github_token_env,
+            crates_url,
+            github_url,
+        } => {
+            let forge = checker::Forge::new(
+                &crates_url,
+                &github_url,
+                Box::new(checker::EnvToken(github_token_env)),
+            )?;
+            loop {
+                // Connect afresh each pass: a daemon that restarted is a new instance.
+                let pass = connect(home, &role)
+                    .and_then(|daemon| checker::check_once(&daemon, &role.role, &forge));
+                match pass {
+                    Ok(p) => println!(
+                        "checked {} facts: {} found, {} absent, {} failed",
+                        p.found + p.absent + p.failed,
+                        p.found,
+                        p.absent,
+                        p.failed
+                    ),
+                    Err(e) if once => return Err(e),
+                    Err(e) => eprintln!("error: {e}"),
+                }
+                if once {
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_secs(interval.max(1)));
+            }
         }
         StateCommand::History { role, id } => {
             if !query(&id) {
