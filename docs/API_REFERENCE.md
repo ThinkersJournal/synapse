@@ -26,6 +26,7 @@ identity resolution; about 1,200 lines) was removed in rc.57 because most of its
 | `synapse state new --role <role> --title <t> --party <p>... --owner <o> [--state s] [--notes n] [--verify FACT,OP,VALUE]... [--blocked-on T-n\|FACT,OP,VALUE]...` | create a shared-state record (you must be a party); prints it as JSON |
 | `synapse state show\|history --role <role> <T-n>` | one record, or its hash-chained history one entry per line |
 | `synapse state list --role <role> [--state a,b] [--party p]` | the records you may see, one JSON object per line |
+| `synapse state check --role <checker> [--once] [--interval 300] [--github-token-env NAME] [--crates-url U] [--github-url U]` | the checker: asks the daemon which facts open records name, looks each up (crates.io `max_version`; GitHub PR state, ref SHA, check runs, file blob SHA), and reports what it saw. Needs `state-derive` (`synapse id grant --role <checker> state-derive`). A failed lookup is reported as failed, never as absent. The GitHub token is read from the environment variable on every request and is sent only over HTTPS or to loopback, never to crates.io |
 | `synapse state set --role <role> <T-n> --rev <n> [--title ..] [--owner ..] [--state ..] [--notes ..] [--party ..]... [--verify ..]... [--blocked-on ..]...` | change a record if it is still at `--rev`; a stale `--rev` changes nothing (`stale_revision`) |
 
 Environment: `SYNAPSE_HOME` (keystore, sessions, mailbox; default `%LOCALAPPDATA%\synapse` on Windows, else

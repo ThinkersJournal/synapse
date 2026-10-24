@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.149): shared state, slice S4b: the checker process (`synapse state check`)
+
+The process that answers forge facts: it reads `GET /v1/state/wanted`, looks each fact up (`crate_version` = crates.io `max_version`; `pr_state` merged/open/closed; `ref_sha`; `check_state` failure/pending/success over all check runs, not only the required ones; `file_at_ref` blob SHA or absent), and posts `POST /v1/state/facts`. Rate limits and 5xx are `failed`, never `absent`. The credential is a `TokenSource` asked per request (today an environment variable; a GitHub App installation token fits the same seam), sent only over HTTPS or to loopback and never to crates.io. `synapsectl` names reqwest's `rustls` feature: the TLS stack (rustls with aws-lc-rs, board 104's tracked exception) was already in its tree through `synapse`, and `Cargo.lock` gains one dependency line and no crate.
+
 ### Fix (rc.148): synapsed survives an empty redb beside the SQLite store
 
 After an unclean shutdown a stray CLI spawn can leave a content-free `mailbox.redb` next to the real `mailbox.sqlite`; `synapsed` refused to start (exit 2) because it could not tell which held the mail. A redb that dumps to nothing (no mail, acked history or roles, sequence 0) is now renamed to `mailbox.redb.empty-<n>` (never deleted) and the daemon starts on SQLite. If the redb holds anything, it is still refused.

@@ -14,14 +14,18 @@ name = "synapse"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.148" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.148" }
-synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.148" }
+synapse = { path = "../..", version = "6.0.0-rc.149" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.149" }
+synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.149" }
 clap = { version = "4.5.41", features = ["derive", "env"] }
 chrono = "0.4"
+# The checker (`synapse state check`) talks HTTPS to crates.io and GitHub. The TLS stack (rustls with
+# aws-lc-rs, the tracked exception of board 104) is already in this crate's tree through `synapse`;
+# this names it rather than relying on feature unification, and adds no crate to Cargo.lock.
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "rustls"] }
 serde_json = "1.0"
 uuid = { version = "1.6", features = ["v4"] }
-synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.148", optional = true }
+synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.149", optional = true }
 
 [features]
 # `synapse storage list` / `use`: the stores PersistAnt can offer for the mailbox, and recording the

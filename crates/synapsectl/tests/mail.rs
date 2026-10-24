@@ -1099,3 +1099,136 @@ fn the_state_commands_never_load_the_account_key() {
         "the corrupted key must be unreadable: {id:?}"
     );
 }
+
+/// A stub forge on loopback: answers by path, remembers (path, had a bearer token).
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>;
+
+fn forge_stub() -> (String, Seen) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let path = request
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("")
+                .to_string();
+            let auth = request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer");
+            log.lock().unwrap().push((path.clone(), auth));
+            let (status, body) = if path == "/api/v1/crates/synapse" {
+                (200, r#"{"crate":{"max_version":"6.0.0-rc.149"}}"#)
+            } else if path == "/repos/o/r/pulls/7" {
+                (
+                    200,
+                    r#"{"state":"closed","merged_at":"2026-10-24T00:00:00Z"}"#,
+                )
+            } else if path.starts_with("/repos/o/r/contents/docs/X.md") {
+                (404, r#"{"message":"Not Found"}"#)
+            } else {
+                (500, r#"{"message":"boom"}"#)
+            };
+            let reason = if status == 200 { "OK" } else { "Error" };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (base, seen)
+}
+
+/// The checker, end to end against a stub forge: it reports what it saw, the daemon derives, and a
+/// failed lookup answers nothing instead of "absent". The token goes to the GitHub URL only.
+#[test]
+fn the_checker_reports_forge_facts_and_the_daemon_derives_them() {
+    let home = Home::new();
+    home.ok(&["id", "grant", "--role", "checker", "state-derive"]);
+    let (forge, seen) = forge_stub();
+    home.ok(&[
+        "state",
+        "new",
+        "--role",
+        "alpha",
+        "--title",
+        "release",
+        "--party",
+        "alpha",
+        "--owner",
+        "alpha",
+        "--verify",
+        "crate_version:synapse,ge,6.0.0-rc.145",
+        "--verify",
+        "pr_state:o/r#7,eq,merged",
+        "--verify",
+        "file_at_ref:o/r@main:docs/X.md,absent",
+        "--verify",
+        "ref_sha:o/r@main,exists",
+    ]);
+
+    // A lane cannot run the checker: the grant is the checker's alone.
+    let denied = home.run(&["state", "check", "--role", "alpha", "--once"]);
+    assert_ne!(denied.status.code(), Some(0), "{denied:?}");
+
+    let out = home
+        .command(&[
+            "state",
+            "check",
+            "--role",
+            "checker",
+            "--once",
+            "--crates-url",
+            &forge,
+            "--github-url",
+            &forge,
+        ])
+        .env("SYNAPSE_CHECKER_GITHUB_TOKEN", "test-token")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "checked 4 facts: 2 found, 1 absent, 1 failed"
+    );
+
+    let shown: Value =
+        serde_json::from_str(&home.ok(&["state", "show", "--role", "alpha", "T-1"])).unwrap();
+    let verify = &shown["derived"]["verify"];
+    assert_eq!(verify[0]["satisfied"], true, "6.0.0-rc.149 >= 6.0.0-rc.145");
+    assert_eq!(verify[1]["satisfied"], true, "merged");
+    assert_eq!(verify[2]["satisfied"], true, "a 404 is absent");
+    assert_eq!(verify[3]["satisfied"], Value::Null, "a 500 answers nothing");
+    assert_eq!(verify[3]["error"], "HTTP 500");
+    assert_eq!(verify[0]["observed_by"], "checker");
+    assert_eq!(
+        shown["derived"]["stale"], true,
+        "one fact was never observed"
+    );
+    assert_eq!(shown["derived"]["last_verified"], Value::Null);
+    assert_eq!(shown["revision"], 1, "facts are not writes to the record");
+
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|(p, _)| p.starts_with("/api/v1/crates/")));
+    assert!(
+        seen.iter()
+            .filter(|(p, _)| p.starts_with("/repos/"))
+            .all(|(_, auth)| *auth),
+        "the token goes to GitHub: {seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .filter(|(p, _)| p.starts_with("/api/"))
+            .all(|(_, auth)| !*auth),
+        "and never to crates.io: {seen:?}"
+    );
+}
