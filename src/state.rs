@@ -11,7 +11,7 @@
 //! Free text (`title`, `notes`, condition values) is data: stored as given, bounded, never executed.
 //! A [`FactSpec`] is parsed against a closed registry; text that does not parse is refused.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Mutex;
 
@@ -20,6 +20,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::keystore::valid_name;
+
+mod derived;
+pub use derived::{
+    BlockerView, ConditionView, Derived, DerivedFlags, FactObservation, FactReport, Look,
+    Staleness, derive,
+};
 
 #[cfg(feature = "mailbox-redb")]
 mod redb_backend;
@@ -448,8 +454,12 @@ pub struct Notice {
     /// The party told.
     pub to: String,
     pub changed_by: String,
-    /// `["created"]` for a new record, else the patched field names.
+    /// `["created"]` for a new record, else the patched field names; for a derived change
+    /// (`derived`), `facts`, `stale` and/or `unblocked`.
     pub fields: Vec<String>,
+    /// A change in what is derived about the record (a fact flipped, it went stale), not a write.
+    #[serde(default)]
+    pub derived: bool,
 }
 
 impl Notice {
@@ -462,6 +472,7 @@ impl Notice {
             "revision": self.revision,
             "changed_by": self.changed_by,
             "fields": self.fields,
+            "derived": self.derived,
         })
         .to_string()
     }
@@ -470,7 +481,12 @@ impl Notice {
     /// twice after a crash is one message.
     #[must_use]
     pub fn message_id(&self) -> String {
-        format!("state:{}:{}:{}", self.id, self.revision, self.to)
+        if self.derived {
+            // A derived change does not move the revision, so the notice's own seq makes it unique.
+            format!("state:{}:d{}:{}", self.id, self.seq, self.to)
+        } else {
+            format!("state:{}:{}:{}", self.id, self.revision, self.to)
+        }
     }
 }
 
@@ -528,6 +544,8 @@ pub struct Caller {
     pub admin: bool,
     /// Reads every record (the PM and the export role); grants no write.
     pub read_all: bool,
+    /// `state-derive`: reports facts and learns which are wanted. Held only by the checker.
+    pub derive: bool,
 }
 
 impl Caller {
@@ -564,6 +582,34 @@ pub trait StateStore {
         now: DateTime<Utc>,
     ) -> Result<Record, StateError>;
     fn history(&self, caller: &Caller, id: &str) -> Result<Vec<HistoryEntry>, StateError>;
+    /// A record with what is derived about it at `now`.
+    fn get_view(
+        &self,
+        caller: &Caller,
+        id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(Record, Derived)>, StateError>;
+    fn list_views(
+        &self,
+        caller: &Caller,
+        filter: &Filter,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<(Record, Derived)>, StateError>;
+    /// The checker reports what it looked up. Needs `state-derive`; no other grant lets a role
+    /// write a fact.
+    fn report_facts(
+        &self,
+        caller: &Caller,
+        reports: Vec<FactReport>,
+        now: DateTime<Utc>,
+    ) -> Result<(), StateError>;
+    /// The distinct facts named by records that are not done or cancelled: what the checker polls.
+    /// Needs `state-derive`.
+    fn wanted_facts(&self, caller: &Caller) -> Result<Vec<FactSpec>, StateError>;
+    /// Notify the parties of every record whose derived state has changed since the last call
+    /// (a fact flipped, it went stale, it became unblocked), once per change. Returns how many
+    /// notices were queued. The first call for a record only records its state.
+    fn refresh_derived(&self, now: DateTime<Utc>) -> Result<usize, StateError>;
     /// Up to `max` notices not yet delivered, oldest first.
     fn pending_notices(&self, max: usize) -> Result<Vec<Notice>, StateError>;
     /// Mark a notice delivered. Idempotent.
@@ -576,6 +622,8 @@ pub trait TxnRead {
     fn all(&self) -> Result<Vec<Record>, StateError>;
     fn history(&self, id: &str) -> Result<Vec<HistoryEntry>, StateError>;
     fn notices(&self, max: usize) -> Result<Vec<Notice>, StateError>;
+    fn fact(&self, spec: &FactSpec) -> Result<Option<FactObservation>, StateError>;
+    fn derived_flags(&self, id: &str) -> Result<Option<DerivedFlags>, StateError>;
 }
 
 /// One write transaction: everything done through it commits together or not at all.
@@ -587,6 +635,8 @@ pub trait Txn: TxnRead {
     /// Store `notice`, giving it the next `seq`.
     fn push_notice(&mut self, notice: &Notice) -> Result<(), StateError>;
     fn remove_notice(&mut self, seq: u64) -> Result<(), StateError>;
+    fn put_fact(&mut self, fact: &FactObservation) -> Result<(), StateError>;
+    fn put_derived_flags(&mut self, id: &str, flags: &DerivedFlags) -> Result<(), StateError>;
 }
 
 /// Storage for the engine: rows and atomicity, nothing else.
@@ -605,11 +655,60 @@ pub trait Backend {
 /// The shared logic over any [`Backend`].
 pub struct StateEngine<B: Backend> {
     backend: B,
+    staleness: Staleness,
 }
 
 impl<B: Backend> StateEngine<B> {
     pub fn new(backend: B) -> Self {
-        StateEngine { backend }
+        StateEngine {
+            backend,
+            staleness: Staleness::default(),
+        }
+    }
+
+    /// Replace the staleness limits (default 6 h for every kind).
+    #[must_use]
+    pub fn with_staleness(mut self, staleness: Staleness) -> Self {
+        self.staleness = staleness;
+        self
+    }
+
+    /// Derive for `record` inside one read: its facts and its record-blockers' states are looked up
+    /// first, with `?`, so a storage error is an error and not a missing fact.
+    fn derive_in(
+        &self,
+        txn: &dyn TxnRead,
+        record: &Record,
+        now: DateTime<Utc>,
+    ) -> Result<Derived, StateError> {
+        let mut facts: BTreeMap<String, FactObservation> = BTreeMap::new();
+        let conditions = record
+            .verify
+            .iter()
+            .chain(record.blocked_on.iter().filter_map(|b| match b {
+                Blocker::Condition(c) => Some(c),
+                Blocker::Record(_) => None,
+            }));
+        for c in conditions {
+            if let Some(f) = txn.fact(&c.fact)? {
+                facts.insert(c.fact.as_str().to_string(), f);
+            }
+        }
+        let mut states: BTreeMap<String, State> = BTreeMap::new();
+        for b in &record.blocked_on {
+            if let Blocker::Record(id) = b
+                && let Some(r) = txn.record(id)?
+            {
+                states.insert(id.clone(), r.state);
+            }
+        }
+        Ok(derive(
+            record,
+            &|spec| facts.get(spec.as_str()).cloned(),
+            &|id| states.get(id).copied(),
+            now,
+            &self.staleness,
+        ))
     }
 }
 
@@ -722,6 +821,7 @@ fn append_entry(
             to: party.clone(),
             changed_by: writer.to_string(),
             fields: fields.clone(),
+            derived: false,
         })?;
     }
     Ok(())
@@ -745,6 +845,8 @@ impl<B: Backend> StateStore for StateEngine<B> {
             let record = from_new(&id, &new, now);
             validate(&record, txn)?;
             append_entry(txn, &record, &caller.role, Change::Create(new), now)?;
+            // The baseline `refresh_derived` compares against: a change after this is a flip.
+            txn.put_derived_flags(&record.id, &self.derive_in(&*txn, &record, now)?.flags())?;
             Ok(record)
         })
     }
@@ -805,7 +907,141 @@ impl<B: Backend> StateStore for StateEngine<B> {
             next.updated_at = now;
             validate(&next, txn)?;
             append_entry(txn, &next, &caller.role, Change::Patch(patch), now)?;
+            // A patch may reshape the conditions: what is derived starts over from here.
+            txn.put_derived_flags(&next.id, &self.derive_in(&*txn, &next, now)?.flags())?;
             Ok(next)
+        })
+    }
+
+    fn get_view(
+        &self,
+        caller: &Caller,
+        id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(Record, Derived)>, StateError> {
+        self.backend.read(|txn| {
+            let Some(record) = txn.record(id)?.filter(|r| caller.sees(r)) else {
+                return Ok(None);
+            };
+            let derived = self.derive_in(txn, &record, now)?;
+            Ok(Some((record, derived)))
+        })
+    }
+
+    fn list_views(
+        &self,
+        caller: &Caller,
+        filter: &Filter,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<(Record, Derived)>, StateError> {
+        self.backend.read(|txn| {
+            let mut out = Vec::new();
+            for record in txn.all()? {
+                if !caller.sees(&record)
+                    || !(filter.states.is_empty() || filter.states.contains(&record.state))
+                    || !filter
+                        .party
+                        .as_ref()
+                        .is_none_or(|p| record.parties.contains(p))
+                {
+                    continue;
+                }
+                let derived = self.derive_in(txn, &record, now)?;
+                out.push((record, derived));
+            }
+            out.sort_by_key(|(r, _)| id_number(&r.id));
+            Ok(out)
+        })
+    }
+
+    fn report_facts(
+        &self,
+        caller: &Caller,
+        reports: Vec<FactReport>,
+        now: DateTime<Utc>,
+    ) -> Result<(), StateError> {
+        if !caller.derive {
+            return Err(StateError::Forbidden);
+        }
+        for r in &reports {
+            match &r.look {
+                Look::Found(text) | Look::Failed(text) => {
+                    check_text("a reported value", text, MAX_VALUE, false)?;
+                }
+                Look::Absent => {}
+            }
+        }
+        self.backend.write(|txn| {
+            for report in &reports {
+                let previous = txn.fact(&report.fact)?;
+                txn.put_fact(&FactObservation::fold(previous, report, &caller.role, now))?;
+            }
+            Ok(())
+        })
+    }
+
+    fn wanted_facts(&self, caller: &Caller) -> Result<Vec<FactSpec>, StateError> {
+        if !caller.derive {
+            return Err(StateError::Forbidden);
+        }
+        self.backend.read(|txn| {
+            let mut wanted: BTreeSet<FactSpec> = BTreeSet::new();
+            for record in txn.all()?.into_iter().filter(|r| !r.state.is_terminal()) {
+                wanted.extend(record.verify.iter().map(|c| c.fact.clone()));
+                for b in &record.blocked_on {
+                    if let Blocker::Condition(c) = b {
+                        wanted.insert(c.fact.clone());
+                    }
+                }
+            }
+            Ok(wanted.into_iter().collect())
+        })
+    }
+
+    fn refresh_derived(&self, now: DateTime<Utc>) -> Result<usize, StateError> {
+        self.backend.write(|txn| {
+            let mut queued = 0;
+            for record in txn.all()?.into_iter().filter(|r| !r.state.is_terminal()) {
+                let flags = self.derive_in(txn, &record, now)?.flags();
+                let previous = txn.derived_flags(&record.id)?;
+                if previous.as_ref() == Some(&flags) {
+                    continue;
+                }
+                txn.put_derived_flags(&record.id, &flags)?;
+                let Some(previous) = previous else {
+                    continue; // a record from before baselines were kept: record it, say nothing
+                };
+                let mut fields = Vec::new();
+                // A record whose conditions were just edited has a new shape; that write already
+                // notified, so a length change is a new baseline, not a flip.
+                if previous.satisfied.len() == flags.satisfied.len()
+                    && previous.satisfied != flags.satisfied
+                {
+                    fields.push("facts".to_string());
+                }
+                if previous.stale != flags.stale {
+                    fields.push("stale".to_string());
+                }
+                if previous.unblocked != flags.unblocked {
+                    fields.push("unblocked".to_string());
+                }
+                if fields.is_empty() {
+                    continue;
+                }
+                for party in &record.parties {
+                    txn.push_notice(&Notice {
+                        seq: 0,
+                        id: record.id.clone(),
+                        revision: record.revision,
+                        to: party.clone(),
+                        changed_by: "derived".to_string(),
+                        fields: fields.clone(),
+                        derived: true,
+                    })?;
+                    queued += 1;
+                }
+            }
+            Ok(queued)
         })
     }
 
@@ -841,6 +1077,8 @@ struct MemoryData {
     counter: u64,
     notices: BTreeMap<u64, Notice>,
     notice_counter: u64,
+    facts: BTreeMap<String, FactObservation>,
+    flags: BTreeMap<String, DerivedFlags>,
 }
 
 impl TxnRead for MemoryData {
@@ -855,6 +1093,12 @@ impl TxnRead for MemoryData {
     }
     fn notices(&self, max: usize) -> Result<Vec<Notice>, StateError> {
         Ok(self.notices.values().take(max).cloned().collect())
+    }
+    fn fact(&self, spec: &FactSpec) -> Result<Option<FactObservation>, StateError> {
+        Ok(self.facts.get(spec.as_str()).cloned())
+    }
+    fn derived_flags(&self, id: &str) -> Result<Option<DerivedFlags>, StateError> {
+        Ok(self.flags.get(id).cloned())
     }
 }
 
@@ -883,6 +1127,15 @@ impl Txn for MemoryData {
     }
     fn remove_notice(&mut self, seq: u64) -> Result<(), StateError> {
         self.notices.remove(&seq);
+        Ok(())
+    }
+    fn put_fact(&mut self, fact: &FactObservation) -> Result<(), StateError> {
+        self.facts
+            .insert(fact.fact.as_str().to_string(), fact.clone());
+        Ok(())
+    }
+    fn put_derived_flags(&mut self, id: &str, flags: &DerivedFlags) -> Result<(), StateError> {
+        self.flags.insert(id.to_string(), flags.clone());
         Ok(())
     }
 }

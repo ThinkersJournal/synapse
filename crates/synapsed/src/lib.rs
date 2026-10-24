@@ -493,6 +493,8 @@ fn queue_alert(shared: &Shared, roles: &[String], fallback: &Arc<dyn SecuritySin
 const STATE_SENDER: &str = "daemon:state";
 /// Notices handed to the mailbox per pass.
 const NOTICE_BATCH: usize = 100;
+/// How often derived changes (a fact flipped, a record went stale) are looked for.
+const DERIVED_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 /// How long an undelivered notice (a full queue, say) waits before the next pass.
 const NOTICE_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -529,7 +531,15 @@ fn deliver_state_notices_once(shared: &Shared) -> bool {
 
 async fn deliver_state_notices(shared: Arc<Shared>) {
     let mut tick = tokio::time::interval(NOTICE_RETRY);
+    let mut refreshed = tokio::time::Instant::now();
     loop {
+        // What is derived about a record (a fact flipped, it went stale) changes with time and
+        // with the checker's reports; look for changes once a minute and after each report.
+        if refreshed.elapsed() >= DERIVED_EVERY {
+            use synapse::state::StateStore;
+            let _ = shared.state.refresh_derived(Utc::now());
+            refreshed = tokio::time::Instant::now();
+        }
         if deliver_state_notices_once(&shared) {
             continue;
         }
@@ -790,6 +800,8 @@ impl Daemon {
             .route("/v1/state/list", get(state_api::list))
             .route("/v1/state/patch", post(state_api::patch))
             .route("/v1/state/history", get(state_api::history))
+            .route("/v1/state/facts", post(state_api::facts))
+            .route("/v1/state/wanted", get(state_api::wanted))
             // Inside `host_guard`, so a 421 is neither counted nor delayed.
             .layer(middleware::from_fn(move |req: Request, next: Next| {
                 delay_failures(pause.clone(), req, next)

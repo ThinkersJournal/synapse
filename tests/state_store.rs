@@ -18,6 +18,7 @@ fn caller(role: &str) -> Caller {
         write: true,
         admin: false,
         read_all: false,
+        derive: false,
     }
 }
 
