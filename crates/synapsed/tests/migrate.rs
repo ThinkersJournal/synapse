@@ -122,3 +122,30 @@ fn two_stores_and_no_marker_is_refused_not_guessed() {
     // Control: the default store is unaffected by the SQLite file.
     drop(Daemon::open(&config(home.path())).expect("redb start"));
 }
+
+#[test]
+fn an_empty_redb_beside_a_sqlite_store_is_moved_aside_not_refused() {
+    // After an unclean shutdown a stray CLI spawn can leave a content-free redb next to the real
+    // SQLite store; refusing to start there takes the daemon down with nothing to decide.
+    let home = tempfile::tempdir().unwrap();
+    Keystore::init_account(home.path(), "acct").expect("init account");
+    let redb = home.path().join("mailbox.redb");
+    drop(RedbStore::open(&redb).unwrap());
+    drop(
+        synapse_mailbox_persistant::SqliteMailStore::open(home.path().join("mailbox.sqlite"))
+            .unwrap(),
+    );
+    drop(Daemon::open_with(&config(home.path()), StoreKind::Sqlite).expect("starts on sqlite"));
+    assert!(!redb.exists(), "the empty redb was moved aside");
+    let kept: Vec<_> = std::fs::read_dir(home.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("mailbox.redb.empty")
+        })
+        .collect();
+    assert_eq!(kept.len(), 1, "moved, never deleted");
+    assert!(!home.path().join("mailbox.sqlite.migrated").exists());
+}
