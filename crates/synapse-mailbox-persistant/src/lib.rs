@@ -87,19 +87,35 @@ impl SqliteMailStore {
     /// When the file is too open, or the database cannot be opened.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
+        // One line per cold-start step with the time since the open began, so a start that hangs
+        // (the 2026-10-24 pool timeouts) shows which step it was in.
+        let begun = std::time::Instant::now();
+        let step = |what: &str| {
+            eprintln!(
+                "synapse: mail store {}: {what} ({:.0?} since the open began)",
+                path.display(),
+                begun.elapsed()
+            );
+        };
+        step("opening");
         create_owner_only_if_unix(&path)?;
         if path.exists() {
             synapse::keystore::check_owner_only(&path, "mail store")
                 .map_err(|e| se("permissions", e))?;
         }
+        step("permissions checked");
         let lock = lock_exclusive(&path)?;
+        step("lock taken");
         let rt = new_runtime()?;
+        step("runtime started");
         let opened = {
             let p = path.clone();
             rt.handle().clone().spawn(async move {
-                let db = persistant_sqlx::SqliteBackend::open_durable(p)
-                    .await
-                    .map_err(|e| se("open sqlite", e))?;
+                let db = retry_pool_timeouts(&p, || {
+                    persistant_sqlx::SqliteBackend::open_durable(p.clone())
+                })
+                .await
+                .map_err(|e| se("open sqlite", e))?;
                 // PersistAnt 0.8.20's call bound: a call that times out poisons its transaction,
                 // so a timed-out batch is rolled back rather than left half-open.
                 KvOnRelational::open(persistant_sqlx::Bounded::new(db, DEFAULT_TIMEOUT))
@@ -110,10 +126,12 @@ impl SqliteMailStore {
         let kv = match wait(&rt, opened) {
             Ok(kv) => kv,
             Err(e) => {
+                step("open failed");
                 rt.shutdown_background();
                 return Err(e);
             }
         };
+        step("sqlite and key-value layer open");
         if let Err(e) = synapse::keystore::check_owner_only(&path, "mail store") {
             rt.shutdown_background();
             return Err(se("permissions", e));
@@ -121,6 +139,35 @@ impl SqliteMailStore {
         let mut store = Self::from_runtime(rt, kv, "mail.v3".into());
         store._lock = Some(lock);
         Ok(store)
+    }
+}
+
+/// How many times an open is repeated after the pool gave up waiting for a connection.
+const OPEN_RETRIES: u32 = 2;
+
+/// Run `attempt`; if it fails because the connection pool timed out (the file stayed locked for the
+/// whole 30 s busy wait, as one first start after a reboot did), warn and try again, at most
+/// [`OPEN_RETRIES`] more times. Any other error, and the last timeout, is returned unchanged.
+async fn retry_pool_timeouts<T, E, F, Fut>(path: &Path, mut attempt: F) -> Result<T, E>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let mut retries = 0;
+    loop {
+        let started = std::time::Instant::now();
+        match attempt().await {
+            Err(e) if retries < OPEN_RETRIES && e.to_string().contains("pool timed out") => {
+                retries += 1;
+                eprintln!(
+                    "synapse: warning: opening {} waited {:.1?} for a connection and timed out; retry {retries} of {OPEN_RETRIES}",
+                    path.display(),
+                    started.elapsed()
+                );
+            }
+            result => return result,
+        }
     }
 }
 
@@ -878,6 +925,47 @@ impl<K: KvBackend + Send + Sync + 'static> MailStore for PersistantMailStore<K> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn timed_out() -> Result<u8, String> {
+        Err("database unavailable: pool timed out while waiting for an open connection".into())
+    }
+
+    #[tokio::test]
+    async fn an_open_that_times_out_twice_is_retried_and_then_succeeds() {
+        let calls = std::cell::Cell::new(0);
+        let got = retry_pool_timeouts(Path::new("m.db"), || {
+            calls.set(calls.get() + 1);
+            let r = if calls.get() <= 2 { timed_out() } else { Ok(7) };
+            async move { r }
+        })
+        .await;
+        assert_eq!(got, Ok(7));
+        assert_eq!(calls.get(), 3, "one try and two retries");
+    }
+
+    #[tokio::test]
+    async fn a_persistent_timeout_is_returned_after_the_retries_not_masked() {
+        let calls = std::cell::Cell::new(0);
+        let got = retry_pool_timeouts(Path::new("m.db"), || {
+            calls.set(calls.get() + 1);
+            async { timed_out() }
+        })
+        .await;
+        assert!(got.unwrap_err().contains("pool timed out"));
+        assert_eq!(calls.get(), 3, "the bound is two retries");
+    }
+
+    #[tokio::test]
+    async fn any_other_open_error_is_not_retried() {
+        let calls = std::cell::Cell::new(0);
+        let got: Result<u8, String> = retry_pool_timeouts(Path::new("m.db"), || {
+            calls.set(calls.get() + 1);
+            async { Err("disk I/O error".to_string()) }
+        })
+        .await;
+        assert_eq!(got.unwrap_err(), "disk I/O error");
+        assert_eq!(calls.get(), 1);
+    }
 
     #[test]
     fn a_stalled_backend_call_becomes_an_error_not_a_hang() {
