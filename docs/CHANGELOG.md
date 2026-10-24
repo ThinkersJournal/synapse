@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.146): shared state, slice S4a: derived facts, staleness, unblocked
+
+A fact the forge can answer is never typed by a lane: the checker role (`state-derive`) reports what it looked up (`POST /v1/state/facts`; `GET /v1/state/wanted` lists what to look up), and `get` and `list` carry a `derived` object beside each record, computed at read time: per condition `observed`, `observed_by`, `satisfied` (semver for `ge`; unknown when never looked up or when the newest look failed, so a failed lookup never satisfies `absent`), and per record `last_verified` (the OLDEST observation) with who made it, `stale` (a condition unobserved or past its kind's limit, 6 h by default) and `unblocked` (blocked, and every blocker cleared). A daemon pass (each minute and after each report) mails the parties once per change (`facts`, `stale`, `unblocked`; `derived: true`, ids and field names only). The store takes a baseline when a record is written, so the first change after that notifies. **Breaking:** `state::Caller` gains `derive`; `Notice` gains `derived`. `semver` becomes a direct dependency. CI: the portfolio job is repinned to coderipper 30e012b.
+
 ### Feature (rc.145): shared state, slice S3: change notices, ids only
 
 Every accepted state write leaves one `Notice` per party but the writer, in the same redb transaction as the write (`pending_notices`, `notice_delivered` on `StateStore`). A daemon task, woken by each write and retrying every 5 s, hands each to the mailbox as mail from `daemon:state@<account>` and then marks it delivered; the message id `state:<id>:<revision>:<role>` makes a crash between the two steps a duplicate, not a second message. The body is `{"kind":"state","id","revision","changed_by","fields"}`: no title, note or value reaches a channel, and a party whose access is withdrawn learns nothing readable. A notice that cannot be queued waits and does not hold up the others.

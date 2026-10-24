@@ -3,7 +3,10 @@
 
 use redb::{ReadableTable, TableDefinition};
 
-use super::{Backend, HistoryEntry, Notice, Record, StateError, Txn, TxnRead};
+use super::{
+    Backend, DerivedFlags, FactObservation, FactSpec, HistoryEntry, Notice, Record, StateError,
+    Txn, TxnRead,
+};
 
 /// `id` -> serde_json [`Record`].
 const RECORDS: TableDefinition<&str, &[u8]> = TableDefinition::new("records");
@@ -11,6 +14,10 @@ const RECORDS: TableDefinition<&str, &[u8]> = TableDefinition::new("records");
 const HISTORY: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("history");
 /// `seq` -> serde_json [`Notice`]: not yet delivered.
 const NOTICES: TableDefinition<u64, &[u8]> = TableDefinition::new("notices");
+/// fact spec -> serde_json [`FactObservation`].
+const FACTS: TableDefinition<&str, &[u8]> = TableDefinition::new("facts");
+/// record id -> serde_json [`DerivedFlags`]: what was last notified.
+const FLAGS: TableDefinition<&str, &[u8]> = TableDefinition::new("derived_flags");
 /// `"record"` -> the last record number issued; `"notice"` -> the last notice seq; `"format"` -> the file format stamp.
 const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters");
 const FORMAT: u64 = 1;
@@ -46,6 +53,8 @@ impl RedbBackend {
             txn.open_table(RECORDS).map_err(|e| err("table")(&e))?;
             txn.open_table(HISTORY).map_err(|e| err("table")(&e))?;
             txn.open_table(NOTICES).map_err(|e| err("table")(&e))?;
+            txn.open_table(FACTS).map_err(|e| err("table")(&e))?;
+            txn.open_table(FLAGS).map_err(|e| err("table")(&e))?;
             let mut counters = txn.open_table(COUNTERS).map_err(|e| err("table")(&e))?;
             let stamped = counters
                 .get("format")
@@ -121,6 +130,18 @@ impl TxnRead for RedbTxn {
         }
         Ok(out)
     }
+
+    fn fact(&self, spec: &FactSpec) -> Result<Option<FactObservation>, StateError> {
+        let table = self.txn.open_table(FACTS).map_err(|e| err("table")(&e))?;
+        let got = table.get(spec.as_str()).map_err(|e| err("read")(&e))?;
+        got.map(|v| decode(v.value())).transpose()
+    }
+
+    fn derived_flags(&self, id: &str) -> Result<Option<DerivedFlags>, StateError> {
+        let table = self.txn.open_table(FLAGS).map_err(|e| err("table")(&e))?;
+        let got = table.get(id).map_err(|e| err("read")(&e))?;
+        got.map(|v| decode(v.value())).transpose()
+    }
 }
 
 impl Txn for RedbTxn {
@@ -169,6 +190,22 @@ impl Txn for RedbTxn {
         let mut table = self.txn.open_table(NOTICES).map_err(|e| err("table")(&e))?;
         table
             .insert(seq, encode(&stored)?.as_slice())
+            .map_err(|e| err("write")(&e))?;
+        Ok(())
+    }
+
+    fn put_fact(&mut self, fact: &FactObservation) -> Result<(), StateError> {
+        let mut table = self.txn.open_table(FACTS).map_err(|e| err("table")(&e))?;
+        table
+            .insert(fact.fact.as_str(), encode(fact)?.as_slice())
+            .map_err(|e| err("write")(&e))?;
+        Ok(())
+    }
+
+    fn put_derived_flags(&mut self, id: &str, flags: &DerivedFlags) -> Result<(), StateError> {
+        let mut table = self.txn.open_table(FLAGS).map_err(|e| err("table")(&e))?;
+        table
+            .insert(id, encode(flags)?.as_slice())
             .map_err(|e| err("write")(&e))?;
         Ok(())
     }

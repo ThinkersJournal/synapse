@@ -5,7 +5,9 @@
 
 use axum::extract::State;
 use synapse::certificate::Permission;
-use synapse::state::{Caller, Filter, NewRecord, Patch, StateError, StateStore};
+use synapse::state::{
+    Caller, Derived, FactReport, Filter, NewRecord, Patch, Record, StateError, StateStore,
+};
 
 use super::{
     ApiError, Arc, Bytes, Deserialize, HeaderMap, IntoResponse, Response, SecurityEventKind,
@@ -25,6 +27,7 @@ fn caller(session: &Session) -> Caller {
         write: has(Permission::StateWrite),
         admin: has(Permission::StateAdmin),
         read_all: has(Permission::StateReadAll),
+        derive: has(Permission::StateDerive),
     }
 }
 
@@ -63,6 +66,13 @@ fn refuse(shared: &Shared, session: &Session, what: &str, e: StateError) -> ApiE
     }
 }
 
+/// A record as JSON with what is derived about it beside it (`derived`), never stored as typed.
+fn with_derived(record: &Record, derived: &Derived) -> serde_json::Value {
+    let mut value = json!(record);
+    value["derived"] = json!(derived);
+    value
+}
+
 fn reply(value: serde_json::Value) -> Response {
     axum::Json(value).into_response()
 }
@@ -93,10 +103,10 @@ pub(crate) async fn get(
     // A record the caller may not see is answered like one that does not exist.
     match shared
         .state
-        .get(&caller(&session), &id)
+        .get_view(&caller(&session), &id, Utc::now())
         .map_err(|e| refuse(&shared, &session, "get", e))?
     {
-        Some(record) => Ok(reply(json!({ "record": record }))),
+        Some((record, derived)) => Ok(reply(json!({ "record": with_derived(&record, &derived) }))),
         None => Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -121,10 +131,13 @@ pub(crate) async fn list(
         }
     }
     filter.party = query_param(&uri, "party");
-    let records = shared
+    let records: Vec<serde_json::Value> = shared
         .state
-        .list(&caller(&session), &filter)
-        .map_err(|e| refuse(&shared, &session, "list", e))?;
+        .list_views(&caller(&session), &filter, Utc::now())
+        .map_err(|e| refuse(&shared, &session, "list", e))?
+        .iter()
+        .map(|(record, derived)| with_derived(record, derived))
+        .collect();
     Ok(reply(json!({ "records": records })))
 }
 
@@ -170,4 +183,46 @@ pub(crate) async fn history(
         .history(&caller(&session), &id)
         .map_err(|e| refuse(&shared, &session, "history", e))?;
     Ok(reply(json!({ "entries": entries })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FactsBody {
+    reports: Vec<FactReport>,
+}
+
+/// The checker reports what it looked up. `state-derive` only; the reports are facts from the
+/// closed registry (the body does not parse otherwise).
+pub(crate) async fn facts(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let body: FactsBody = parse(&headers, &body)?;
+    let count = body.reports.len();
+    shared
+        .state
+        .report_facts(&caller(&session), body.reports, Utc::now())
+        .map_err(|e| refuse(&shared, &session, "facts", e))?;
+    // A report may flip a condition: tell the parties now rather than at the next minute.
+    let _ = shared.state.refresh_derived(Utc::now());
+    shared.state_nudge.notify_one();
+    Ok(reply(json!({ "recorded": count })))
+}
+
+/// The facts the checker should look up now. `state-derive` only.
+pub(crate) async fn wanted(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let facts: Vec<String> = shared
+        .state
+        .wanted_facts(&caller(&session))
+        .map_err(|e| refuse(&shared, &session, "wanted", e))?
+        .iter()
+        .map(|f| f.as_str().to_string())
+        .collect();
+    Ok(reply(json!({ "facts": facts })))
 }

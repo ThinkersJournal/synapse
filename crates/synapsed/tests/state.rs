@@ -386,3 +386,85 @@ async fn a_change_reaches_the_other_parties_as_id_only_mail_from_the_daemon() {
     assert_eq!(body_of(&for_alpha[0])["fields"], json!(["state"]));
     d.stop().await;
 }
+
+#[tokio::test]
+async fn the_checker_reports_facts_and_readers_see_them_derived() {
+    let d = start(&[("checker", Permission::StateDerive)]).await;
+    let (a, b, c) = (
+        claim(&d, "alpha").await,
+        claim(&d, "beta").await,
+        claim(&d, "checker").await,
+    );
+    let mut record = new_record("waiting on a release");
+    record["verify"] = json!([{ "fact": "crate_version:synapse", "op": "ge", "value": "6.0.0" }]);
+    assert_eq!(
+        call(&d, Some(&a), "/v1/state/create", Some(record)).await.0,
+        200
+    );
+
+    // Before the checker has looked: unknown, stale, never verified.
+    let (_, got) = call(&d, Some(&a), "/v1/state/get?id=T-1", None).await;
+    let derived = &got["record"]["derived"];
+    assert_eq!(derived["stale"], true);
+    assert_eq!(derived["last_verified"], Value::Null);
+    assert_eq!(derived["verify"][0]["satisfied"], Value::Null);
+    // The create notice is in beta's mailbox; drain it so the next one is the derived one.
+    assert_eq!(fetch_all(&d, &b).await.len(), 1);
+
+    // Only the checker learns what is wanted, and only the checker may report.
+    assert_eq!(call(&d, Some(&a), "/v1/state/wanted", None).await.0, 403);
+    let (status, wanted) = call(&d, Some(&c), "/v1/state/wanted", None).await;
+    assert_eq!(
+        (status, &wanted["facts"]),
+        (200, &json!(["crate_version:synapse"]))
+    );
+    let report =
+        json!({ "reports": [{ "fact": "crate_version:synapse", "look": { "found": "6.0.1" } }] });
+    assert_eq!(
+        call(&d, Some(&a), "/v1/state/facts", Some(report.clone()))
+            .await
+            .0,
+        403,
+        "a lane cannot type a fact"
+    );
+    assert_eq!(
+        call(&d, Some(&c), "/v1/state/facts", Some(report)).await.0,
+        200
+    );
+    let rogue = json!({ "reports": [{ "fact": "rm_rf:/", "look": "absent" }] });
+    assert_eq!(
+        call(&d, Some(&c), "/v1/state/facts", Some(rogue)).await.0,
+        400,
+        "facts come from the registry"
+    );
+
+    let (_, got) = call(&d, Some(&b), "/v1/state/get?id=T-1", None).await;
+    let derived = &got["record"]["derived"];
+    assert_eq!(derived["verify"][0]["satisfied"], true);
+    assert_eq!(derived["verify"][0]["observed"], "6.0.1");
+    assert_eq!(derived["last_verified_by"], "checker");
+    assert_eq!(derived["stale"], false);
+    assert_eq!(
+        got["record"]["revision"], 1,
+        "a fact is not a write to the record"
+    );
+
+    // Beta hears that it changed: ids and field names, flagged derived.
+    let mail = fetch_all(&d, &b).await;
+    assert_eq!(mail.len(), 1);
+    let body = body_of(&mail[0]);
+    assert_eq!(
+        (body["id"].as_str(), body["derived"].as_bool()),
+        (Some("T-1"), Some(true))
+    );
+    assert_eq!(body["fields"], json!(["facts", "stale"]));
+    assert!(!body.to_string().contains("6.0.1"));
+
+    // The listing carries the same derived view.
+    let (_, listed) = call(&d, Some(&a), "/v1/state/list", None).await;
+    assert_eq!(
+        listed["records"][0]["derived"]["verify"][0]["satisfied"],
+        true
+    );
+    d.stop().await;
+}
