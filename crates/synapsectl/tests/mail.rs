@@ -1101,10 +1101,9 @@ fn the_state_commands_never_load_the_account_key() {
 }
 
 /// A stub forge on loopback: answers by path, remembers (path, had a bearer token).
-fn forge_stub() -> (
-    String,
-    std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>,
-) {
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>;
+
+fn forge_stub() -> (String, Seen) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
