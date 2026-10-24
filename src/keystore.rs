@@ -61,6 +61,60 @@ pub enum KeystoreError {
     Io(&'static str, io::ErrorKind),
 }
 
+/// The item names this module reports, as constants: [`KeystoreError::detached`] maps onto them.
+fn known_item(item: &str) -> &'static str {
+    match item {
+        "account directory" => "account directory",
+        "account key" => "account key",
+        "account name" => "account name",
+        "role certificate" => "role certificate",
+        "role directory" => "role directory",
+        "role grants" => "role grants",
+        "role sealing key" => "role sealing key",
+        "role signing key" => "role signing key",
+        "roles directory" => "roles directory",
+        "random source" => "random source",
+        _ => "keystore file",
+    }
+}
+
+fn known_kind(kind: io::ErrorKind) -> io::ErrorKind {
+    match kind {
+        io::ErrorKind::NotFound => io::ErrorKind::NotFound,
+        io::ErrorKind::PermissionDenied => io::ErrorKind::PermissionDenied,
+        io::ErrorKind::AlreadyExists => io::ErrorKind::AlreadyExists,
+        io::ErrorKind::InvalidData => io::ErrorKind::InvalidData,
+        io::ErrorKind::UnexpectedEof => io::ErrorKind::UnexpectedEof,
+        _ => io::ErrorKind::Other,
+    }
+}
+
+impl KeystoreError {
+    /// The same error rebuilt from constants. A refusal from a call that loaded the account key
+    /// says what went wrong without carrying anything computed from the key, so the value that
+    /// travels on (through `?`, to a caller that only needs to report it) is plainly not derived
+    /// from key material. Nothing observable changes: every variant, item and kind this module
+    /// produces maps to itself.
+    #[must_use]
+    pub fn detached(&self) -> KeystoreError {
+        match self {
+            KeystoreError::InvalidName => KeystoreError::InvalidName,
+            KeystoreError::NoHome => KeystoreError::NoHome,
+            KeystoreError::AccountExists => KeystoreError::AccountExists,
+            KeystoreError::NoAccount => KeystoreError::NoAccount,
+            KeystoreError::AccountKeyPresent => KeystoreError::AccountKeyPresent,
+            KeystoreError::NoRoleCertificate => KeystoreError::NoRoleCertificate,
+            KeystoreError::CertificateExpired => KeystoreError::CertificateExpired,
+            KeystoreError::InvalidValidity => KeystoreError::InvalidValidity,
+            KeystoreError::PermissionsTooOpen(item) => {
+                KeystoreError::PermissionsTooOpen(known_item(item))
+            }
+            KeystoreError::Corrupt(item) => KeystoreError::Corrupt(known_item(item)),
+            KeystoreError::Io(item, kind) => KeystoreError::Io(known_item(item), known_kind(*kind)),
+        }
+    }
+}
+
 impl fmt::Display for KeystoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -763,7 +817,10 @@ pub fn load_role(home: &Path, role: &str, now: DateTime<Utc>) -> Result<RoleIden
 /// Make or renew `role`'s keys and certificate with the account key, and return nothing: the one
 /// place a read-only caller crosses into the account key.
 fn make_or_renew_role(home: &Path, role: &str, now: DateTime<Utc>) -> Result<()> {
-    Keystore::open(home)?.role(role, now).map(drop)
+    match Keystore::open(home).and_then(|keystore| keystore.role(role, now)) {
+        Ok(_identity) => Ok(()),
+        Err(error) => Err(error.detached()),
+    }
 }
 
 /// The account's name in `home`, whether or not the home holds the account key.
