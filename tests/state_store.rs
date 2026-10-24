@@ -424,7 +424,64 @@ fn blocking_on_a_record_and_filters<S: StateStore>(make: &impl Fn() -> S) {
     assert_eq!(ids, ["T-1", "T-2"], "listed in id order");
 }
 
+fn a_write_leaves_an_id_only_notice_for_each_other_party<S: StateStore>(make: &impl Fn() -> S) {
+    let s = make();
+    let r = s
+        .create(
+            &caller("alpha"),
+            new("secret title", &["alpha", "beta", "gamma"], "alpha"),
+            t(0),
+        )
+        .unwrap();
+    let n = s.pending_notices(10).unwrap();
+    assert_eq!(
+        n.iter()
+            .map(|n| (n.to.as_str(), n.fields.clone()))
+            .collect::<Vec<_>>(),
+        [
+            ("beta", vec!["created".to_string()]),
+            ("gamma", vec!["created".to_string()])
+        ],
+        "everyone but the writer, in party order"
+    );
+    assert!(
+        n.iter()
+            .all(|n| n.id == r.id && n.revision == 1 && n.changed_by == "alpha")
+    );
+    assert!(
+        n.iter().all(|n| !n.body().contains("secret")),
+        "no free text in a notice"
+    );
+    assert_eq!(n[0].message_id(), "state:T-1:1:beta");
+
+    s.patch(&caller("beta"), &r.id, 1, set_state(State::Waiting), t(1))
+        .unwrap();
+    let all = s.pending_notices(10).unwrap();
+    let from_patch: Vec<_> = all.iter().filter(|n| n.revision == 2).collect();
+    assert_eq!(
+        from_patch.iter().map(|n| n.to.as_str()).collect::<Vec<_>>(),
+        ["alpha", "gamma"],
+        "the patcher is not told about its own write"
+    );
+    assert_eq!(from_patch[0].fields, ["state"]);
+
+    // Delivered ones go; the rest stay; marking twice is harmless.
+    for n in n.iter() {
+        s.notice_delivered(n.seq).unwrap();
+        s.notice_delivered(n.seq).unwrap();
+    }
+    assert_eq!(s.pending_notices(10).unwrap().len(), 2);
+    assert_eq!(s.pending_notices(1).unwrap().len(), 1, "max is honoured");
+
+    // A refused or stale write leaves no notice behind.
+    let before = s.pending_notices(100).unwrap().len();
+    let _ = s.patch(&caller("alpha"), &r.id, 1, set_state(State::Done), t(2));
+    let _ = s.patch(&caller("zed"), &r.id, 2, set_state(State::Done), t(2));
+    assert_eq!(s.pending_notices(100).unwrap().len(), before);
+}
+
 fn run_all<S: StateStore>(make: impl Fn() -> S) {
+    a_write_leaves_an_id_only_notice_for_each_other_party(&make);
     create_and_get(&make);
     a_lost_race_changes_nothing_and_returns_the_current_record(&make);
     history_is_a_verifiable_chain_and_the_whole_story(&make);
@@ -519,6 +576,35 @@ mod redb {
                 .id,
             "T-2"
         );
+    }
+
+    #[test]
+    fn undelivered_notices_survive_a_reopen_and_keep_their_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.redb");
+        let a = caller("alpha");
+        {
+            let s = StateEngine::new(RedbBackend::open(&path).unwrap());
+            s.create(&a, new("one", &["alpha", "beta"], "alpha"), t(0))
+                .unwrap();
+            s.create(&a, new("two", &["alpha", "beta"], "alpha"), t(1))
+                .unwrap();
+        }
+        let s = StateEngine::new(RedbBackend::open(&path).unwrap());
+        let n = s.pending_notices(10).unwrap();
+        assert_eq!(
+            n.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            ["T-1", "T-2"]
+        );
+        s.notice_delivered(n[0].seq).unwrap();
+        s.create(&a, new("three", &["alpha", "beta"], "alpha"), t(2))
+            .unwrap();
+        let n = s.pending_notices(10).unwrap();
+        assert_eq!(
+            n.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            ["T-2", "T-3"]
+        );
+        assert!(n[0].seq < n[1].seq, "seq never repeats after a reopen");
     }
 
     #[test]

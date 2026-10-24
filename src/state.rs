@@ -435,6 +435,45 @@ fn apply(r: &mut Record, p: &Patch) {
     }
 }
 
+/// "Record `id` changed": what a party is told, and nothing more. It carries ids and field names,
+/// never a title, note or value, so no free text reaches a channel and a party whose access was
+/// withdrawn learns nothing it can read. The store writes one per party (but the writer) in the same
+/// transaction as the write; a delivery task hands them on and then marks them delivered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notice {
+    /// Assigned by the store, in write order; 0 until stored.
+    pub seq: u64,
+    pub id: String,
+    pub revision: u64,
+    /// The party told.
+    pub to: String,
+    pub changed_by: String,
+    /// `["created"]` for a new record, else the patched field names.
+    pub fields: Vec<String>,
+}
+
+impl Notice {
+    /// The mail body: compact JSON of the ids and field names.
+    #[must_use]
+    pub fn body(&self) -> String {
+        serde_json::json!({
+            "kind": "state",
+            "id": self.id,
+            "revision": self.revision,
+            "changed_by": self.changed_by,
+            "fields": self.fields,
+        })
+        .to_string()
+    }
+
+    /// The mailbox message id: stable for one (record, revision, party), so a notice handed over
+    /// twice after a crash is one message.
+    #[must_use]
+    pub fn message_id(&self) -> String {
+        format!("state:{}:{}:{}", self.id, self.revision, self.to)
+    }
+}
+
 /// Why a store call failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateError {
@@ -525,6 +564,10 @@ pub trait StateStore {
         now: DateTime<Utc>,
     ) -> Result<Record, StateError>;
     fn history(&self, caller: &Caller, id: &str) -> Result<Vec<HistoryEntry>, StateError>;
+    /// Up to `max` notices not yet delivered, oldest first.
+    fn pending_notices(&self, max: usize) -> Result<Vec<Notice>, StateError>;
+    /// Mark a notice delivered. Idempotent.
+    fn notice_delivered(&self, seq: u64) -> Result<(), StateError>;
 }
 
 /// The read side of one transaction.
@@ -532,6 +575,7 @@ pub trait TxnRead {
     fn record(&self, id: &str) -> Result<Option<Record>, StateError>;
     fn all(&self) -> Result<Vec<Record>, StateError>;
     fn history(&self, id: &str) -> Result<Vec<HistoryEntry>, StateError>;
+    fn notices(&self, max: usize) -> Result<Vec<Notice>, StateError>;
 }
 
 /// One write transaction: everything done through it commits together or not at all.
@@ -540,6 +584,9 @@ pub trait Txn: TxnRead {
     fn next_number(&mut self) -> Result<u64, StateError>;
     fn put_record(&mut self, record: &Record) -> Result<(), StateError>;
     fn append(&mut self, entry: &HistoryEntry) -> Result<(), StateError>;
+    /// Store `notice`, giving it the next `seq`.
+    fn push_notice(&mut self, notice: &Notice) -> Result<(), StateError>;
+    fn remove_notice(&mut self, seq: u64) -> Result<(), StateError>;
 }
 
 /// Storage for the engine: rows and atomicity, nothing else.
@@ -662,7 +709,22 @@ fn append_entry(
     };
     entry.hash = entry.compute_hash();
     txn.append(&entry)?;
-    txn.put_record(record)
+    txn.put_record(record)?;
+    let fields: Vec<String> = match &entry.change {
+        Change::Create(_) => vec!["created".to_string()],
+        Change::Patch(patch) => patch.fields().into_iter().map(String::from).collect(),
+    };
+    for party in record.parties.iter().filter(|p| p.as_str() != writer) {
+        txn.push_notice(&Notice {
+            seq: 0,
+            id: record.id.clone(),
+            revision: record.revision,
+            to: party.clone(),
+            changed_by: writer.to_string(),
+            fields: fields.clone(),
+        })?;
+    }
+    Ok(())
 }
 
 impl<B: Backend> StateStore for StateEngine<B> {
@@ -747,6 +809,14 @@ impl<B: Backend> StateStore for StateEngine<B> {
         })
     }
 
+    fn pending_notices(&self, max: usize) -> Result<Vec<Notice>, StateError> {
+        self.backend.read(|txn| txn.notices(max))
+    }
+
+    fn notice_delivered(&self, seq: u64) -> Result<(), StateError> {
+        self.backend.write(|txn| txn.remove_notice(seq))
+    }
+
     fn history(&self, caller: &Caller, id: &str) -> Result<Vec<HistoryEntry>, StateError> {
         self.backend.read(|txn| {
             let record = txn.record(id)?.ok_or(StateError::NotFound)?;
@@ -769,6 +839,8 @@ struct MemoryData {
     records: BTreeMap<String, Record>,
     history: BTreeMap<String, Vec<HistoryEntry>>,
     counter: u64,
+    notices: BTreeMap<u64, Notice>,
+    notice_counter: u64,
 }
 
 impl TxnRead for MemoryData {
@@ -780,6 +852,9 @@ impl TxnRead for MemoryData {
     }
     fn history(&self, id: &str) -> Result<Vec<HistoryEntry>, StateError> {
         Ok(self.history.get(id).cloned().unwrap_or_default())
+    }
+    fn notices(&self, max: usize) -> Result<Vec<Notice>, StateError> {
+        Ok(self.notices.values().take(max).cloned().collect())
     }
 }
 
@@ -797,6 +872,17 @@ impl Txn for MemoryData {
             .entry(entry.id.clone())
             .or_default()
             .push(entry.clone());
+        Ok(())
+    }
+    fn push_notice(&mut self, notice: &Notice) -> Result<(), StateError> {
+        self.notice_counter += 1;
+        let mut stored = notice.clone();
+        stored.seq = self.notice_counter;
+        self.notices.insert(stored.seq, stored);
+        Ok(())
+    }
+    fn remove_notice(&mut self, seq: u64) -> Result<(), StateError> {
+        self.notices.remove(&seq);
         Ok(())
     }
 }
