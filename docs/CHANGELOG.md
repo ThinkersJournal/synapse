@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.153): QUIC pool eviction design; #120 closed
+
+`docs/superpowers/specs/2026-10-24-quic-pool-eviction-design.md` (#49, no code). ROADMAP row 25 removed: #119 is fixed (parked) and #120 is bounded by the daemon's `max_deliveries` (default 10), so it was closed.
+
 ### Docs (rc.152): role liveness design
 
 `docs/ROLE_LIVENESS_DESIGN.md` and ROADMAP row 31: retiring a role that never returns (TTL, explicit retire/revive, typed send error). No code.
