@@ -90,11 +90,14 @@ fn known_kind(kind: io::ErrorKind) -> io::ErrorKind {
 }
 
 impl KeystoreError {
-    /// The same error rebuilt from constants. A refusal from a call that loaded the account key
-    /// says what went wrong without carrying anything computed from the key, so the value that
-    /// travels on (through `?`, to a caller that only needs to report it) is plainly not derived
-    /// from key material. Nothing observable changes: every variant, item and kind this module
-    /// produces maps to itself.
+    /// The same error rebuilt from constants. This type only ever holds a `&'static str` item name
+    /// and an `io::ErrorKind`, so nothing in it is computed from key material: CodeQL's alert on a
+    /// claim's reply (rust/cleartext-logging, #244) was a data-flow false positive, because its
+    /// taint tracking treats the `Ok` and `Err` sides of a `?` alike. Rebuilding the error from
+    /// constants at the one place a key-loading call's refusal leaves its function makes that
+    /// plain to the analysis as well as to a reader; it is not a defence against a leak that
+    /// existed. Nothing observable changes: every variant, item and kind this module produces
+    /// maps to itself.
     #[must_use]
     pub fn detached(&self) -> KeystoreError {
         match self {
