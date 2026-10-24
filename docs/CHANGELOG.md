@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.152): role liveness design
+
+`docs/ROLE_LIVENESS_DESIGN.md` and ROADMAP row 31: retiring a role that never returns (TTL, explicit retire/revive, typed send error). No code.
+
 ### Fix (rc.151): bidi formatting characters are escaped in tool output and channel pushes
 
 The embeddings and overrides (U+202A-202E), the isolates (U+2066-2069) and the marks U+200E, U+200F and U+061C are format characters, not control characters, so a sender could use them to reorder how a body or a `meta` value is displayed (#106). `synapse_mcp_server::needs_escape` now names the set and both `safe_text` and the channel adapter's `escape` use it. No behaviour change for any other text.
