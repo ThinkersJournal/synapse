@@ -71,7 +71,7 @@ fn escape(text: &str, multiline: bool) -> String {
             '<' => "&lt;".to_string(),
             '>' => "&gt;".to_string(),
             '\n' | '\t' if multiline => c.to_string(),
-            c if c.is_control() => c.escape_default().to_string(),
+            c if synapse_mcp_server::needs_escape(c) => c.escape_default().to_string(),
             c => c.to_string(),
         })
         .collect()
@@ -153,4 +153,30 @@ pub async fn push_once<N: Notifier>(
     ledger: &PushLedger,
 ) -> Result<usize, String> {
     push_once_with(&ClaudeChannel, source, notifier, config, ledger).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape;
+
+    /// #106: the bidi controls are format characters (Cf), not control characters (Cc), so
+    /// `char::is_control` let them through and a sender could reorder how a body is displayed.
+    #[test]
+    fn bidi_controls_are_escaped_in_bodies_and_meta() {
+        for c in [
+            '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}', '\u{200e}', '\u{200f}',
+        ] {
+            let text = format!("a{c}b");
+            for multiline in [true, false] {
+                let out = escape(&text, multiline);
+                assert!(!out.contains(c), "{c:?} passed through: {out}");
+                assert_eq!(out, format!("a{}b", c.escape_default()));
+            }
+        }
+        assert_eq!(
+            escape("caf\u{e9} \u{1f600}", true),
+            "caf\u{e9} \u{1f600}",
+            "ordinary text is kept"
+        );
+    }
 }

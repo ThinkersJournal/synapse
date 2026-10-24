@@ -359,12 +359,25 @@ fn refuse(message: impl Into<String>) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
 }
 
-/// Daemon-supplied text with control characters (escape sequences included) shown escaped. Tabs
-/// and line breaks stay: JSON already escapes them on the wire and bodies are often multi-line.
+/// Whether `c` is shown escaped in daemon-supplied text: a control character (Cc), or one of the
+/// bidirectional formatting characters (Cf: the embeddings and overrides U+202A-202E, the isolates
+/// U+2066-2069, the marks U+200E, U+200F and U+061C), which reorder how the text is displayed
+/// (#106). Shared with the channel adapter so the two surfaces cannot drift.
+#[must_use]
+pub fn needs_escape(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}'
+        )
+}
+
+/// Daemon-supplied text with control and bidi characters (escape sequences included) shown escaped.
+/// Tabs and line breaks stay: JSON already escapes them on the wire and bodies are often multi-line.
 fn safe_text(text: &str) -> String {
     text.chars()
         .map(|c| {
-            if c.is_control() && !matches!(c, '\n' | '\t') {
+            if needs_escape(c) && !matches!(c, '\n' | '\t') {
                 c.escape_default().to_string()
             } else {
                 c.to_string()
@@ -597,5 +610,26 @@ impl SynapseMcpServer {
             }))
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_text;
+
+    /// #106: see the same test in `synapse-claude-channel`.
+    #[test]
+    fn bidi_controls_are_escaped_in_tool_output() {
+        for c in [
+            '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}', '\u{200e}', '\u{200f}',
+        ] {
+            let out = safe_text(&format!("a{c}b"));
+            assert!(!out.contains(c), "{c:?} passed through: {out}");
+            assert_eq!(out, format!("a{}b", c.escape_default()));
+        }
+        assert_eq!(
+            safe_text("caf\u{e9} \u{1f600}\n\t"),
+            "caf\u{e9} \u{1f600}\n\t"
+        );
     }
 }

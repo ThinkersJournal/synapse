@@ -2,3 +2,8 @@
 check = "SUP-001"
 file = ".github/workflows/ci_cd.yml"
 reason = "The model-agnostic-core job deletes crates/ and empties workspace members, then runs cargo test -p synapse; --locked fails there (cannot update the lock file; CI run 39383171071). Owner: synapse lane. Remove if that job stops rewriting the workspace."
+
+[[allow]]
+check = "SEC-002"
+file = "tests/sender_authentication.rs"
+reason = "Test-only fixed Ed25519 keys (ALICE_PEM, BOB_PEM); they appear only in tests/sender_authentication.rs (checked across all history). Not regenerated: PM ruling 2026-10-24."

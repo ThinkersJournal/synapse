@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fix (rc.151): bidi formatting characters are escaped in tool output and channel pushes
+
+The embeddings and overrides (U+202A-202E), the isolates (U+2066-2069) and the marks U+200E, U+200F and U+061C are format characters, not control characters, so a sender could use them to reorder how a body or a `meta` value is displayed (#106). `synapse_mcp_server::needs_escape` now names the set and both `safe_text` and the channel adapter's `escape` use it. No behaviour change for any other text.
+
 ### Fix (rc.150): the SQLite mailbox open is retried after a pool timeout
 
 One first start after a reboot (2026-10-22) exited 2 with `open sqlite: database unavailable: pool timed out while waiting for an open connection`: the file stayed locked for the whole 30 s busy wait. `SqliteMailStore::open` now repeats the open at most twice after exactly that error, printing a warning with the path and the wait each time; any other error, and the third timeout, is returned unchanged. The holder of the lock that time is not known.
