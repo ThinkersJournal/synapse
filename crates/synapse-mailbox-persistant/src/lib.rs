@@ -87,13 +87,27 @@ impl SqliteMailStore {
     /// When the file is too open, or the database cannot be opened.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
+        // One line per cold-start step with the time since the open began, so a start that hangs
+        // (the 2026-10-24 pool timeouts) shows which step it was in.
+        let begun = std::time::Instant::now();
+        let step = |what: &str| {
+            eprintln!(
+                "synapse: mail store {}: {what} ({:.0?} since the open began)",
+                path.display(),
+                begun.elapsed()
+            );
+        };
+        step("opening");
         create_owner_only_if_unix(&path)?;
         if path.exists() {
             synapse::keystore::check_owner_only(&path, "mail store")
                 .map_err(|e| se("permissions", e))?;
         }
+        step("permissions checked");
         let lock = lock_exclusive(&path)?;
+        step("lock taken");
         let rt = new_runtime()?;
+        step("runtime started");
         let opened = {
             let p = path.clone();
             rt.handle().clone().spawn(async move {
@@ -112,10 +126,12 @@ impl SqliteMailStore {
         let kv = match wait(&rt, opened) {
             Ok(kv) => kv,
             Err(e) => {
+                step("open failed");
                 rt.shutdown_background();
                 return Err(e);
             }
         };
+        step("sqlite and key-value layer open");
         if let Err(e) = synapse::keystore::check_owner_only(&path, "mail store") {
             rt.shutdown_background();
             return Err(se("permissions", e));
