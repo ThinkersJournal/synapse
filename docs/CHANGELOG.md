@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fix (rc.148): synapsed survives an empty redb beside the SQLite store
+
+After an unclean shutdown a stray CLI spawn can leave a content-free `mailbox.redb` next to the real `mailbox.sqlite`; `synapsed` refused to start (exit 2) because it could not tell which held the mail. A redb that dumps to nothing (no mail, acked history or roles, sequence 0) is now renamed to `mailbox.redb.empty-<n>` (never deleted) and the daemon starts on SQLite. If the redb holds anything, it is still refused.
+
 ### Feature (rc.146): shared state, slice S4a: derived facts, staleness, unblocked
 
 A fact the forge can answer is never typed by a lane: the checker role (`state-derive`) reports what it looked up (`POST /v1/state/facts`; `GET /v1/state/wanted` lists what to look up), and `get` and `list` carry a `derived` object beside each record, computed at read time: per condition `observed`, `observed_by`, `satisfied` (semver for `ge`; unknown when never looked up or when the newest look failed, so a failed lookup never satisfies `absent`), and per record `last_verified` (the OLDEST observation) with who made it, `stale` (a condition unobserved or past its kind's limit, 6 h by default) and `unblocked` (blocked, and every blocker cleared). A daemon pass (each minute and after each report) mails the parties once per change (`facts`, `stale`, `unblocked`; `derived: true`, ids and field names only). The store takes a baseline when a record is written, so the first change after that notifies. **Breaking:** `state::Caller` gains `derive`; `Notice` gains `derived`. `semver` becomes a direct dependency. CI: the portfolio job is repinned to coderipper 30e012b.
