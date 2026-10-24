@@ -38,6 +38,9 @@ enum Command {
     #[cfg(feature = "storage")]
     #[command(subcommand)]
     Storage(StorageCommand),
+    /// Shared state between lanes: one record per cross-lane thread, written by compare-and-set.
+    #[command(subcommand)]
+    State(StateCommand),
     /// Claim a role on the daemon (taking it over if another holder has it).
     ///
     /// The session is cached per role in this home, so every `synapse` command for the role here
@@ -105,6 +108,241 @@ enum Command {
         #[arg(long)]
         repo: Option<String>,
     },
+}
+
+/// A condition is `FACT,OP,VALUE` (`crate_version:synapse,ge,6.0.0`; `exists` and `absent` take no
+/// value). A blocker is a record id (`T-12`) or a condition.
+#[derive(Subcommand)]
+enum StateCommand {
+    /// Create a record; prints it as one JSON object.
+    New {
+        #[command(flatten)]
+        role: RoleArg,
+        #[arg(long)]
+        title: String,
+        /// A party (repeatable). The creator must be one.
+        #[arg(long = "party", required = true)]
+        parties: Vec<String>,
+        #[arg(long)]
+        owner: String,
+        /// open (default), blocked, waiting, done or cancelled.
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        /// A fact that makes the record true or done (repeatable).
+        #[arg(long = "verify")]
+        verify: Vec<String>,
+        /// What a blocked record waits on (repeatable).
+        #[arg(long = "blocked-on")]
+        blocked_on: Vec<String>,
+    },
+    /// Print one record as JSON.
+    Show {
+        #[command(flatten)]
+        role: RoleArg,
+        id: String,
+    },
+    /// Print the records you may see, one JSON object per line.
+    List {
+        #[command(flatten)]
+        role: RoleArg,
+        /// Comma-separated states.
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        party: Option<String>,
+    },
+    /// Change a record, if it is still at --rev. A stale --rev changes nothing and says so.
+    Set {
+        #[command(flatten)]
+        role: RoleArg,
+        id: String,
+        /// The revision you read.
+        #[arg(long)]
+        rev: u64,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        /// Replace the parties (repeatable).
+        #[arg(long = "party")]
+        parties: Vec<String>,
+        /// Replace the verify list (repeatable).
+        #[arg(long = "verify")]
+        verify: Vec<String>,
+        #[arg(long)]
+        clear_verify: bool,
+        /// Replace what the record is blocked on (repeatable).
+        #[arg(long = "blocked-on")]
+        blocked_on: Vec<String>,
+        #[arg(long)]
+        clear_blocked_on: bool,
+    },
+    /// Print a record's history, one JSON entry per line.
+    History {
+        #[command(flatten)]
+        role: RoleArg,
+        id: String,
+    },
+}
+
+fn condition_json(text: &str) -> Result<serde_json::Value, MailError> {
+    let bad = || {
+        MailError::Usage(format!(
+            "`{}` is not FACT,OP,VALUE (OP: eq, ge, exists, absent)",
+            printable(text)
+        ))
+    };
+    let mut parts = text.splitn(3, ',');
+    let fact = parts.next().filter(|f| !f.is_empty()).ok_or_else(bad)?;
+    let op = parts.next().ok_or_else(bad)?;
+    let value = parts.next().unwrap_or("");
+    Ok(json!({ "fact": fact, "op": op, "value": value }))
+}
+
+fn blocker_json(text: &str) -> Result<serde_json::Value, MailError> {
+    if text.starts_with("T-") {
+        Ok(json!({ "record": text }))
+    } else {
+        Ok(json!({ "condition": condition_json(text)? }))
+    }
+}
+
+fn state_command(home: &std::path::Path, command: StateCommand) -> Result<(), MailError> {
+    let conditions = |v: &[String]| {
+        v.iter()
+            .map(|c| condition_json(c))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let blockers = |v: &[String]| {
+        v.iter()
+            .map(|c| blocker_json(c))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let query = |id: &str| id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    // The record is the command's output, written as data rather than formatted into a log line.
+    let print_record = |reply: &serde_json::Value| -> Result<(), MailError> {
+        let mut out = std::io::stdout().lock();
+        out.write_all(reply["record"].to_string().as_bytes())?;
+        out.write_all(b"\n")?;
+        Ok(())
+    };
+    match command {
+        StateCommand::New {
+            role,
+            title,
+            parties,
+            owner,
+            state,
+            notes,
+            verify,
+            blocked_on,
+        } => {
+            let mut body = json!({
+                "title": title,
+                "parties": parties,
+                "owner": owner,
+                "verify": conditions(&verify)?,
+                "blocked_on": blockers(&blocked_on)?,
+            });
+            if let Some(state) = state {
+                body["state"] = json!(state);
+            }
+            if let Some(notes) = notes {
+                body["notes"] = json!(notes);
+            }
+            let daemon = connect(home, &role)?;
+            print_record(&daemon.call(&role.role, "/v1/state/create", Some(&body))?)?;
+        }
+        StateCommand::Show { role, id } => {
+            if !query(&id) {
+                return Err(MailError::Usage("not a record id".into()));
+            }
+            let daemon = connect(home, &role)?;
+            print_record(&daemon.call(&role.role, &format!("/v1/state/get?id={id}"), None)?)?;
+        }
+        StateCommand::List { role, state, party } => {
+            let mut path = String::from("/v1/state/list?");
+            if let Some(state) = state {
+                if !state.bytes().all(|b| b.is_ascii_lowercase() || b == b',') {
+                    return Err(MailError::Usage(
+                        "--state is comma-separated state names".into(),
+                    ));
+                }
+                path.push_str(&format!("state={state}&"));
+            }
+            if let Some(party) = party {
+                if !valid_name(&party) {
+                    return Err(MailError::Usage("--party is a role name".into()));
+                }
+                path.push_str(&format!("party={party}&"));
+            }
+            let daemon = connect(home, &role)?;
+            let reply = daemon.call(&role.role, path.trim_end_matches(['?', '&']), None)?;
+            for record in reply["records"].as_array().into_iter().flatten() {
+                println!("{record}");
+            }
+        }
+        StateCommand::Set {
+            role,
+            id,
+            rev,
+            title,
+            owner,
+            state,
+            notes,
+            parties,
+            verify,
+            clear_verify,
+            blocked_on,
+            clear_blocked_on,
+        } => {
+            let mut patch = serde_json::Map::new();
+            let mut put = |k: &str, v: serde_json::Value| {
+                patch.insert(k.to_string(), v);
+            };
+            if let Some(v) = title {
+                put("title", json!(v));
+            }
+            if let Some(v) = owner {
+                put("owner", json!(v));
+            }
+            if let Some(v) = state {
+                put("state", json!(v));
+            }
+            if let Some(v) = notes {
+                put("notes", json!(v));
+            }
+            if !parties.is_empty() {
+                put("parties", json!(parties));
+            }
+            if !verify.is_empty() || clear_verify {
+                put("verify", json!(conditions(&verify)?));
+            }
+            if !blocked_on.is_empty() || clear_blocked_on {
+                put("blocked_on", json!(blockers(&blocked_on)?));
+            }
+            let body = json!({ "id": id, "expected_revision": rev, "patch": patch });
+            let daemon = connect(home, &role)?;
+            print_record(&daemon.call(&role.role, "/v1/state/patch", Some(&body))?)?;
+        }
+        StateCommand::History { role, id } => {
+            if !query(&id) {
+                return Err(MailError::Usage("not a record id".into()));
+            }
+            let daemon = connect(home, &role)?;
+            let reply = daemon.call(&role.role, &format!("/v1/state/history?id={id}"), None)?;
+            for entry in reply["entries"].as_array().into_iter().flatten() {
+                println!("{entry}");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(clap::Args)]
@@ -327,6 +565,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 print_identity(&view.role(&role, chrono::Utc::now())?);
             }
         }
+        Command::State(command) => state_command(&home, command)?,
         Command::Claim { role } => {
             let daemon = connect(&home, &role)?;
             let claimed = daemon.claim(&role.role)?;

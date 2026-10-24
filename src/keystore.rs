@@ -61,6 +61,60 @@ pub enum KeystoreError {
     Io(&'static str, io::ErrorKind),
 }
 
+/// The item names this module reports, as constants: [`KeystoreError::detached`] maps onto them.
+fn known_item(item: &str) -> &'static str {
+    match item {
+        "account directory" => "account directory",
+        "account key" => "account key",
+        "account name" => "account name",
+        "role certificate" => "role certificate",
+        "role directory" => "role directory",
+        "role grants" => "role grants",
+        "role sealing key" => "role sealing key",
+        "role signing key" => "role signing key",
+        "roles directory" => "roles directory",
+        "random source" => "random source",
+        _ => "keystore file",
+    }
+}
+
+fn known_kind(kind: io::ErrorKind) -> io::ErrorKind {
+    match kind {
+        io::ErrorKind::NotFound => io::ErrorKind::NotFound,
+        io::ErrorKind::PermissionDenied => io::ErrorKind::PermissionDenied,
+        io::ErrorKind::AlreadyExists => io::ErrorKind::AlreadyExists,
+        io::ErrorKind::InvalidData => io::ErrorKind::InvalidData,
+        io::ErrorKind::UnexpectedEof => io::ErrorKind::UnexpectedEof,
+        _ => io::ErrorKind::Other,
+    }
+}
+
+impl KeystoreError {
+    /// The same error rebuilt from constants. A refusal from a call that loaded the account key
+    /// says what went wrong without carrying anything computed from the key, so the value that
+    /// travels on (through `?`, to a caller that only needs to report it) is plainly not derived
+    /// from key material. Nothing observable changes: every variant, item and kind this module
+    /// produces maps to itself.
+    #[must_use]
+    pub fn detached(&self) -> KeystoreError {
+        match self {
+            KeystoreError::InvalidName => KeystoreError::InvalidName,
+            KeystoreError::NoHome => KeystoreError::NoHome,
+            KeystoreError::AccountExists => KeystoreError::AccountExists,
+            KeystoreError::NoAccount => KeystoreError::NoAccount,
+            KeystoreError::AccountKeyPresent => KeystoreError::AccountKeyPresent,
+            KeystoreError::NoRoleCertificate => KeystoreError::NoRoleCertificate,
+            KeystoreError::CertificateExpired => KeystoreError::CertificateExpired,
+            KeystoreError::InvalidValidity => KeystoreError::InvalidValidity,
+            KeystoreError::PermissionsTooOpen(item) => {
+                KeystoreError::PermissionsTooOpen(known_item(item))
+            }
+            KeystoreError::Corrupt(item) => KeystoreError::Corrupt(known_item(item)),
+            KeystoreError::Io(item, kind) => KeystoreError::Io(known_item(item), known_kind(*kind)),
+        }
+    }
+}
+
 impl fmt::Display for KeystoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -496,6 +550,23 @@ fn leaf_for(pem: &[u8], global_id: &str, keys: &RolePublicKeys) -> Result<Vec<Ag
     chain.ok_or(KeystoreError::Corrupt("role certificate"))
 }
 
+/// As [`leaf_for`], for any account: the subject is `<role>@<something>` and the label is `role`.
+fn leaf_for_role(pem: &[u8], role: &str, keys: &RolePublicKeys) -> Result<Vec<AgentCertificate>> {
+    let prefix = format!("{role}@");
+    let chain = std::str::from_utf8(pem)
+        .ok()
+        .and_then(|pem| chain_from_pem(pem).ok())
+        .filter(|chain| {
+            chain.len() == 1
+                && chain[0].subject_label == role
+                && chain[0].subject_global_id.starts_with(&prefix)
+                && chain[0].subject_signing_key == keys.signing
+                && chain[0].subject_sealing_key == keys.sealing
+                && chain[0].may_delegate == 0
+        });
+    chain.ok_or(KeystoreError::Corrupt("role certificate"))
+}
+
 impl Keystore {
     /// Make `role`'s keys in `home` for an account named `account` whose key is NOT here, and return
     /// their public halves for the account holder to certify. Repeatable: existing keys are kept.
@@ -650,68 +721,105 @@ impl RoleOnlyKeystore {
     }
 
     fn role_keys(&self, role: &str) -> Result<(CryptoManager, RolePublicKeys)> {
-        if !valid_name(role) {
-            return Err(KeystoreError::InvalidName);
-        }
-        let dir = self.home.join(ROLES_DIR).join(role);
-        let read = |name: &str, item: &'static str| -> Result<String> {
-            let path = dir.join(name);
-            if !exists(&path, item)? {
-                return Err(KeystoreError::NoRoleCertificate);
-            }
-            String::from_utf8(read_checked(&path, item)?).map_err(|_| KeystoreError::Corrupt(item))
-        };
-        crypto_from_pems(
-            &read(SIGNING_KEY, "role signing key")?,
-            &read(SEALING_KEY, "role sealing key")?,
-        )
+        role_keys_in(&self.home, role)
     }
 
     /// Load `role` with the certificate the account holder issued. Never creates or renews anything:
     /// a missing certificate is [`KeystoreError::NoRoleCertificate`], an expired one
     /// [`KeystoreError::CertificateExpired`].
     pub fn role(&self, role: &str, now: DateTime<Utc>) -> Result<RoleIdentity> {
-        let (mut crypto, keys) = self.role_keys(role)?;
-        let cert_path = self.home.join(ROLES_DIR).join(role).join(CERT);
-        if !exists(&cert_path, "role certificate")? {
-            return Err(KeystoreError::NoRoleCertificate);
-        }
-        let global_id = format!("{role}@{}", self.account);
-        let chain = leaf_for(
-            &read_checked(&cert_path, "role certificate")?,
-            &global_id,
-            &keys,
-        )?;
-        let leaf = &chain[0];
-        if now >= leaf.not_after {
-            return Err(KeystoreError::CertificateExpired);
-        }
-        if now < leaf.not_before {
-            return Err(KeystoreError::Corrupt("role certificate"));
-        }
-        Ok(RoleIdentity {
-            global_id,
-            signing_key_id: crate::sender_auth::key_id(&keys.signing),
-            sealing_key_id: crate::sender_auth::key_id(&keys.sealing),
-            not_before: leaf.not_before,
-            not_after: leaf.not_after,
-            permissions: leaf.permissions.clone(),
-            chain: chain.clone(),
-            crypto: {
-                crypto.set_certificate_chain(chain);
-                crypto
-            },
-        })
+        let expected = format!("{role}@{}", self.account);
+        identity_from_files(&self.home, role, Some(&expected), now)
     }
 }
 
-/// `role`'s identity from `home`: through the full keystore when the home holds the account key
-/// (keys and certificate made or renewed as needed), else through a role-only one.
+fn role_keys_in(home: &Path, role: &str) -> Result<(CryptoManager, RolePublicKeys)> {
+    if !valid_name(role) {
+        return Err(KeystoreError::InvalidName);
+    }
+    let dir = home.join(ROLES_DIR).join(role);
+    let read = |name: &str, item: &'static str| -> Result<String> {
+        let path = dir.join(name);
+        if !exists(&path, item)? {
+            return Err(KeystoreError::NoRoleCertificate);
+        }
+        String::from_utf8(read_checked(&path, item)?).map_err(|_| KeystoreError::Corrupt(item))
+    };
+    crypto_from_pems(
+        &read(SIGNING_KEY, "role signing key")?,
+        &read(SEALING_KEY, "role sealing key")?,
+    )
+}
+
+/// `role`'s identity from the files in `home`, creating and renewing nothing. With `expected` the
+/// certificate must certify exactly that id; without it, any `<role>@<account>` (the daemon checks
+/// the account at claim). This reads no account name and no account key, and the id it carries is
+/// the certificate's own subject.
+fn identity_from_files(
+    home: &Path,
+    role: &str,
+    expected: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<RoleIdentity> {
+    let (mut crypto, keys) = role_keys_in(home, role)?;
+    let cert_path = home.join(ROLES_DIR).join(role).join(CERT);
+    if !exists(&cert_path, "role certificate")? {
+        return Err(KeystoreError::NoRoleCertificate);
+    }
+    let pem = read_checked(&cert_path, "role certificate")?;
+    let chain = match expected {
+        Some(id) => leaf_for(&pem, id, &keys)?,
+        None => leaf_for_role(&pem, role, &keys)?,
+    };
+    let global_id = chain[0].subject_global_id.clone();
+    let leaf = &chain[0];
+    if now >= leaf.not_after {
+        return Err(KeystoreError::CertificateExpired);
+    }
+    if now < leaf.not_before {
+        return Err(KeystoreError::Corrupt("role certificate"));
+    }
+    Ok(RoleIdentity {
+        global_id,
+        signing_key_id: crate::sender_auth::key_id(&keys.signing),
+        sealing_key_id: crate::sender_auth::key_id(&keys.sealing),
+        not_before: leaf.not_before,
+        not_after: leaf.not_after,
+        permissions: leaf.permissions.clone(),
+        chain: chain.clone(),
+        crypto: {
+            crypto.set_certificate_chain(chain);
+            crypto
+        },
+    })
+}
+
+/// `role`'s identity from `home`, always read through the public view, so a claim, a signature or
+/// anything else built from it never derives from the account key (a claim has no business holding
+/// it). A home that holds the account key reaches for it only when the role has no usable
+/// certificate: none, expired, within [`RENEW_BELOW`] of expiry, or not carrying the grants the
+/// account holder set. Otherwise the key file is not opened at all. (The public view does not check
+/// the certificate's signature, which needs the account key; the daemon does, at claim.)
 pub fn load_role(home: &Path, role: &str, now: DateTime<Utc>) -> Result<RoleIdentity> {
     if account_key_exists(home)? {
-        Keystore::open(home)?.role(role, now)
-    } else {
-        Keystore::open_role_only(home)?.role(role, now)
+        let wanted = with_grants(&read_grants(home, role)?);
+        let usable = identity_from_files(home, role, None, now)
+            .ok()
+            .filter(|id| id.permissions == wanted && id.not_after - now >= RENEW_BELOW);
+        if let Some(identity) = usable {
+            return Ok(identity);
+        }
+        make_or_renew_role(home, role, now)?;
+    }
+    identity_from_files(home, role, None, now)
+}
+
+/// Make or renew `role`'s keys and certificate with the account key, and return nothing: the one
+/// place a read-only caller crosses into the account key.
+fn make_or_renew_role(home: &Path, role: &str, now: DateTime<Utc>) -> Result<()> {
+    match Keystore::open(home).and_then(|keystore| keystore.role(role, now)) {
+        Ok(_identity) => Ok(()),
+        Err(error) => Err(error.detached()),
     }
 }
 

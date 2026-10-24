@@ -111,3 +111,23 @@ fn the_new_names_parse_and_unknown_ones_still_do_not() {
         Some(Permission::Extension("x-state-write".into()))
     );
 }
+
+#[test]
+fn a_detached_error_is_the_same_error() {
+    use synapse::keystore::KeystoreError as E;
+    for e in [
+        E::InvalidName,
+        E::NoAccount,
+        E::NoRoleCertificate,
+        E::CertificateExpired,
+        E::AccountKeyPresent,
+        E::PermissionsTooOpen("account key"),
+        E::Corrupt("account key"),
+        E::Corrupt("role grants"),
+        E::Io("role signing key", std::io::ErrorKind::PermissionDenied),
+        E::Io("account name", std::io::ErrorKind::NotFound),
+    ] {
+        assert_eq!(e.detached(), e, "{e}");
+        assert_eq!(e.detached().to_string(), e.to_string());
+    }
+}

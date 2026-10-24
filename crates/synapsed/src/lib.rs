@@ -26,6 +26,8 @@
 #[cfg(feature = "sqlite-store")]
 mod migration;
 
+mod state_api;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::future::Future;
@@ -177,6 +179,8 @@ impl fmt::Display for DaemonError {
 
 impl std::error::Error for DaemonError {}
 
+/// The shared-state store under the home.
+const STATE_FILE: &str = "state.redb";
 /// How recently a role must have been heard from to count as online.
 const ONLINE_WINDOW: chrono::Duration = chrono::Duration::seconds(90);
 const MAX_FETCH: usize = 100;
@@ -194,6 +198,8 @@ const KEEP_SUPERSEDED: u64 = 8;
 struct Session {
     global_id: String,
     epoch: u64,
+    /// The verified leaf certificate's grants at claim time.
+    permissions: Vec<synapse::certificate::Permission>,
 }
 
 struct Presence {
@@ -209,6 +215,8 @@ struct Shared {
     mailbox: Mutex<Mailbox<DaemonStore>>,
     /// SHA-256(token) -> session.
     sessions: Mutex<HashMap<[u8; 32], Session>>,
+    /// Shared state between lanes (`state.redb`); interior-locked, so no `Mutex` here.
+    state: synapse::state::StateEngine<synapse::state::RedbBackend>,
     presence: Mutex<HashMap<String, Presence>>,
     /// Cumulative per-role counters for `/v1/stats`. In memory: a restart zeroes them, and the
     /// answer says so (`scope`, `since`).
@@ -574,6 +582,10 @@ impl Daemon {
             alerts: None,
             shared: Shared {
                 mailbox: Mutex::new(mailbox),
+                state: synapse::state::StateEngine::new(
+                    synapse::state::RedbBackend::open(&cfg.home.join(STATE_FILE))
+                        .map_err(|e| DaemonError::Store(StoreError(e.to_string())))?,
+                ),
                 sessions: Mutex::new(HashMap::new()),
                 presence: Mutex::new(HashMap::new()),
                 stats: Mutex::new(HashMap::new()),
@@ -717,6 +729,11 @@ impl Daemon {
             .route("/v1/waiting", get(waiting))
             .route("/v1/launch-result", post(launch_result))
             .route("/v1/launch-clear", post(launch_clear))
+            .route("/v1/state/create", post(state_api::create))
+            .route("/v1/state/get", get(state_api::get))
+            .route("/v1/state/list", get(state_api::list))
+            .route("/v1/state/patch", post(state_api::patch))
+            .route("/v1/state/history", get(state_api::history))
             // Inside `host_guard`, so a 421 is neither counted nor delayed.
             .layer(middleware::from_fn(move |req: Request, next: Next| {
                 delay_failures(pause.clone(), req, next)
@@ -1137,6 +1154,11 @@ fn claim_inner(
             Session {
                 global_id: grant.global_id.clone(),
                 epoch: grant.epoch,
+                permissions: req
+                    .chain
+                    .first()
+                    .map(|c| c.permissions.clone())
+                    .unwrap_or_default(),
             },
         );
     }
