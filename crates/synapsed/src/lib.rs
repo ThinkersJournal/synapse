@@ -183,6 +183,9 @@ impl std::error::Error for DaemonError {}
 const STATE_FILE: &str = "state.redb";
 /// How recently a role must have been heard from to count as online.
 const ONLINE_WINDOW: chrono::Duration = chrono::Duration::seconds(90);
+/// A role idle this long is retired (hidden from `list`, kept): docs/ROLE_LIVENESS_DESIGN.md, the
+/// PM's ruling of 2026-10-24. A constant until the daemon has a config file to carry it.
+const ROLE_TTL: chrono::Duration = chrono::Duration::days(30);
 const MAX_FETCH: usize = 100;
 /// The longest client-chosen message id; the stored id is `<sender>/<client id>` (review I1).
 const MAX_CLIENT_ID: usize = 100;
@@ -769,8 +772,27 @@ impl Daemon {
                 tick.tick().await; // the first tick is immediate
                 loop {
                     tick.tick().await;
+                    let now = Utc::now();
+                    // Presence lives in memory; copy what the table needs out before taking the
+                    // mailbox lock, so the two locks are never held together.
+                    let seen: Vec<(String, DateTime<Utc>)> = shared
+                        .presence
+                        .lock()
+                        .map(|p| p.iter().map(|(id, p)| (id.clone(), p.last_seen)).collect())
+                        .unwrap_or_default();
                     if let Ok(mut mb) = shared.mailbox.lock() {
-                        let _ = mb.sweep(Utc::now());
+                        let _ = mb.sweep(now);
+                        match mb.maintain_roles(&seen, now, ROLE_TTL) {
+                            Ok(retired) => {
+                                for role in retired {
+                                    eprintln!(
+                                        "synapsed: retired {role}: idle for more than {} days",
+                                        ROLE_TTL.num_days()
+                                    );
+                                }
+                            }
+                            Err(e) => eprintln!("synapsed: role liveness not written: {e}"),
+                        }
                     }
                 }
             })
@@ -1564,6 +1586,8 @@ async fn list(
     authed(&shared, &headers)?;
     let cwd = query_param(&uri, "cwd");
     let repo = query_param(&uri, "repo");
+    let include_retired =
+        query_param(&uri, "include_retired").is_some_and(|v| v == "true" || v == "1");
     let now = Utc::now();
     // One lock hold, so every depth is counted against the epoch listed beside it.
     let (roles, depths) = {
@@ -1579,6 +1603,7 @@ async fn list(
         &launches,
         shared.online_window,
         now,
+        include_retired,
     );
     for (key, want) in [("cwd", &cwd), ("repo", &repo)] {
         if let Some(want) = want {
@@ -1820,10 +1845,12 @@ fn list_entries(
     launches: &launch::Table,
     online_window: chrono::Duration,
     now: DateTime<Utc>,
+    include_retired: bool,
 ) -> Vec<Value> {
     roles
         .roles
         .iter()
+        .filter(|(_, record)| include_retired || record.retired_at.is_none())
         .map(|(global_id, record)| {
             let seen = presence.get(global_id);
             let pending = depths.map(|all| {
@@ -1838,6 +1865,7 @@ fn list_entries(
             json!({
                 "global_id": global_id,
                 "epoch": record.epoch,
+                "retired_at": record.retired_at.map(|at| at.to_rfc3339()),
                 "online": seen.is_some_and(|p| now - p.last_seen <= online_window),
                 "last_seen": seen.map(|p| p.last_seen.to_rfc3339()),
                 "summary": seen.and_then(|p| p.summary.clone()),
@@ -1867,6 +1895,8 @@ mod tests {
                 RoleRecord {
                     epoch: 4,
                     claimed_at: now,
+                    last_seen: None,
+                    retired_at: None,
                 },
             );
         }
@@ -1898,6 +1928,7 @@ mod tests {
             &launch::Table::new(now),
             ONLINE_WINDOW,
             now,
+            false,
         );
         assert_eq!(with[0]["pending"]["queued"], 2);
         assert_eq!(with[0]["pending"]["leased"], 1);
@@ -1916,6 +1947,7 @@ mod tests {
             &launch::Table::new(now),
             ONLINE_WINDOW,
             now,
+            false,
         );
         for entry in &without {
             assert!(entry["pending"].is_null(), "{entry}");
@@ -1923,6 +1955,43 @@ mod tests {
         }
         assert_eq!(without[0]["online"], true, "presence survives");
         assert_eq!(without[0]["summary"], "busy");
+    }
+
+    /// L1: a retired role is left out of `list` unless asked for, and then carries `retired_at`.
+    #[test]
+    fn retired_roles_are_hidden_unless_asked() {
+        let now = Utc::now();
+        let mut roles = RolesState::default();
+        for (role, retired_at) in [("alpha@acct", None), ("gone@acct", Some(now))] {
+            roles.roles.insert(
+                role.to_string(),
+                RoleRecord {
+                    epoch: 1,
+                    claimed_at: now,
+                    last_seen: None,
+                    retired_at,
+                },
+            );
+        }
+        let entries = |include_retired| {
+            list_entries(
+                &roles,
+                &HashMap::new(),
+                None,
+                &launch::Table::new(now),
+                ONLINE_WINDOW,
+                now,
+                include_retired,
+            )
+        };
+        let shown = entries(false);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0]["global_id"], "alpha@acct");
+        assert!(shown[0]["retired_at"].is_null());
+        let all = entries(true);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1]["global_id"], "gone@acct");
+        assert_eq!(all[1]["retired_at"], now.to_rfc3339());
     }
 
     /// P5: the defaults `synapsed` runs with are the plan's table, not `LimiterConfig::default()`

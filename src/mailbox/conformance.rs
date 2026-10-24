@@ -422,6 +422,51 @@ pub fn claims_are_written_through_the_store<S: MailStore>(make: impl Fn() -> S) 
     assert_eq!(seen, Some(epoch));
 }
 
+/// Liveness (docs/ROLE_LIVENESS_DESIGN.md, L1): sightings and retirement are written through the
+/// store, so a restarted daemon still knows when a role was last seen and that it was retired.
+pub fn role_liveness_is_written_through_the_store<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    ids.claim(&mut mb, "lane", t0());
+    let seen = t0() + Duration::hours(2);
+    let ttl = Duration::days(30);
+    let retired = mb
+        .maintain_roles(&[(LANE.to_string(), seen)], t0() + Duration::days(10), ttl)
+        .unwrap();
+    assert!(retired.is_empty(), "seen and young: nothing retired");
+    let persisted = |mb: &Mailbox<S>| {
+        let mut record = None;
+        mb.store()
+            .write(&mut |txn| {
+                record = txn
+                    .roles()
+                    .map_err(MailError::Store)?
+                    .roles
+                    .get(LANE)
+                    .cloned();
+                Ok(())
+            })
+            .unwrap();
+        record.expect("the role is stored")
+    };
+    assert_eq!(
+        persisted(&mb).last_seen,
+        Some(seen),
+        "the sighting was written"
+    );
+    let late = seen + ttl + Duration::days(1);
+    assert_eq!(
+        mb.maintain_roles(&[], late, ttl).unwrap(),
+        [LANE.to_string()]
+    );
+    assert_eq!(
+        persisted(&mb).retired_at,
+        Some(late),
+        "the retirement was written"
+    );
+    assert!(mb.maintain_roles(&[], late, ttl).unwrap().is_empty());
+}
+
 fn depth_of<S: MailStore>(mb: &Mailbox<S>, global_id: &str, now: DateTime<Utc>) -> Depth {
     *mb.depths(now)
         .expect("depths")
@@ -866,6 +911,9 @@ pub fn run_all<S: MailStore>(make: impl Fn() -> S) {
     );
     case("a_full_dead_set_keeps_the_message_queued", || {
         a_full_dead_set_keeps_the_message_queued(&make)
+    });
+    case("role_liveness_is_written_through_the_store", || {
+        role_liveness_is_written_through_the_store(&make)
     });
     case("a_dead_message_can_be_requeued", || {
         a_dead_message_can_be_requeued(&make)

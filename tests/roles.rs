@@ -343,6 +343,8 @@ fn restore_refuses_an_epoch_zero_record() {
         synapse::roles::RoleRecord {
             epoch: 0,
             claimed_at: t0(),
+            last_seen: None,
+            retired_at: None,
         },
     );
     assert!(Roles::restore(state, t0()).is_err());
@@ -359,6 +361,8 @@ fn a_claim_past_the_last_epoch_is_refused() {
         synapse::roles::RoleRecord {
             epoch: u64::MAX,
             claimed_at: t0(),
+            last_seen: None,
+            retired_at: None,
         },
     );
     let mut roles = Roles::restore(state, t0() - Duration::seconds(1)).expect("valid state");
@@ -388,5 +392,114 @@ fn an_audience_is_covered_by_the_signature() {
         f.claim(&mut roles, &req, t0()).unwrap().epoch,
         1,
         "the unedited claim is valid"
+    );
+}
+
+// ---- Liveness: retiring a role that never returns (docs/ROLE_LIVENESS_DESIGN.md, slice L1) ----
+
+const TTL_DAYS: i64 = 30;
+
+fn claimed_once(f: &Fixture) -> Roles {
+    let mut roles = table();
+    f.claim(
+        &mut roles,
+        &sign_claim(&f.role("lane"), nonce(1), t0()).unwrap(),
+        t0(),
+    )
+    .unwrap();
+    roles
+}
+
+#[test]
+fn a_role_idle_past_the_ttl_is_retired_and_keeps_its_epoch() {
+    let f = Fixture::new();
+    let mut roles = claimed_once(&f);
+    let ttl = Duration::days(TTL_DAYS);
+    assert!(
+        roles
+            .retire_idle(t0() + Duration::days(TTL_DAYS - 1), ttl)
+            .is_empty(),
+        "not yet idle for the whole ttl"
+    );
+    let now = t0() + Duration::days(TTL_DAYS + 1);
+    assert_eq!(roles.retire_idle(now, ttl), vec!["lane@acct".to_string()]);
+    assert_eq!(roles.snapshot().roles["lane@acct"].retired_at, Some(now));
+    assert_eq!(roles.check("lane@acct", 1), Ok(()), "epoch kept");
+    assert!(roles.retire_idle(now, ttl).is_empty(), "retired once");
+}
+
+#[test]
+fn a_role_seen_recently_is_not_retired() {
+    let f = Fixture::new();
+    let mut roles = claimed_once(&f);
+    let ttl = Duration::days(TTL_DAYS);
+    assert!(roles.note_seen("lane@acct", t0() + Duration::days(20)));
+    assert!(
+        roles
+            .retire_idle(t0() + Duration::days(TTL_DAYS + 1), ttl)
+            .is_empty(),
+        "claimed 31 days ago but seen 11 days ago"
+    );
+    assert_eq!(
+        roles
+            .retire_idle(t0() + Duration::days(20 + TTL_DAYS + 1), ttl)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn note_seen_reports_a_change_only_when_it_is_worth_persisting() {
+    let f = Fixture::new();
+    let mut roles = claimed_once(&f);
+    let seen = t0() + Duration::hours(2);
+    assert!(roles.note_seen("lane@acct", seen));
+    assert!(
+        !roles.note_seen("lane@acct", seen + Duration::minutes(30)),
+        "within the hour"
+    );
+    assert!(roles.note_seen("lane@acct", seen + Duration::hours(2)));
+    assert!(
+        !roles.note_seen("nobody@acct", seen),
+        "an unknown role is ignored"
+    );
+}
+
+#[test]
+fn a_claim_revives_a_retired_role() {
+    let f = Fixture::new();
+    let mut roles = claimed_once(&f);
+    let ttl = Duration::days(2);
+    let back = t0() + Duration::days(3);
+    roles.retire_idle(back, ttl);
+    // A role certificate lasts a day, so the returning session holds a fresh one.
+    let fresh = f.store.role("lane", back).expect("role");
+    let grant = f
+        .claim(
+            &mut roles,
+            &sign_claim(&fresh, nonce(2), back + Duration::seconds(1)).unwrap(),
+            back + Duration::seconds(1),
+        )
+        .unwrap();
+    assert_eq!(grant.epoch, 2);
+    assert_eq!(roles.snapshot().roles["lane@acct"].retired_at, None);
+}
+
+#[test]
+fn state_persisted_before_liveness_still_loads() {
+    let old = r#"{"roles":{"lane@acct":{"epoch":3,"claimed_at":"2026-10-01T12:00:00Z"}}}"#;
+    let state: synapse::roles::RolesState = serde_json::from_str(old).unwrap();
+    let record = &state.roles["lane@acct"];
+    assert_eq!((record.last_seen, record.retired_at), (None, None));
+    let mut roles = Roles::restore(state, t0()).unwrap();
+    assert_eq!(
+        roles
+            .retire_idle(
+                t0() + Duration::days(TTL_DAYS + 1),
+                Duration::days(TTL_DAYS)
+            )
+            .len(),
+        1,
+        "claimed_at stands in for a never-seen role"
     );
 }

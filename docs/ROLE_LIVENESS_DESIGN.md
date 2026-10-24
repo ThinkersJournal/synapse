@@ -21,7 +21,7 @@ No new mechanism. Gap: the superseded session is told only when it next calls. A
 superseded adapter is seen to keep a stale connection open. (Positive evidence needed first.)
 
 ### 2. Retire after a TTL
-`RoleRecord` gains `retired_at: Option<DateTime<Utc>>` (`#[serde(default)]`, so existing stores load unchanged).
+`RoleRecord` gains `retired_at: Option<DateTime<Utc>>` and `last_seen: Option<DateTime<Utc>>` (both `#[serde(default)]`, so existing stores load unchanged). Presence lives in memory and is lost at a restart, so the sweep writes a sighting into `last_seen` at most once an hour per role; without it a role seen yesterday would look idle since its claim after any restart. Built in L1 (rc.154). The ttl is a daemon constant (30 days) until the daemon has a config file.
 The daemon's existing periodic sweep marks a role retired when it is offline and its last activity (`last_seen`, or
 `claimed_at` for a role never seen) is older than `role_ttl` (default 30 days, `[roles] ttl` in the daemon config).
 Nothing is deleted: the epoch, the certificate binding and the queued mail are kept, so a role can come back.
