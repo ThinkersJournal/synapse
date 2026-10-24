@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fix (rc.150): the SQLite mailbox open is retried after a pool timeout
+
+One first start after a reboot (2026-10-22) exited 2 with `open sqlite: database unavailable: pool timed out while waiting for an open connection`: the file stayed locked for the whole 30 s busy wait. `SqliteMailStore::open` now repeats the open at most twice after exactly that error, printing a warning with the path and the wait each time; any other error, and the third timeout, is returned unchanged. The holder of the lock that time is not known.
+
 ### Feature (rc.149): shared state, slice S4b: the checker process (`synapse state check`)
 
 The process that answers forge facts: it reads `GET /v1/state/wanted`, looks each fact up (`crate_version` = crates.io `max_version`; `pr_state` merged/open/closed; `ref_sha`; `check_state` failure/pending/success over all check runs, not only the required ones; `file_at_ref` blob SHA or absent), and posts `POST /v1/state/facts`. Rate limits and 5xx are `failed`, never `absent`. The credential is a `TokenSource` asked per request (today an environment variable; a GitHub App installation token fits the same seam), sent only over HTTPS or to loopback and never to crates.io. `synapsectl` names reqwest's `rustls` feature: the TLS stack (rustls with aws-lc-rs, board 104's tracked exception) was already in its tree through `synapse`, and `Cargo.lock` gains one dependency line and no crate.
