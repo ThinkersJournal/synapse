@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/ThinkersJournal/synapse"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.162" }
+synapse = { path = "../..", version = "6.0.0-rc.163" }
 persistant-kv = "0.9.4"
 persistant-sqlx = { version = "0.9.4", features = ["sqlite"] }
 persistant = { version = "0.9.10", features = ["registry-sqlite", "registry-postgres", "registry-mysql"] }
@@ -19,7 +19,7 @@ serde_json = "1"
 chrono = "0.4"
 
 [dev-dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.162", features = ["mailbox-conformance", "mailbox-redb"] }
+synapse = { path = "../..", version = "6.0.0-rc.163", features = ["mailbox-conformance", "mailbox-redb"] }
 tempfile = "3"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tokio = { version = "1.46.1", features = ["rt-multi-thread", "time", "macros"] }
