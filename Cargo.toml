@@ -101,7 +101,7 @@ bytecodec = { version = "0.4", optional = true }
 bytes = { version = "1.5", optional = true }
 
 # System monitoring - optional
-parking_lot = { version = "0.12", optional = true }
+parking_lot = { version = "0.13", optional = true }
 
 # Email protocols
 # Regular (non-optional) dependency, not gated behind the `email` feature: every other
