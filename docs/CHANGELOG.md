@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.159): the deferred minors M5a/M5b/M6b are ROADMAP rows again
+
+ROADMAP pointed at a list in HANDOFF that no longer exists (HANDOFF is never tracked in git). The list was recovered from earlier session transcripts and is now rows 37-40 with what is still true on main. Row 29 (#21, #22) is removed: both issues were closed 2026-10-23. No code.
+
 ### Docs (rc.158): spec to roadmap audit
 
 `docs/SPEC_ROADMAP_AUDIT_2026-10-24.md`: every unmet or deferred item in `docs/superpowers/specs/` is now a ROADMAP row (new rows 32-35, plus row 36 for the ConfigurAnt adoption), points to an existing row or issue, or is recorded as not planned. No code.
