@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Chore (rc.157): nine unused dependencies removed (#61)
+
+`ahash`, `async-smtp`, `blake3`, `config`, `igd`, `rustls-native-certs`, `stun_codec`, `syn` and `sysinfo` had no use in `src`, `tests`, `examples` or `crates` (`sysinfo` appeared only in two comments). They are gone from `Cargo.toml` and from the `minimal`, `core`, `crypto`, `nat_traversal`, `email` and `native-base` feature lists; no feature name changed. `Cargo.lock` drops 50 packages and adds none. `cargo check -p synapse --no-default-features --features core` already failed before this change (it needs `axum`), unchanged.
+
 ### Feature (rc.156): role liveness L3, a send to a retired role is refused
 
 `POST /v1/send` to a retired role is 410 `recipient_retired` (nothing queued, no abuse budget charged); mail queued before the retirement is kept and is delivered when the role claims again. `unknown_recipient` (404) now names the recipient in its message (truncated and escaped). The daemon still takes only a qualified `role@account`; the CLI and MCP tool qualify a bare name with the sender's account, so a name matches one role. Slice L3 of `docs/ROLE_LIVENESS_DESIGN.md`.
