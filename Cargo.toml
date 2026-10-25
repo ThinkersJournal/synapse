@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.156"
+version = "6.0.0-rc.157"
 
 [package]
 name = "synapse"
@@ -44,7 +44,6 @@ serde = { version = "1.0", features = ["derive", "std"] }
 serde_json = { version = "1.0", features = ["std"] }
 proc-macro2 = "1.0"
 quote = "1.0"
-syn = { version = "2.0", features = ["full", "extra-traits"] }
 tokio = { version = "1.46.1", features = [
     "macros",
     "rt-multi-thread",
@@ -57,7 +56,6 @@ tokio = { version = "1.46.1", features = [
     "signal",
 ], optional = true }
 dashmap = { version = "6.0", optional = true }
-ahash = { version = "0.8", optional = true }
 rand = { version = "0.9.1", optional = true }
 auto-discovery = { version = "0.3.3", optional = true, default-features = false, features = ["mdns-sd"] }
 
@@ -79,14 +77,12 @@ hpke = { version = "0.14.1", default-features = false, features = ["alloc", "get
 aes-gcm = { version = "0.11", optional = true }
 sha2 = { version = "0.11", optional = true }
 ed25519-dalek = { version = "3.0.0", optional = true, features = ["pkcs8", "pem"] }
-blake3 = { version = "1.5", optional = true }
 base64 = { version = "0.23", optional = true }
 
 # Configuration - optional
 toml = { version = "0.9.2", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
 clap = { version = "4.5.41", features = ["derive"], optional = true }
-config = { version = "0.15.13", optional = true }
 
 # Networking - optional
 reqwest = { version = "0.13.5", features = ["json"], optional = true }
@@ -102,16 +98,12 @@ futures-util = { version = "0.3", optional = true }
 
 # NAT traversal dependencies for real implementation
 bytecodec = { version = "0.4", optional = true }
-stun_codec = { version = "0.4", optional = true }
 bytes = { version = "1.5", optional = true }
-igd = { version = "0.12", optional = true }       # UPnP port mapping
 
 # System monitoring - optional
-sysinfo = { version = "0.36.0", optional = true }
 parking_lot = { version = "0.12", optional = true }
 
 # Email protocols
-async-smtp = { version = "0.10", optional = true }
 # Regular (non-optional) dependency, not gated behind the `email` feature: every other
 # `TransportType` in this crate is unconditionally compiled, and email should not be the one
 # exception requiring a non-default build flag to exist at all (task-3-brief.md, plan decision).
@@ -122,7 +114,6 @@ async-imap = { version = "0.12", default-features = false, features = ["runtime-
 lettre = { version = "0.11", features = ["tokio1-native-tls"] }
 mail-parser = { version = "0.11", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
-rustls-native-certs = { version = "0.8", optional = true }
 native-tls = { version = "0.2", optional = true }
 
 # Only the conformance suite needs a temp directory at run time (a keystore per case).
@@ -330,7 +321,6 @@ minimal = [
     "dep:dashmap",
     "telemetry",
     "dep:toml",
-    "dep:config",
     "dep:base64",
     "dep:sha2",
 ]
@@ -339,7 +329,6 @@ minimal = [
 core = [
     "minimal",
     "crypto",
-    "dep:ahash",
     "dep:clap",
     "dep:regex",
     "dep:pem",
@@ -355,7 +344,6 @@ crypto = [
     "dep:aes-gcm",
     "dep:sha2",
     "dep:ed25519-dalek",
-    "dep:blake3",
     "dep:base64",
 ]
 http = [
@@ -386,20 +374,16 @@ networking = ["core", "http", "mdns", "dep:futures-util"]
 nat_traversal = [
     "core",
     "dep:bytecodec",
-    "dep:stun_codec",
     "dep:bytes",
-    "dep:igd",
 ]
 
 # Email feature (adds email server capabilities). async-imap and lettre are regular, non-optional
 # dependencies now (see their Cargo.toml comments), so they are not listed with `dep:` here.
 email = [
     "core",
-    "dep:async-smtp",
     "dep:mail-parser",
     "dep:native-tls",
     "dep:tokio-rustls",
-    "dep:rustls-native-certs",
 ]
 
 # JWT support. Only tests/jwt_backend.rs uses it. Kept out of `core` and `native-base` so the client
@@ -420,7 +404,6 @@ native-base = [
     "http",
     "mdns",
     "telemetry",
-    "dep:sysinfo",
     "dep:parking_lot",
 ]
 
