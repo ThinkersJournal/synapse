@@ -172,6 +172,15 @@ pub trait Transport: TransportReceive + Send + Sync {
         let _ = sink;
     }
 
+    /// Tells the transport that a message which arrived from `source` (the same string it put in
+    /// [`IncomingMessage::source`]) failed verification, after the manager had finished with it.
+    /// A transport that keeps per-peer connection state can use it to drop a stale entry; the
+    /// default does nothing, so existing implementors are unaffected. It carries only the kind of
+    /// failure, never the message or a key, and is called with no manager lock held.
+    async fn on_verification_failure(&self, source: &str, reason: VerificationFailure) {
+        let _ = (source, reason);
+    }
+
     /// Send a connection offer to a target
     async fn send_connection_offer(&self, target: &str, offer: ConnectionOffer) -> Result<String> {
         let _ = (target, offer);
@@ -179,6 +188,19 @@ pub trait Transport: TransportReceive + Send + Sync {
             "Connection offers not supported by this transport".to_string(),
         ))
     }
+}
+
+/// Why [`Transport::on_verification_failure`] was called.
+///
+/// A sender the trust store simply does not know (`UnknownSender`, `UnknownIssuer`) is not a
+/// failure of the connection and is never reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VerificationFailure {
+    /// The admission step refused the sender's verdict (the manager records a knock).
+    Rejected,
+    /// The message was admitted but its sealed payload could not be opened.
+    Unopenable,
 }
 
 /// Transport types supported by the system
