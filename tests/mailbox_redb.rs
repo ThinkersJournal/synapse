@@ -48,6 +48,7 @@ cases!(
     a_lease_outside_the_range_is_refused,
     mail_waits_for_a_role_that_has_not_claimed_yet,
     claims_are_written_through_the_store,
+    role_liveness_is_written_through_the_store,
     depths_count_queued_and_leased_per_role,
     an_expired_or_superseded_lease_counts_as_queued,
     fetch_excluding_skips_the_named_messages_and_leaves_them_unleased,

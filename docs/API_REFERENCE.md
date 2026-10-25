@@ -51,7 +51,7 @@ Bound to a loopback address only (it refuses any other). Bodies are JSON and **d
 | `/v1/dead` | GET | none | the caller's dead set, oldest first: `message_id`, `from`, `body_b64`, `enqueued_at`, `attempts`; changes nothing |
 | `/v1/requeue` | POST | `message_id` | `requeued`: a dead message back in the queue with its delivery count reset; `404` if it is not dead, `mailbox_full` (it stays dead) if the queue is full |
 | `/v1/heartbeat` | POST | `summary?` | presence; `summary` at most 500 bytes |
-| `/v1/list` | GET | none | roles with `online` (heard from within 90 s), `summary`, `pending` |
+| `/v1/list` | GET | none | roles with `online` (heard from within 90 s), `summary`, `pending`, `retired_at`; a role idle for 30 days is retired and left out unless `?include_retired=true` |
 | `/v1/stats` | GET | none | per-role cumulative counters since this daemon started (a restart begins again from zero); the CLI reader is `synapse stats` |
 | `/v1/state/create` | POST | `title`, `parties`, `owner`, `state?`, `blocked_on?`, `verify?`, `notes?` | shared state (`state.redb`); needs `state-write` and the caller a party; answers `{record}` with id `T-<n>` |
 | `/v1/state/get`, `/v1/state/history` | GET | `?id=T-<n>` | a record, or its hash-chained history; a record the caller may not see answers `404` (`get`) or `403` (`history`) |

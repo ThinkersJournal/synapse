@@ -728,6 +728,36 @@ impl<S: MailStore> Mailbox<S> {
         Ok(grant)
     }
 
+    /// Role liveness (docs/ROLE_LIVENESS_DESIGN.md): record when each of `seen` was last seen, then
+    /// retire every role idle past `ttl` (see [`Roles::retire_idle`]). Writes the table only when
+    /// something changed, so a quiet daemon writes at most once an hour per role. Returns the ids
+    /// retired. A failed write poisons the mailbox, as for a claim: memory and store disagree.
+    pub fn maintain_roles(
+        &mut self,
+        seen: &[(String, DateTime<Utc>)],
+        now: DateTime<Utc>,
+        ttl: chrono::Duration,
+    ) -> Result<Vec<String>, MailError> {
+        self.live()?;
+        let mut changed = false;
+        for (global_id, at) in seen {
+            changed |= self.roles.note_seen(global_id, *at);
+        }
+        let retired = self.roles.retire_idle(now, ttl);
+        changed |= !retired.is_empty();
+        if changed {
+            let snapshot = self.roles.snapshot();
+            let written = self
+                .store
+                .write(&mut |txn| txn.set_roles(&snapshot).map_err(MailError::Store));
+            if let Err(e) = written {
+                self.poisoned = true;
+                return Err(e);
+            }
+        }
+        Ok(retired)
+    }
+
     /// Lease up to `max` deliverable messages, oldest first. A message is deliverable when it has
     /// no lease, its lease expired, or its lease belongs to an older epoch (a takeover voids it).
     pub fn fetch(
