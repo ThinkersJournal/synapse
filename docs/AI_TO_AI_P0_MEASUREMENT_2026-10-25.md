@@ -84,22 +84,36 @@ Messages sent from 2026-09-16 on, with the types that carry most of the tokens. 
 | NOTICE | 1,337 | 5.6% | 141.18 | 117 | 227 | 125,763 | 62,999 |
 | ASK | 584 | 5.4% | 311.94 | 236 | 631 | 41,133 | 141,039 |
 
-## Result 3: the fixed wrapper
+## Result 3: the fixed wrapper, and what each part costs
 
-A channel push wraps every body in a tag with identifying attributes and a warning line. A **synthetic** wrapper of
-the same shape (made-up ids, no real text) costs, per message: Qwen3-0.6B 86, cl100k_base 71, TinyLlama-1.1B 96 tokens.
-Against the post-format mean per message that is Qwen3-0.6B 39%, cl100k_base 34%, TinyLlama-1.1B 37% of an average message, extra, on every push. A better body format does not shrink it.
+A channel push wraps every body in a tag with identifying attributes and a warning line. These are **synthetic**
+reconstructions (made-up ids, no real text). `<channel source=...>` itself is Claude Code's; the attributes after it and the
+warning line are the adapter's. **Measure-only (PM, 2026-10-25): the untrusted-data warning stays in every message until a
+design shows an equal-strength protection; nothing here ships a removal, and anything that weakens that line goes to CireSnave.**
+
+| variant | Qwen3-0.6B | cl100k_base | TinyLlama-1.1B |
+|---|---|---|---|
+| V0 now: source, message_id, sender, sender_cwd + warning line | 86 | 71 | 96 |
+| V1 without sender_cwd | 78 | 63 | 87 |
+| V2 V1 and a short message_id | 54 | 51 | 62 |
+| (for scale) the warning line alone | 21 | 21 | 23 |
+| (for scale) the tag alone, V0, no warning | 65 | 50 | 73 |
+| (for scale) a fixed marker instead of the line, V2 tag, NOT a proposal | 37 | 34 | 45 |
+
+Variant V0 against the post-format mean per message is Qwen3-0.6B 39%, cl100k_base 34%, TinyLlama-1.1B 37% of an average message, extra, on every push.
+Dropping `sender_cwd` and shortening the message id (V2) would save Qwen3-0.6B 32, cl100k_base 20, TinyLlama-1.1B 34 tokens per message, with the warning line untouched.
 
 ## What this says about the plan
 
-1. **P1 (the decoder) saves no tokens by itself**, as the plan said; this confirms the headers are about a third of the
-   post-format cost, so even a perfect header encoding (P2) could remove at most that third.
+1. **P1 (the decoder) saves no tokens by itself**, and the headers are only about a third of the post-format cost, so even
+   a perfect header encoding (P2) could remove at most that third. The PM's reading: the decoder is low value next to shorter
+   note lines; the plan now says so.
 2. **About 57% of the post-format tokens are note lines**, which are free prose. Cutting those is a question about what
    lanes write, not about the wire format; P4 (designed schemas) is the only plan item aimed at it, and its candidate
    gains (AutoForm, CLSR) are still UNVERIFIED.
-3. **The fixed wrapper is about a third of an average message** and is Synapse's own to look at, with no negotiation:
-   shorter attribute names, dropping `sender_cwd`, a shorter warning line. The warning line is a safety measure, so what may go
-   is a review question, not decided here. A first candidate for a measured follow-up, ahead of anything wire-level.
+3. **The fixed wrapper is about a third of an average message**, and the warning line is part of it (see the table). The
+   levers that leave the line alone (`sender_cwd`, the message id) are small; the line is a safety measure the PM keeps, so
+   this plan ships no wrapper removal.
 4. **P0's stop condition cannot be judged from this file.** It asks whether routine traffic is a small share of the
    spend; the spend is not in the data. What this gives is the lane traffic's own size: see the first table.
 
