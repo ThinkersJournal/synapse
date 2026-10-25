@@ -14,7 +14,7 @@ name = "synapse_security"
 path = "src/lib.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.168", default-features = false, features = ["native-base"] }
+synapse = { path = "../..", version = "6.0.0-rc.169", default-features = false, features = ["native-base"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 
