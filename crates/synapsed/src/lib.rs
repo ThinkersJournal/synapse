@@ -1309,12 +1309,25 @@ async fn send(
         mailbox.check(&session.global_id, session.epoch)?;
         // Review I2: serve this daemon's account and roles that have claimed at least once, so no
         // role can fill the disk with queues for recipients that can never read them.
-        let known = envelope
+        let roles = mailbox.roles_snapshot();
+        let in_account = envelope
             .to
             .split_once('@')
-            .is_some_and(|(_, account)| account == shared.account)
-            && mailbox.roles_snapshot().roles.contains_key(&envelope.to);
-        if !known {
+            .is_some_and(|(_, account)| account == shared.account);
+        let record = roles.roles.get(&envelope.to).filter(|_| in_account);
+        // A retired role is known, not abused: refuse with its own error and no budget charge.
+        // Mail already queued for it is kept (docs/ROLE_LIVENESS_DESIGN.md).
+        if record.is_some_and(|r| r.retired_at.is_some()) {
+            return Err(ApiError::new(
+                StatusCode::GONE,
+                "recipient_retired",
+                format!(
+                    "{} is retired: it comes back when it claims its role, or when a role-admin revives it",
+                    shown_role(&envelope.to)
+                ),
+            ));
+        }
+        if record.is_none() {
             // Row 4: counted per sending role; recorded only once over budget.
             let delay = shared.security.over_budget(
                 &shared.security.misuse,
@@ -1326,7 +1339,10 @@ async fn send(
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
                 "unknown_recipient",
-                "no such role on this daemon",
+                format!(
+                    "no such role on this daemon: {} (give role@account)",
+                    shown_role(&envelope.to)
+                ),
             )
             .after(delay));
         }
@@ -1342,6 +1358,15 @@ async fn send(
         "outcome": match outcome { Enqueued::Queued => "queued", Enqueued::Duplicate => "duplicate" },
     }))
     .into_response())
+}
+
+/// A recipient as an error message shows it: at most a global id's length, control characters
+/// escaped, so a refusal never echoes a megabyte or a terminal escape back.
+fn shown_role(to: &str) -> String {
+    to.chars()
+        .take(129)
+        .flat_map(char::escape_default)
+        .collect()
 }
 
 #[derive(Deserialize, Default)]

@@ -225,3 +225,110 @@ async fn an_unknown_or_malformed_role_is_refused() {
     }
     d.stop().await;
 }
+
+fn send_body(to: &str, id: &str) -> Value {
+    json!({ "to": to, "message_id": id, "body_b64": B64.encode(b"hello") })
+}
+
+async fn inbox(d: &Running, token: &str) -> Vec<Value> {
+    let (status, reply) = call(d, Some(token), "/v1/fetch", Some(json!({ "max": 10 }))).await;
+    assert_eq!(status, 200, "{reply}");
+    reply["messages"].as_array().cloned().unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_send_to_a_retired_role_is_refused_with_a_typed_error_not_queued() {
+    let d = start(&[("pm", Permission::RoleAdmin)]).await;
+    let (_, pm) = (claim(&d, "alpha").await, claim(&d, "pm").await);
+    call(
+        &d,
+        Some(&pm),
+        "/v1/roles/retire",
+        Some(json!({ "role": "alpha" })),
+    )
+    .await;
+
+    let (status, reply) = call(
+        &d,
+        Some(&pm),
+        "/v1/send",
+        Some(send_body("alpha@acct", "m1")),
+    )
+    .await;
+    assert_eq!(status, 410, "{reply}");
+    assert_eq!(reply["error"], "recipient_retired");
+    let text = reply["message"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("alpha@acct") && text.contains("retired"),
+        "{reply}"
+    );
+
+    // Revived, the same send is accepted, and nothing from the refused one is waiting.
+    call(
+        &d,
+        Some(&pm),
+        "/v1/roles/revive",
+        Some(json!({ "role": "alpha" })),
+    )
+    .await;
+    let alpha = claim(&d, "alpha").await;
+    assert!(
+        inbox(&d, &alpha).await.is_empty(),
+        "the refused send queued nothing"
+    );
+    let (status, _) = call(
+        &d,
+        Some(&pm),
+        "/v1/send",
+        Some(send_body("alpha@acct", "m2")),
+    )
+    .await;
+    assert_eq!(status, 200);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn mail_queued_before_a_retirement_is_kept_and_delivered_when_the_role_returns() {
+    let d = start(&[("pm", Permission::RoleAdmin)]).await;
+    let (_, pm) = (claim(&d, "alpha").await, claim(&d, "pm").await);
+    let (status, _) = call(
+        &d,
+        Some(&pm),
+        "/v1/send",
+        Some(send_body("alpha@acct", "before")),
+    )
+    .await;
+    assert_eq!(status, 200);
+    call(
+        &d,
+        Some(&pm),
+        "/v1/roles/retire",
+        Some(json!({ "role": "alpha" })),
+    )
+    .await;
+    let alpha = claim(&d, "alpha").await;
+    let waiting = inbox(&d, &alpha).await;
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0]["message_id"], "pm@acct/before");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn an_unknown_recipient_is_named_and_a_bare_name_is_never_guessed_by_the_daemon() {
+    let d = start(&[]).await;
+    let (a, _) = (claim(&d, "alpha").await, claim(&d, "beta").await);
+    for to in ["nobody@acct", "beta", "beta@elsewhere"] {
+        let (status, reply) = call(&d, Some(&a), "/v1/send", Some(send_body(to, "x"))).await;
+        assert_eq!(status, 404, "{to}: {reply}");
+        assert_eq!(reply["error"], "unknown_recipient");
+        assert!(
+            reply["message"].as_str().unwrap_or_default().contains(to),
+            "the refusal names the recipient: {reply}"
+        );
+    }
+    // The clients qualify a bare name with the sender's own account; the daemon takes only a
+    // qualified address, so one name can never match two roles.
+    let (status, _) = call(&d, Some(&a), "/v1/send", Some(send_body("beta@acct", "y"))).await;
+    assert_eq!(status, 200);
+    d.stop().await;
+}
