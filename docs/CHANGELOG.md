@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Chore (rc.173): `rand` 0.9 -> 0.10 (Dependabot #268)
+
+The `rand` dependency is `0.10.3`. Its three call sites (`rand::random` in `src/transport/mdns_enhanced.rs`, `src/synapse/transport/error_recovery.rs` and `tests/edge_case_test.rs`) compile unchanged against 0.10, so no code moves. `Cargo.lock` only re-points the root package at `rand 0.10.3`, which was already in the lock for another crate.
+
 ### Chore (rc.172): four more unused dependencies removed instead of bumped (Dependabot #265, #266, #267)
 
 `bytecodec` (was 0.4, Dependabot #265 proposed 0.5), `hmac` (0.12; #266 proposed 0.13), `parking_lot` (0.12; #267 proposed 0.13) and `bytes` have no use in `src`, `tests`, `examples`, `benches` or `crates` (`hmac` appears only as `ring::hmac`; `bytecodec` and `bytes` were the companions of the `stun_codec` removed in rc.157). They are gone from `Cargo.toml` and from the `core`, `nat_traversal` and `native-base` feature lists; no feature name changed. Bumping a crate nothing uses would have been code churn for no reader. Rand 0.10 (#268) is a real bump and follows separately.
