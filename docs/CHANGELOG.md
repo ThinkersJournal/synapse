@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs and tooling (rc.163): P0 of the AI-to-AI plan, what lane traffic costs in tokens
+
+`.github/ai2ai_p0_tokens.py` counts tokens per message type from a copy of the claude-peers database with the tokenizers it is given and writes numbers only (self-test: `--self-test`; the real run needs `pip install tokenizers tiktoken`, not a repo dependency). `docs/AI_TO_AI_P0_MEASUREMENT_2026-10-25.md` holds the numbers for cl100k_base, Qwen3-0.6B and TinyLlama-1.1B: no message text. No code change in the daemon.
+
 ### Docs (rc.162): plan for efficient AI-to-AI communication (ROADMAP row 41, slice one)
 
 `docs/AI_TO_AI_COMMUNICATION_PLAN_2026-10-25.md`: an ordered plan (measure the lane traffic first; a program decoder for `MESSAGE-FORMATS` v1; a mode and negotiation on the wire; a spec registry; token-saving schemas; latent left to Fuel) with, for each item, what it leans on and how that is verified. OverMind's summary file is treated as UNVERIFIED throughout: its checks prove a quote exists in a paper, not that it supports the claim, and paper #3's journal version was never fetched. No code.

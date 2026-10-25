@@ -34,6 +34,8 @@ CireSnave; #14 is a survey reporting other papers' numbers; #1's "100-agent" det
 
 P0 and P1 do not depend on any paper, so they go first and may be the whole story.
 
+**Update after P0 (2026-10-25, with the PM).** `AI_TO_AI_P0_MEASUREMENT_2026-10-25.md` measured the lane traffic. Headers are only about a third of the tokens after the compact formats and the `note:` lines most of the rest, so P1 (the decoder) is **low value next to shorter note lines**; the PM is tightening the note-line guidance in `MESSAGE-FORMATS` herself. P1 is kept for its audit value only and is no longer next. P2 can save at most that third. The channel wrapper is about a third of an average message: it is **measure-only**. The untrusted-data warning line stays in every message until a design shows an equal-strength protection (for example a fixed marker the harness already explains); anything that weakens it goes to CireSnave. The measured levers that leave the line alone are small (`sender_cwd`, the message id: 20 to 34 tokens of 71 to 96).
+
 ## 3. Step V: how a paper figure becomes usable
 
 1. Fetch the paper itself, never the summary (arXiv text or PDF); if the fetch fails, the figure is excluded, not guessed.
