@@ -187,6 +187,56 @@ impl Agent {
     }
 }
 
+/// When `role` was last heard from, as the daemon's `list` reports it to the watching `agent`.
+async fn last_seen(watcher: &Agent, role: &str) -> chrono::DateTime<chrono::Utc> {
+    let roles = watcher.ok("list", json!({})).await;
+    let row = roles["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["global_id"] == format!("{role}@acct"))
+        .unwrap_or_else(|| panic!("{role} is not listed: {roles}"));
+    row["last_seen"]
+        .as_str()
+        .and_then(|t| t.parse().ok())
+        .unwrap_or_else(|| panic!("{role} has no last_seen: {row}"))
+}
+
+/// ROADMAP row 39 (the M6b "no heartbeat test"): an adapter keeps its role online on its own, by a
+/// heartbeat every interval, with no tool call made. The interval is injectable so the test does not
+/// wait 30 s; the control is an adapter on the default interval, which must NOT beat in the same time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adapter_heartbeats_on_its_own_at_its_interval() {
+    let home = Home::new();
+    let watcher = agent(&home, "watcher").await;
+    let _quick =
+        SynapseMcpServer::start_with_heartbeat(home.config("quick"), Duration::from_millis(150))
+            .await
+            .expect("adapter starts");
+    let _slow = SynapseMcpServer::start(home.config("slow"))
+        .await
+        .expect("adapter starts");
+
+    let (quick_first, slow_first) = (
+        last_seen(&watcher, "quick").await,
+        last_seen(&watcher, "slow").await,
+    );
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let (quick_later, slow_later) = (
+        last_seen(&watcher, "quick").await,
+        last_seen(&watcher, "slow").await,
+    );
+    assert!(
+        quick_later - quick_first >= chrono::Duration::milliseconds(600),
+        "a 150 ms heartbeat moved last_seen by only {}",
+        quick_later - quick_first
+    );
+    assert_eq!(
+        slow_later, slow_first,
+        "control: the 30 s default has not beaten yet"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_tool_set_and_the_untrusted_wording() {
     let home = Home::new();
