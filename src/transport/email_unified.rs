@@ -56,10 +56,14 @@
 //!
 //! `SynapseImapServer` (the only IMAP peer any test here is allowed to use -- spec §7 forbids a
 //! live external provider in any test) implements no `SEARCH` command and tracks no `\Seen` flag,
-//! so "fetch only unseen" is not literally available against it. `receive_raw` fetches every
-//! message in the mailbox on every poll and de-duplicates client-side by `message_id`
-//! ([`EmailTransportImpl::imap_seen_ids`]): nothing is ever removed from the mailbox, but nothing
-//! already delivered to a caller's inbox is delivered again. A message whose fetched body does not
+//! so "fetch only unseen" is not literally available against it. `receive_raw` asks instead for the
+//! UIDs it has not seen: it keeps the mailbox's `UIDVALIDITY` and the next UID to ask for
+//! ([`EmailTransportImpl::imap_cursor`]) and sends `UID FETCH <next>:*`, so a poll with nothing new
+//! fetches nothing and a poll's cost follows what arrived, not the size of the mailbox. A server that
+//! reports no `UIDNEXT` is polled with the old whole-mailbox `FETCH`. Either way delivery is
+//! de-duplicated client-side by `message_id` in a bounded set ([`EmailTransportImpl::imap_seen_ids`],
+//! oldest forgotten first): nothing is ever removed from the mailbox, but nothing already delivered to
+//! a caller's inbox is delivered again. A message whose fetched body does not
 //! parse as a `SecureMessage` increments `receive_failures` and is skipped, not fatal to the poll
 //! -- mirroring `nat_traversal.rs`'s `receive_raw` handling of an unparseable UDP datagram.
 //!
@@ -339,7 +343,10 @@ pub struct EmailTransportImpl {
     listener: StdMutex<Option<TcpListener>>,
     /// `message_id`s already delivered by a RelayOut/External poll (module docs) -- unused in
     /// Direct mode, which drains its own store instead.
-    imap_seen_ids: StdMutex<HashSet<uuid::Uuid>>,
+    imap_seen_ids: StdMutex<SeenIds>,
+    /// Where the last IMAP poll stopped: the mailbox's UIDVALIDITY and the next UID to ask for, so
+    /// a poll fetches only what arrived since and its cost does not grow with the mailbox.
+    imap_cursor: StdMutex<ImapCursor>,
     /// Real counter: incremented only where an IMAP-fetched body actually failed to parse as a
     /// `SecureMessage` (module docs).
     receive_failures: AtomicU64,
@@ -428,7 +435,8 @@ impl EmailTransportImpl {
             max_message_size,
             smtp_server,
             listener: StdMutex::new(listener),
-            imap_seen_ids: StdMutex::new(HashSet::new()),
+            imap_seen_ids: StdMutex::new(SeenIds::new(SEEN_IDS_CAP)),
+            imap_cursor: StdMutex::new(ImapCursor::default()),
             receive_failures: AtomicU64::new(0),
             messages_sent: AtomicU64::new(0),
             bytes_sent: AtomicU64::new(0),
@@ -869,20 +877,58 @@ impl EmailTransportImpl {
                 SynapseError::TransportError(format!("IMAP login failed: {e}"))
             })?;
 
-        session
+        let mailbox = session
             .select("INBOX")
             .await
             .map_err(|e| SynapseError::TransportError(format!("IMAP SELECT INBOX failed: {e}")))?;
+
+        // Ask only for UIDs from the cursor on. A server that reports no UIDNEXT or UIDVALIDITY gets
+        // the old whole-mailbox FETCH, de-duplicated below. A changed UIDVALIDITY means the old UIDs
+        // mean nothing: start over (the de-duplication still keeps a message from arriving twice).
+        // The std guard is dropped before any await: this future must stay Send.
+        let (nothing_new, from_uid) = {
+            let mut cursor = self.imap_cursor.lock().unwrap();
+            if cursor.validity != mailbox.uid_validity {
+                *cursor = ImapCursor {
+                    validity: mailbox.uid_validity,
+                    next_uid: 1,
+                };
+            }
+            match mailbox.uid_next {
+                Some(uid_next) if uid_next <= cursor.next_uid => (true, None),
+                Some(_) => (false, Some(cursor.next_uid)),
+                None => (false, None),
+            }
+        };
+        if nothing_new {
+            if let Err(e) = session.logout().await {
+                tracing::debug!("IMAP LOGOUT failed (non-fatal): {e}");
+            }
+            return Ok(());
+        }
+        let mut highest_uid = 0u32;
 
         // No SEARCH support to ask for UNSEEN (module docs): fetch everything, de-dupe below.
         // Scoped in its own block so the mutable borrow `fetch_stream` holds on `session` (via
         // `std::pin::pin!`'s hidden local, which otherwise lives to the end of this function) ends
         // before `session.logout()` below needs its own `&mut session`.
         {
-            let fetch_stream = session
-                .fetch("1:*", "RFC822")
-                .await
-                .map_err(|e| SynapseError::TransportError(format!("IMAP FETCH failed: {e}")))?;
+            type FetchResult =
+                std::result::Result<async_imap::types::Fetch, async_imap::error::Error>;
+            let fetch_failed = |e: async_imap::error::Error| {
+                SynapseError::TransportError(format!("IMAP FETCH failed: {e}"))
+            };
+            let fetch_stream: std::pin::Pin<
+                Box<dyn futures_util::Stream<Item = FetchResult> + Send + '_>,
+            > = match from_uid {
+                Some(uid) => Box::pin(
+                    session
+                        .uid_fetch(format!("{uid}:*"), "(UID RFC822)")
+                        .await
+                        .map_err(fetch_failed)?,
+                ),
+                None => Box::pin(session.fetch("1:*", "RFC822").await.map_err(fetch_failed)?),
+            };
             let mut fetch_stream = std::pin::pin!(fetch_stream);
 
             while let Some(fetch_result) = fetch_stream.next().await {
@@ -894,6 +940,13 @@ impl EmailTransportImpl {
                         continue;
                     }
                 };
+                // `n:*` always names the last message, even when it is older than `n`.
+                if let (Some(from), Some(uid)) = (from_uid, fetch.uid) {
+                    if uid < from {
+                        continue;
+                    }
+                    highest_uid = highest_uid.max(uid);
+                }
                 let Some(raw) = fetch.body() else {
                     continue;
                 };
@@ -941,11 +994,59 @@ impl EmailTransportImpl {
             }
         }
 
+        if highest_uid > 0 {
+            let mut cursor = self.imap_cursor.lock().unwrap();
+            cursor.next_uid = cursor.next_uid.max(highest_uid + 1);
+        }
         if let Err(e) = session.logout().await {
             tracing::debug!("IMAP LOGOUT failed (non-fatal): {e}");
         }
         Ok(())
     }
+}
+
+/// How many delivered `message_id`s a transport remembers. Past it the oldest are forgotten, so a
+/// long-running daemon's memory stays flat; a forgotten id can only matter to a message the cursor
+/// would fetch again, and the replay guard above this transport drops a stale one anyway.
+const SEEN_IDS_CAP: usize = 10_000;
+
+/// A bounded set of ids, oldest evicted first.
+struct SeenIds {
+    cap: usize,
+    order: std::collections::VecDeque<uuid::Uuid>,
+    set: HashSet<uuid::Uuid>,
+}
+
+impl SeenIds {
+    fn new(cap: usize) -> Self {
+        SeenIds {
+            cap: cap.max(1),
+            order: std::collections::VecDeque::new(),
+            set: HashSet::new(),
+        }
+    }
+
+    /// `true` when `id` was not already present. Inserting past the cap evicts the oldest.
+    fn insert(&mut self, id: uuid::Uuid) -> bool {
+        if !self.set.insert(id) {
+            return false;
+        }
+        self.order.push_back(id);
+        while self.order.len() > self.cap {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+        true
+    }
+}
+
+/// Where the last IMAP poll stopped (see `EmailTransportImpl::imap_cursor`).
+#[derive(Default)]
+struct ImapCursor {
+    validity: Option<u32>,
+    /// The next UID to ask for; 0 until the first poll sets it.
+    next_uid: u32,
 }
 
 pub struct EmailTransportFactory;
@@ -982,5 +1083,33 @@ impl TransportFactory for EmailTransportFactory {
         // mirrors `tcp_unified.rs`'s `TcpTransportFactory::validate_config`.
         EmailLimits::from_config(config)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SeenIds;
+
+    #[test]
+    fn the_seen_set_is_bounded_and_forgets_the_oldest_first() {
+        let ids: Vec<uuid::Uuid> = (0..5).map(|_| uuid::Uuid::new_v4()).collect();
+        let mut seen = SeenIds::new(3);
+        for id in &ids[..3] {
+            assert!(seen.insert(*id), "new");
+        }
+        assert!(!seen.insert(ids[0]), "a repeat inside the cap is a repeat");
+        assert!(seen.insert(ids[3]), "a fourth evicts ids[0]");
+        assert_eq!(
+            (seen.order.len(), seen.set.len()),
+            (3, 3),
+            "the size stays at the cap"
+        );
+        assert!(
+            seen.insert(ids[0]),
+            "the oldest was forgotten, so it counts as new again"
+        );
+        assert!(!seen.insert(ids[3]), "a recent one is still remembered");
+        assert!(seen.insert(ids[4]));
+        assert!(seen.set.len() <= 3);
     }
 }

@@ -2945,6 +2945,107 @@ async fn email_relay_out_mode_receives_via_imap_polling() {
     );
 }
 
+/// ROADMAP row 37/40 (IMAP residue, PM 2026-10-25): a poll used to FETCH the whole mailbox every
+/// time and de-duplicate client-side, so its cost grew with the mailbox for the life of a daemon.
+/// A mailbox of `N` messages: the first poll moves `N`, further polls with nothing new move NOTHING,
+/// and a poll after `K` new messages moves exactly `K`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_imap_poll_costs_what_is_new_not_what_is_in_the_mailbox() {
+    const N: usize = 25;
+    const K: usize = 2;
+    let account = ed25519_dalek::SigningKey::from_bytes(&[12u8; 32]);
+    let mut alice = CryptoManager::new();
+    alice.generate_keypair().expect("keypair");
+    let alice_sealing = SealingKeyPair::generate();
+    alice.set_certificate_chain(vec![cert_for(&account, &alice, &alice_sealing, ALICE)]);
+    let signed = |n: usize| {
+        let mut message = SecureMessage::new(
+            BOB,
+            ALICE,
+            format!("poll cost {n}").into_bytes(),
+            SecurityLevel::Authenticated,
+        );
+        alice.sign_secure_message(&mut message).expect("sign");
+        message
+    };
+
+    const IMAP_USER: &str = "pollcost";
+    let message_store: Arc<std::sync::Mutex<HashMap<String, Vec<SecureMessage>>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::from([(
+            IMAP_USER.to_string(),
+            (0..N).map(signed).collect(),
+        )])));
+    let imap_port = free_port();
+    let imap_server = synapse::email_server::SynapseImapServer::new(
+        synapse::email_server::ImapServerConfig {
+            port: imap_port,
+            bind_scope: synapse::network_scope::BindScope::Loopback,
+            ..Default::default()
+        },
+        Arc::clone(&message_store),
+        Arc::new(AcceptAllImapAuth),
+    );
+    let fetched = imap_server.fetch_counter();
+    tokio::spawn(async move {
+        let _ = imap_server.start().await;
+    });
+
+    let mut bob_store = TrustStore::new();
+    bob_store.pin_account_key("alice-account", account.verifying_key().to_bytes());
+    let bob_node = email_relay_out_node(
+        imap_port,
+        IMAP_USER,
+        "anything",
+        bob_store,
+        SealingKeyPair::generate(),
+    )
+    .await;
+
+    let mut got = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while got < N && Instant::now() < deadline {
+        got += bob_node.receive_messages().await.expect("receive").len();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(got, N, "the first poll delivers the whole mailbox");
+    let after_first = fetched.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(after_first, N as u64, "and moves exactly N messages");
+
+    for _ in 0..3 {
+        assert!(
+            bob_node
+                .receive_messages()
+                .await
+                .expect("receive")
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        fetched.load(std::sync::atomic::Ordering::Relaxed),
+        after_first,
+        "polls with nothing new fetch nothing: the cost does not grow with the mailbox"
+    );
+
+    message_store
+        .lock()
+        .unwrap()
+        .get_mut(IMAP_USER)
+        .unwrap()
+        .extend((N..N + K).map(signed));
+    let mut fresh = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fresh < K && Instant::now() < deadline {
+        fresh += bob_node.receive_messages().await.expect("receive").len();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(fresh, K, "the new messages arrive, once each");
+    assert_eq!(
+        fetched.load(std::sync::atomic::Ordering::Relaxed),
+        after_first + K as u64,
+        "and only they are fetched"
+    );
+}
+
 /// `metrics()` used to report `messages_sent`/`bytes_sent`/`send_failures` all hardcoded `0`, with
 /// `average_latency_ms` and `reliability_score` both blanket-declared `UnmeasuredMetric`s (Task 1's
 /// honest placeholder). This proves the Task 5 repair through the public API: a raw
