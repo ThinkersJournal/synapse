@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.174): patent sweep of the 6.0.0-rc line (`docs/PATENT-SWEEP.md`)
+
+CireSnave's pre-release patent sweep (board 286), run on `main` e657ecd. 17 mechanism ideas, 13 documented queries, independent claims of 9 patents read, 14 more located but unread. One `needs-review` (US12711207B1, idea I17, which is design only); the rest are `clear` or `design-around`. Due diligence, not legal advice. No code changes.
+
 ### Chore (rc.173): `rand` 0.9 -> 0.10 (Dependabot #268)
 
 The `rand` dependency is `0.10.3`. Its three call sites (`rand::random` in `src/transport/mdns_enhanced.rs`, `src/synapse/transport/error_recovery.rs` and `tests/edge_case_test.rs`) compile unchanged against 0.10, so no code moves. `Cargo.lock` only re-points the root package at `rand 0.10.3`, which was already in the lock for another crate.
