@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Test (rc.160): the channel push never claims a message is verified or sealed
+
+A guard test in `synapse-claude-channel`: the text built from a daemon payload that carries no verification or sealing field must not contain either word (ROADMAP row 35, from the 2026-10-12 FAM-vs-adapter note). Observed to fail when the word is injected into the rendered text. No behaviour change.
+
 ### Docs (rc.159): the deferred minors M5a/M5b/M6b are ROADMAP rows again
 
 ROADMAP pointed at a list in HANDOFF that no longer exists (HANDOFF is never tracked in git). The list was recovered from earlier session transcripts and is now rows 37-40 with what is still true on main. Row 29 (#21, #22) is removed: both issues were closed 2026-10-23. No code.
