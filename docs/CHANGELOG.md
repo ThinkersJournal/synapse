@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Tooling and measurement (rc.169): `synapsed` latency under load (ROADMAP row 37d)
+
+New `crates/synapsed/examples/latency_probe.rs` and `docs/SYNAPSED_LATENCY_2026-10-25.md`: `send`/`fetch`/`ack` from 0 to 32 concurrent roles against an in-process daemon (redb and sqlite) while a probe times a `heartbeat` and a `list`. Finding: the mailbox lock queues even cheap calls behind synchronous store commits (heartbeat p50 0.4 ms idle, about 22 ms with 8 writers, about 99 ms with 32), at roughly 100 writes a second whatever the concurrency; the real fleet sends about 6 messages a minute, so nothing changes. No code in the daemon is touched.
+
 ### Fix (rc.168): sessions expire after 24 hours of disuse (ROADMAP row 37b)
 
 **Breaking (behaviour):** a session token no longer lives for as long as its role's epoch. One unused for `[session] ttl_hours` in `synapsed.toml` (default 24, at least 1) answers **401 `session_expired`** and must be claimed again; every authenticated call renews the window (sliding). A session that was superseded still answers 409 `superseded` first, so a holder that lost the role is told so and does not claim it back; an expiry is not counted as a bearer failure and raises no security event. `synapsed_client::Daemon::call` claims again once, under the role lock, on `session_expired` (and only on it, so a 401 `unauthorized` or a 409 is still reported); a client that talks to the HTTP API directly must do the same. New: `Daemon::with_session_ttl` and `with_session_ttl_hours`. Tests: `an_idle_session_expires_and_use_slides_the_window` (daemon), `an_expired_session_is_claimed_again_and_a_used_one_is_not` (the real client against an in-process daemon), and the settings tests.
