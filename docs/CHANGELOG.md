@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.164): `/v1/health` reports the mailbox's state in a separate field
+
+`GET /v1/health` keeps `"ok": true` (a non-ok reply reads as a squat to clients, which start another daemon) and gains `"mailbox": "ok" | "poisoned" | "unavailable" | "busy"`: `poisoned` after a failed write left memory and store disagreeing (every call refuses until a restart), `unavailable` when the lock itself is poisoned, `busy` when a handler holds it (the probe never waits). New: `Mailbox::is_poisoned`. ROADMAP row 37(c), recovered from the deferred M5a minors.
+
 ### Docs and tooling (rc.163): P0 of the AI-to-AI plan, what lane traffic costs in tokens
 
 `.github/ai2ai_p0_tokens.py` counts tokens per message type from a copy of the claude-peers database with the tokenizers it is given and writes numbers only (self-test: `--self-test`; the real run needs `pip install tokenizers tiktoken`, not a repo dependency). `docs/AI_TO_AI_P0_MEASUREMENT_2026-10-25.md` holds the numbers for cl100k_base, Qwen3-0.6B and TinyLlama-1.1B: no message text. No code change in the daemon.

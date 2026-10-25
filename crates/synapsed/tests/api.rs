@@ -193,6 +193,10 @@ async fn health_answers_without_a_token() {
         .await
         .unwrap();
     assert_eq!(reply["ok"], true);
+    assert_eq!(
+        reply["mailbox"], "ok",
+        "the mailbox's own state, beside the liveness answer"
+    );
     assert!(reply["started_at"].is_string());
     assert!(reply.get("proof").is_none(), "no challenge, no proof");
     d.stop().await;

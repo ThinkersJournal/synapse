@@ -644,6 +644,13 @@ impl<S: MailStore> Mailbox<S> {
         &self.store
     }
 
+    /// Whether a failed write left memory and store disagreeing, so every call now refuses
+    /// ([`MailError::Poisoned`]). Reopening the store clears it.
+    #[must_use]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
     fn live(&self) -> Result<(), MailError> {
         if self.poisoned {
             Err(MailError::Poisoned)

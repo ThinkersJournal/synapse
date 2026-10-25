@@ -116,8 +116,9 @@ fn a_failed_claim_write_poisons_and_a_reopen_continues_from_the_store() {
         "persisted normally"
     );
 
-    // Control: before the failure, depths are readable.
+    // Control: before the failure, depths are readable and the mailbox says it is healthy.
     assert!(mb.depths(later).unwrap().contains_key("lane@acct"));
+    assert!(!mb.is_poisoned());
 
     // The next store write fails: the claim is granted in memory but not recorded.
     store.fail_next.store(true, Ordering::SeqCst);
@@ -125,6 +126,10 @@ fn a_failed_claim_write_poisons_and_a_reopen_continues_from_the_store() {
     assert!(
         matches!(ids.try_claim(&mut mb, "lane", at), Err(MailError::Store(_))),
         "the store write failed"
+    );
+    assert!(
+        mb.is_poisoned(),
+        "a failed write poisons, and the mailbox can say so"
     );
     for result in [
         mb.enqueue(suite::env("m", "lane@acct", b"x"), at)
