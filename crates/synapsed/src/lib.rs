@@ -187,6 +187,10 @@ const ONLINE_WINDOW: chrono::Duration = chrono::Duration::seconds(90);
 /// A role idle this many days is retired (hidden from `list`, kept) unless `synapsed.toml` says
 /// otherwise: docs/ROLE_LIVENESS_DESIGN.md, the PM's ruling of 2026-10-24.
 const DEFAULT_ROLE_TTL_DAYS: i64 = 30;
+/// A session unused this many hours expires (PM ruling 2026-10-25, ROADMAP row 37b): every
+/// authenticated call renews it, and an expired one answers 401 `session_expired`, after which the
+/// client claims the role again. `[session] ttl_hours` in `synapsed.toml` changes it.
+const DEFAULT_SESSION_TTL_HOURS: i64 = 24;
 const MAX_FETCH: usize = 100;
 /// The longest client-chosen message id; the stored id is `<sender>/<client id>` (review I1).
 const MAX_CLIENT_ID: usize = 100;
@@ -204,6 +208,9 @@ struct Session {
     epoch: u64,
     /// The verified leaf certificate's grants at claim time.
     permissions: Vec<synapse::certificate::Permission>,
+    /// When a call last used this session (the claim, until the first call): the sliding window the
+    /// session ttl is measured from.
+    last_used: DateTime<Utc>,
 }
 
 struct Presence {
@@ -248,6 +255,8 @@ struct Shared {
     online_window: chrono::Duration,
     /// A role idle longer than this is retired by the sweep.
     role_ttl: chrono::Duration,
+    /// A session unused longer than this is expired (401 `session_expired`).
+    session_ttl: chrono::Duration,
 }
 
 /// How the daemon waits out an owed failure delay before answering. The default sleeps on the tokio
@@ -674,6 +683,7 @@ impl Daemon {
                 launches: Mutex::new(launch::Table::new(started_at)),
                 online_window: ONLINE_WINDOW,
                 role_ttl: chrono::Duration::days(DEFAULT_ROLE_TTL_DAYS),
+                session_ttl: chrono::Duration::hours(DEFAULT_SESSION_TTL_HOURS),
             },
         })
     }
@@ -728,6 +738,20 @@ impl Daemon {
     pub fn with_launcher(mut self, launcher: LauncherConfig) -> Daemon {
         self.shared.launcher = launcher;
         self
+    }
+
+    /// Sets how long a session may go unused before it expires (default 24 hours). Tests use a short
+    /// one; `with_session_ttl_hours` is the configured form. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_session_ttl(mut self, ttl: chrono::Duration) -> Daemon {
+        self.shared.session_ttl = ttl;
+        self
+    }
+
+    /// [`Daemon::with_session_ttl`] in whole hours (at least 1). Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_session_ttl_hours(self, hours: u32) -> Daemon {
+        self.with_session_ttl(chrono::Duration::hours(i64::from(hours.max(1))))
     }
 
     /// Sets how many days idle retires a role (default 30, at least 1). Call after `open`, before
@@ -1109,12 +1133,26 @@ fn authed(shared: &Shared, headers: &HeaderMap) -> Result<Session, ApiError> {
         .and_then(|v| v.strip_prefix("Bearer "))
         .and_then(unhex::<32>)
         .ok_or_else(unauthorized)?;
+    let hash = token_hash(&token);
     let session = locked(&shared.sessions)?
-        .get(&token_hash(&token))
+        .get(&hash)
         .cloned()
         .ok_or_else(unauthorized)?;
+    // Superseded outranks expired: a holder that lost the role must be told so (409), not invited
+    // to claim it back. Only a current-epoch session can be merely expired.
     locked(&shared.mailbox)?.check(&session.global_id, session.epoch)?;
     let now = Utc::now();
+    if now - session.last_used > shared.session_ttl {
+        // Not counted as a bearer failure and not an event: an idle session is not an attack.
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "session_expired",
+            "this session was idle longer than the session ttl: claim the role again",
+        ));
+    }
+    if let Some(live) = locked(&shared.sessions)?.get_mut(&hash) {
+        live.last_used = now;
+    }
     let mut presence = locked(&shared.presence)?;
     let entry = presence
         .entry(session.global_id.clone())
@@ -1280,6 +1318,7 @@ fn claim_inner(
                     .first()
                     .map(|c| c.permissions.clone())
                     .unwrap_or_default(),
+                last_used: Utc::now(),
             },
         );
     }

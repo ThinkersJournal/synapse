@@ -46,6 +46,8 @@ roles = ["pm"]                 # SYNAPSE_ALERT_ROLES
 id = "sqlite"                  # SYNAPSE_MAILBOX_STORE (deprecated; prefer `synapse storage use`)
 [liveness]
 role_ttl_days = 30             # a role idle this long is retired; file only, at least 1
+[session]
+ttl_hours = 24                 # a session unused this long expires (401 session_expired); every call renews it; file only, at least 1
 ```
 
 An unknown key, a file that does not parse, an address that is not one, or a bad role name makes `synapsed` exit 2

@@ -98,6 +98,7 @@ async fn main() -> ExitCode {
     };
     let daemon = daemon
         .with_role_ttl_days(settings.role_ttl_days)
+        .with_session_ttl_hours(settings.session_ttl_hours)
         .with_alert_roles(settings.alert_roles.clone())
         .with_launcher(synapsed::LauncherConfig {
             roles: settings.launcher_roles.clone(),

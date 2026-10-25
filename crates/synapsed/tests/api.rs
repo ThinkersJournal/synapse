@@ -68,9 +68,25 @@ async fn start_with(security: Option<SecurityConfig>) -> Running {
 }
 
 async fn start_daemon(security: Option<SecurityConfig>, pause: Option<Pause>) -> Running {
+    start_daemon_with(security, pause, None).await
+}
+
+/// A daemon whose sessions expire after `ttl` of disuse.
+async fn start_with_session_ttl(ttl: chrono::Duration) -> Running {
+    start_daemon_with(None, None, Some(ttl)).await
+}
+
+async fn start_daemon_with(
+    security: Option<SecurityConfig>,
+    pause: Option<Pause>,
+    session_ttl: Option<chrono::Duration>,
+) -> Running {
     let home = tempfile::tempdir().unwrap();
     Keystore::init_account(home.path(), "acct").expect("init account");
     let mut daemon = open_daemon(&config(home.path())).expect("open daemon");
+    if let Some(ttl) = session_ttl {
+        daemon = daemon.with_session_ttl(ttl);
+    }
     if let Some(security) = security {
         daemon = daemon.with_security(security);
     }
@@ -179,6 +195,49 @@ async fn post(d: &Running, path: &str, token: Option<&str>, body: Value) -> (u16
     let text = resp.text().await.unwrap();
     let value = serde_json::from_str(&text).unwrap_or(Value::Null);
     (status, value, text)
+}
+
+/// ROADMAP row 37(b), PM ruling 2026-10-25: a session expires after a period of disuse. The window
+/// slides (every authenticated call renews it), expiry is a 401 `session_expired` that is NOT counted
+/// as an attack, a session that was superseded still answers 409 first (so its holder is told what
+/// happened and does not re-claim blindly), and a fresh claim works.
+#[tokio::test]
+async fn an_idle_session_expires_and_use_slides_the_window() {
+    let d = start_with_session_ttl(chrono::Duration::milliseconds(800)).await;
+    let (token, epoch) = claim(&d, "alpha").await;
+
+    // Used every 400 ms for two seconds, well past the 800 ms window: it never expires.
+    for round in 0..5 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let (status, _, text) = post(&d, "/v1/heartbeat", Some(&token), json!({})).await;
+        assert_eq!(status, 200, "round {round}: a used session slides: {text}");
+    }
+
+    // Idle past the window: expired, and named as such.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let (status, reply, text) = post(&d, "/v1/heartbeat", Some(&token), json!({})).await;
+    assert_eq!(status, 401, "{text}");
+    assert_eq!(reply["error"], "session_expired", "{text}");
+    let events =
+        std::fs::read_to_string(d.home.path().join(SECURITY_EVENTS_FILE)).unwrap_or_default();
+    assert!(
+        !events.contains("auth_failure"),
+        "an expiry is not an attack: {events}"
+    );
+
+    // Claim again: a new epoch and a working token. The old token is now SUPERSEDED, which outranks
+    // expired: its holder is told someone else holds the role.
+    let (fresh, fresh_epoch) = claim_fresh(&d, "alpha").await;
+    assert!(fresh_epoch > epoch);
+    let (status, _, text) = post(&d, "/v1/heartbeat", Some(&fresh), json!({})).await;
+    assert_eq!(status, 200, "{text}");
+    let (status, reply, text) = post(&d, "/v1/heartbeat", Some(&token), json!({})).await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (409, Some("superseded")),
+        "{text}"
+    );
+    d.stop().await;
 }
 
 /// ROADMAP row 37(a): handlers take their body (`Bytes`) before `authed()` runs, so an unauthenticated

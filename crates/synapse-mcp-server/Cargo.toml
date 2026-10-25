@@ -18,8 +18,8 @@ name = "synapse-mcp"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.167" }
-synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.167" }
+synapse = { path = "../..", version = "6.0.0-rc.168" }
+synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.168" }
 rmcp = { version = "3.4.0", features = ["server", "macros", "transport-io", "schemars"] }
 schemars = "1.2.2"
 serde = { version = "1.0", features = ["derive"] }

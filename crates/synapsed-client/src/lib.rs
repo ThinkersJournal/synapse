@@ -364,9 +364,32 @@ impl Daemon {
     /// else a fresh claim. Any refusal, 401 and 409 included, is returned as an error: a 401 for
     /// this instance's session means the daemon dropped it, which happens after enough takeovers,
     /// so re-claiming then would silently steal the role back (review I1).
+    ///
+    /// One exception, and only one: a 401 `session_expired` (the daemon's session ttl ran out while
+    /// the session sat unused). Nobody took the role; the daemon answers a taken one with 409
+    /// `superseded` before it ever considers the age. So the client claims again, under the role lock,
+    /// and retries the call once.
     pub fn call(&self, role: &str, path: &str, body: Option<&Value>) -> Result<Value, MailError> {
         let session = self.session(role)?;
-        self.request(path, Some(&session.token), body)
+        match self.request(path, Some(&session.token), body) {
+            Err(MailError::Api { kind, .. }) if kind == "session_expired" => {
+                let fresh = self.reclaim_expired(role, &session.token)?;
+                self.request(path, Some(&fresh.token), body)
+            }
+            other => other,
+        }
+    }
+
+    /// Claim again after `expired_token` aged out, unless another process of ours already did (the
+    /// cached token then differs from the expired one).
+    fn reclaim_expired(&self, role: &str, expired_token: &str) -> Result<Cached, MailError> {
+        let _lock = RoleLock::acquire(&self.home, role)?;
+        match load_session(&self.home, role)?
+            .filter(|c| c.instance_id == self.instance_id && c.token != expired_token)
+        {
+            Some(already) => Ok(already),
+            None => self.claim_session(role),
+        }
     }
 
     /// `GET /v1/waiting`: the launch signals for roles with mail and no live session, as the

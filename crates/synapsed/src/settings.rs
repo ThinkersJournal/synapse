@@ -30,6 +30,8 @@ pub struct Settings {
     pub alert_roles: Vec<String>,
     /// A role idle this many days is retired (file only; default 30).
     pub role_ttl_days: u32,
+    /// A session unused this many hours expires (file only; default 24).
+    pub session_ttl_hours: u32,
 }
 
 /// Resolve the settings from `env` (the whole process environment is fine) and the text of
@@ -71,6 +73,11 @@ pub fn load(env: &BTreeMap<String, String>, file: Option<&str>) -> Result<Settin
         .ok()
         .filter(|d| *d >= 1)
         .ok_or_else(|| format!("liveness.role_ttl_days is {days}: it must be at least 1"))?;
+    let hours: i64 = config.get("session.ttl_hours").map_err(|e| e.to_string())?;
+    let session_ttl_hours = u32::try_from(hours)
+        .ok()
+        .filter(|h| *h >= 1)
+        .ok_or_else(|| format!("session.ttl_hours is {hours}: it must be at least 1"))?;
     let store_pin: Option<String> = config.get("storage.id").ok();
     let store_pin_from_env = store_pin.is_some()
         && config.explain("storage.id").is_ok_and(|e| {
@@ -85,5 +92,6 @@ pub fn load(env: &BTreeMap<String, String>, file: Option<&str>) -> Result<Settin
         launcher_roles: roles("launch.roles")?,
         alert_roles: roles("alert.roles")?,
         role_ttl_days,
+        session_ttl_hours,
     })
 }
