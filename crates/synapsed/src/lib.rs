@@ -1891,10 +1891,12 @@ fn set_role_retired(
             "no such role",
         ));
     }
+    // The role name only, as the request gave it: the account name stays out of the log (CodeQL
+    // rust/cleartext-logging flags it as sensitive).
     eprintln!(
-        "synapsed: {} {global_id} (by {})",
+        "synapsed: role {} {} by a role-admin session",
+        body.role,
         if retire { "retired" } else { "revived" },
-        session.global_id
     );
     Ok(axum::Json(json!({ "role": global_id, "retired": retire })).into_response())
 }
