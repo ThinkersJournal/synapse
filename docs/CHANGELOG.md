@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fix (rc.167): an IMAP poll costs what is new, and the seen-id set is bounded (ROADMAP row 40)
+
+`EmailTransportImpl`'s RelayOut/External poll fetched the whole mailbox on every poll (`FETCH 1:*`) and remembered every delivered `message_id` forever, so a long-running daemon's polls grew with its mailbox and its memory with its history. It now keeps the mailbox's `UIDVALIDITY` and next UID and sends `UID FETCH <next>:*` (a poll with nothing new fetches nothing; a changed `UIDVALIDITY` starts over; a server that reports no `UIDNEXT` is polled the old way), and the de-duplication set is capped at 10,000 ids, oldest forgotten first. `SynapseImapServer` gains real `UIDNEXT`, `UID FETCH` and message-number sets (`a:b`, `a:*`, comma lists), plus `fetch_counter()` for tests. Proven by `an_imap_poll_costs_what_is_new_not_what_is_in_the_mailbox` (25 messages: 25 moved, then 0 for three empty polls, then exactly the 2 new ones; it failed before with 100) and a unit test of the bounded set.
+
 ### Chore (rc.166): the httpbin example is dropped (ROADMAP row 40)
 
 `examples/http_transport_demo.rs` is removed, with its `[[example]]` entry and its line in `examples/README.md`. It sent real requests to httpbin.org, jsonplaceholder.typicode.com and api.github.com (a third-party dependency in an example, PM ruling 2026-10-25) and its `localhost:8443` demo had no server. The HTTP transport itself is unchanged and covered by its own tests. No library change.
