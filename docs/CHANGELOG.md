@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Chore (rc.166): the httpbin example is dropped (ROADMAP row 40)
+
+`examples/http_transport_demo.rs` is removed, with its `[[example]]` entry and its line in `examples/README.md`. It sent real requests to httpbin.org, jsonplaceholder.typicode.com and api.github.com (a third-party dependency in an example, PM ruling 2026-10-25) and its `localhost:8443` demo had no server. The HTTP transport itself is unchanged and covered by its own tests. No library change.
+
 ### Fix and tests (rc.165): deferred minors verified (ROADMAP rows 37-40)
 
 **Breaking (behaviour of a public function, noted as Breaking per the pre-release policy):** `KeyManager::verify` with a 33-byte public key now returns an `Err` ("compressed P-256 public keys (33 bytes) are not supported") instead of `Ok(false)`: ring parses only the uncompressed point, so the old answer rejected a valid signature silently (the legacy `synapse::synapse::auth` tree; nothing forged was ever accepted). Tests, no behaviour change: `an_unauthenticated_body_is_bounded_before_auth` (axum's 2 MiB default limit bounds a body read before auth; observed to fail with the limit disabled) and `describe_keeps_paths_out_of_keystore_and_io_failures` (observed to fail when the I/O arm echoes the error). ROADMAP rows 37-40 now say what is done, what is by design, and what is open.
