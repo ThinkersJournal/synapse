@@ -36,8 +36,10 @@ holding the key is the authorization (the M3 rule), so a lane that returns needs
 ### 4. Addressing by role only
 Already so for Synapse: an address is `role@account`, a bare role means the sender's account, and one role is one
 identity, so a name cannot match two things. The change is to make failure explicit: a send to a retired or unknown
-role fails with a typed error naming the role and its state, never a silent queue. A test pins that a bare name
-resolves to exactly one role.
+role fails with a typed error naming the role and its state, never a silent queue: 410 `recipient_retired` for a
+retired role (no abuse budget is charged), 404 `unknown_recipient` otherwise. The daemon takes only a qualified
+address, so it never guesses; the CLI and the MCP tool qualify a bare name with the sender's own account before they
+call it. Built in L3 (rc.156) with tests that pin both.
 
 ### Not covered
 Claude Code's session registry (`ListAgents`) and the claude-peers broker. Nothing in Synapse reaches them.

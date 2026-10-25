@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.156): role liveness L3, a send to a retired role is refused
+
+`POST /v1/send` to a retired role is 410 `recipient_retired` (nothing queued, no abuse budget charged); mail queued before the retirement is kept and is delivered when the role claims again. `unknown_recipient` (404) now names the recipient in its message (truncated and escaped). The daemon still takes only a qualified `role@account`; the CLI and MCP tool qualify a bare name with the sender's account, so a name matches one role. Slice L3 of `docs/ROLE_LIVENESS_DESIGN.md`.
+
 ### Feature (rc.155): role liveness L2, `role-admin`, `synapse retire` and `synapse revive`
 
 A new grant, `role-admin` (`Permission::RoleAdmin`; `synapse id grant --role pm role-admin`), lets a role retire and revive others: `POST /v1/roles/retire` and `/v1/roles/revive` with `{"role": "<name>"}`, and `synapse retire|revive <name>`. Without the grant the answer is 403, a role that never claimed is 404, retiring twice succeeds. Retiring leaves the epoch and queued mail; revive clears `retired_at` and restarts the idle clock; a claim by the role itself also revives it. **Breaking:** `Permission` has a new variant. New: `Roles::retire`, `Roles::revive`, `Mailbox::set_role_retired`. Slice L2 of `docs/ROLE_LIVENESS_DESIGN.md`.
