@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Test (rc.165): an unauthenticated request body is bounded before auth (ROADMAP row 37a)
+
+Handlers take their body before `authed()` runs, so an unauthenticated caller's body is read first; what bounds it is axum's default body limit (2 MiB). `an_unauthenticated_body_is_bounded_before_auth` pins that: 1 KiB gets the plain 401, 3 MiB is refused (413 or a closed connection) and never reaches auth. Observed to fail with the limit disabled. No behaviour change.
+
 ### Feature (rc.164): `/v1/health` reports the mailbox's state in a separate field
 
 `GET /v1/health` keeps `"ok": true` (a non-ok reply reads as a squat to clients, which start another daemon) and gains `"mailbox": "ok" | "poisoned" | "unavailable" | "busy"`: `poisoned` after a failed write left memory and store disagreeing (every call refuses until a restart), `unavailable` when the lock itself is poisoned, `busy` when a handler holds it (the probe never waits). New: `Mailbox::is_poisoned`. ROADMAP row 37(c), recovered from the deferred M5a minors.
