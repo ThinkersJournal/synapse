@@ -10,7 +10,7 @@ use crate::certificate;
 use crate::crypto::CryptoManager;
 use crate::delivery_ack;
 use crate::error::SynapseError;
-use crate::sender_auth::{SenderVerdict, TrustStore};
+use crate::sender_auth::{SenderVerdict, TrustStore, UnverifiableReason};
 use crate::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
     error::Result,
@@ -727,6 +727,9 @@ impl TransportManager {
         let now = chrono::Utc::now();
         let mut delivered = Vec::with_capacity(all_messages.len());
         let mut relayed_revocations = Vec::new();
+        // `(transport, source, kind)` for each message that failed verification; the transports are
+        // told once the guards below are dropped, because a transport may take locks of its own.
+        let mut failures: Vec<(TransportType, String, VerificationFailure)> = Vec::new();
         for incoming in all_messages {
             let message = &incoming.message;
             let verdict = store.verify_at(message, now);
@@ -758,6 +761,21 @@ impl TransportManager {
                         &message.sender_proof.key_id,
                         now,
                     );
+                    // A sender nobody pinned says the trust store lacks them, nothing about the
+                    // connection it came over.
+                    if !matches!(
+                        verdict,
+                        SenderVerdict::Unverifiable {
+                            reason: UnverifiableReason::UnknownSender
+                                | UnverifiableReason::UnknownIssuer
+                        }
+                    ) {
+                        failures.push((
+                            incoming.transport_type,
+                            incoming.source.clone(),
+                            VerificationFailure::Rejected,
+                        ));
+                    }
                     continue;
                 }
                 crate::replay::Admission::AdmitUnverified => crate::replay::Freshness::NotChecked,
@@ -791,6 +809,11 @@ impl TransportManager {
             if let crate::sealing::Payload::CouldNotOpen(error) = &payload {
                 self.events
                     .unopenable(&message.from_global_id, &incoming.source, *error, now);
+                failures.push((
+                    incoming.transport_type,
+                    incoming.source.clone(),
+                    VerificationFailure::Unopenable,
+                ));
             }
             // Only ever attach a chain summary when the chain it describes is the SAME one that
             // authenticated this message: `verified_chain_at` resolves any well-formed
@@ -824,6 +847,11 @@ impl TransportManager {
         drop(inbound);
         if !relayed_revocations.is_empty() {
             self.add_revocations(&relayed_revocations).await;
+        }
+        for (transport_type, source, kind) in failures {
+            if let Some(transport) = transports.get(&transport_type) {
+                transport.on_verification_failure(&source, kind).await;
+            }
         }
         Ok(delivered)
     }

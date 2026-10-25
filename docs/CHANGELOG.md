@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.175): `Transport::on_verification_failure` (QUIC pool eviction, slice 1; Part of #49)
+
+A new `Transport` method, default no-op, so no implementor breaks, and a `#[non_exhaustive]` `VerificationFailure { Rejected, Unopenable }`. `TransportManager::receive_messages` records `(transport, source, kind)` where it already records a knock or an unopenable message, and calls the hook after its locks are dropped. A sender nobody pinned (`UnknownSender`, `UnknownIssuer`) is not reported: it says the trust store lacks them, nothing about the connection. No transport implements the hook yet; QUIC follows in slice 2.
+
 ### Docs (rc.174): patent sweep of the 6.0.0-rc line (`docs/PATENT-SWEEP.md`)
 
 CireSnave's pre-release patent sweep (board 286), run on `main` e657ecd. 17 mechanism ideas, 13 documented queries, independent claims of 9 patents read, 14 more located but unread. One `needs-review` (US12711207B1, idea I17, which is design only); the rest are `clear` or `design-around`. Due diligence, not legal advice. No code changes.
