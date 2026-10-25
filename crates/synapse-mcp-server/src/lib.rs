@@ -179,6 +179,13 @@ impl SynapseMcpServer {
     /// Check the role, find (or start) the daemon, take the role if this home has no session for
     /// it, and begin heartbeating. Every error is fixed text.
     pub async fn start(config: McpConfig) -> Result<Self, String> {
+        Self::start_with_heartbeat(config, HEARTBEAT_EVERY).await
+    }
+
+    /// [`SynapseMcpServer::start`] with the heartbeat every `every` instead of every 30 s. The
+    /// daemon counts a role online for 90 s, so anything past about 45 s risks flapping; this exists
+    /// so a test does not have to wait for the real interval.
+    pub async fn start_with_heartbeat(config: McpConfig, every: Duration) -> Result<Self, String> {
         if !valid_name(&config.role) {
             return Err(
                 "the role is not a role name: use [A-Za-z0-9_-], at most 64 characters".into(),
@@ -196,7 +203,7 @@ impl SynapseMcpServer {
         });
         let weak = Arc::downgrade(&inner);
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(HEARTBEAT_EVERY);
+            let mut tick = tokio::time::interval(every);
             tick.tick().await;
             loop {
                 tick.tick().await;

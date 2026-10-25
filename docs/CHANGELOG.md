@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Test (rc.170): the adapter's heartbeat is tested (ROADMAP row 39)
+
+`SynapseMcpServer::start_with_heartbeat(config, every)` is new; `start(config)` is `start_with_heartbeat(config, 30 s)`, so nothing changes for callers. `an_adapter_heartbeats_on_its_own_at_its_interval` starts one adapter on a 150 ms interval and one on the default, and checks the daemon's `last_seen` for the first keeps moving with no tool call while the second's does not. Observed to fail when the loop ignores the interval. The last item of the deferred minors recovered into ROADMAP rows 37-40.
+
 ### Tooling and measurement (rc.169): `synapsed` latency under load (ROADMAP row 37d)
 
 New `crates/synapsed/examples/latency_probe.rs` and `docs/SYNAPSED_LATENCY_2026-10-25.md`: `send`/`fetch`/`ack` from 0 to 32 concurrent roles against an in-process daemon (redb and sqlite) while a probe times a `heartbeat` and a `list`. Finding: the mailbox lock queues even cheap calls behind synchronous store commits (heartbeat p50 0.4 ms idle, about 22 ms with 8 writers, about 99 ms with 32), at roughly 100 writes a second whatever the concurrency; the real fleet sends about 6 messages a minute, so nothing changes. No code in the daemon is touched.
