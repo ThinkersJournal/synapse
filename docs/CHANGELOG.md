@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Chore (rc.172): four more unused dependencies removed instead of bumped (Dependabot #265, #266, #267)
+
+`bytecodec` (was 0.4, Dependabot #265 proposed 0.5), `hmac` (0.12; #266 proposed 0.13), `parking_lot` (0.12; #267 proposed 0.13) and `bytes` have no use in `src`, `tests`, `examples`, `benches` or `crates` (`hmac` appears only as `ring::hmac`; `bytecodec` and `bytes` were the companions of the `stun_codec` removed in rc.157). They are gone from `Cargo.toml` and from the `core`, `nat_traversal` and `native-base` feature lists; no feature name changed. Bumping a crate nothing uses would have been code churn for no reader. Rand 0.10 (#268) is a real bump and follows separately.
+
 ### Chore (rc.171): the clean dependency bumps (Dependabot #263, #264)
 
 `rmcp` and `rmcp-macros` 3.5.1 -> 3.7.0 (Dependabot proposed 3.6.0 for `rmcp`; 3.7.0 was the newest) and `tokio` 1.53.3 -> 1.54.1 in `Cargo.lock` (minor and patch, no code change), and `actions/download-artifact` v8.0.1 -> v8.0.2 in the CI workflow (the new SHA matches the upstream tag). Taken over from Dependabot because the gate refuses a PR without a version line (CireSnave: newest dependencies at all times). The breaking bumps (bytecodec 0.5, hmac 0.13, parking_lot 0.13, rand 0.10) follow one PR each.

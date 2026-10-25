@@ -455,16 +455,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
-name = "bytecodec"
-version = "0.4.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adf4c9d0bbf32eea58d7c0f812058138ee8edaf0f2802b6d03561b504729a325"
-dependencies = [
- "byteorder",
- "trackable 0.2.24",
-]
-
-[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1017,7 +1007,6 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
  "crypto-common 0.1.7",
- "subtle",
 ]
 
 [[package]]
@@ -1600,16 +1589,7 @@ version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
 dependencies = [
- "hmac 0.13.0",
-]
-
-[[package]]
-name = "hmac"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
-dependencies = [
- "digest 0.10.7",
+ "hmac",
 ]
 
 [[package]]
@@ -3890,7 +3870,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hkdf",
- "hmac 0.13.0",
+ "hmac",
  "itoa",
  "log",
  "md-5",
@@ -4010,17 +3990,6 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "1.0.109"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
-dependencies = [
- "proc-macro2",
- "quote",
- "unicode-ident",
-]
-
-[[package]]
-name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
@@ -4043,7 +4012,7 @@ dependencies = [
 
 [[package]]
 name = "synapse"
-version = "6.0.0-rc.171"
+version = "6.0.0-rc.172"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4053,8 +4022,6 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "bcrypt",
- "bytecodec",
- "bytes",
  "chrono",
  "clap",
  "console_error_panic_hook",
@@ -4066,7 +4033,6 @@ dependencies = [
  "gloo-storage",
  "gloo-utils",
  "hex",
- "hmac 0.12.1",
  "hpke",
  "http-body-util",
  "hyper",
@@ -4076,7 +4042,6 @@ dependencies = [
  "lettre",
  "mail-parser",
  "native-tls",
- "parking_lot",
  "pem 4.0.0",
  "pretty_assertions",
  "proc-macro2",
@@ -4118,7 +4083,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-agent"
-version = "6.0.0-rc.171"
+version = "6.0.0-rc.172"
 dependencies = [
  "genai",
  "serde_json",
@@ -4133,7 +4098,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-claude-channel"
-version = "6.0.0-rc.171"
+version = "6.0.0-rc.172"
 dependencies = [
  "base64 0.23.1",
  "rmcp",
@@ -4148,7 +4113,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mailbox-persistant"
-version = "6.0.0-rc.171"
+version = "6.0.0-rc.172"
 dependencies = [
  "chrono",
  "persistant",
@@ -4164,7 +4129,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mcp-server"
-version = "6.0.0-rc.171"
+version = "6.0.0-rc.172"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4184,7 +4149,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-security"
-version = "6.0.0-rc.171"
+version = "6.0.0-rc.172"
 dependencies = [
  "chrono",
  "serde_json",
@@ -4194,7 +4159,7 @@ dependencies = [
 
 [[package]]
 name = "synapsectl"
-version = "6.0.0-rc.171"
+version = "6.0.0-rc.172"
 dependencies = [
  "chrono",
  "clap",
@@ -4210,7 +4175,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed"
-version = "6.0.0-rc.171"
+version = "6.0.0-rc.172"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4231,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed-client"
-version = "6.0.0-rc.171"
+version = "6.0.0-rc.172"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4701,35 +4666,6 @@ dependencies = [
  "thread_local",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "trackable"
-version = "0.2.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b98abb9e7300b9ac902cc04920945a874c1973e08c310627cc4458c04b70dd32"
-dependencies = [
- "trackable 1.3.0",
- "trackable_derive",
-]
-
-[[package]]
-name = "trackable"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b15bd114abb99ef8cee977e517c8f37aee63f184f2d08e3e6ceca092373369ae"
-dependencies = [
- "trackable_derive",
-]
-
-[[package]]
-name = "trackable_derive"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebeb235c5847e2f82cfe0f07eb971d1e5f6804b18dac2ae16349cc604380f82f"
-dependencies = [
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
