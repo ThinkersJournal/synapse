@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.158): spec to roadmap audit
+
+`docs/SPEC_ROADMAP_AUDIT_2026-10-24.md`: every unmet or deferred item in `docs/superpowers/specs/` is now a ROADMAP row (new rows 32-35, plus row 36 for the ConfigurAnt adoption), points to an existing row or issue, or is recorded as not planned. No code.
+
 ### Chore (rc.157): nine unused dependencies removed (#61)
 
 `ahash`, `async-smtp`, `blake3`, `config`, `igd`, `rustls-native-certs`, `stun_codec`, `syn` and `sysinfo` had no use in `src`, `tests`, `examples` or `crates` (`sysinfo` appeared only in two comments). They are gone from `Cargo.toml` and from the `minimal`, `core`, `crypto`, `nat_traversal`, `email` and `native-base` feature lists; no feature name changed. `Cargo.lock` drops 50 packages and adds none. `cargo check -p synapse --no-default-features --features core` already failed before this change (it needs `axum`), unchanged.
