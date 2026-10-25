@@ -159,9 +159,11 @@ impl KeyManager {
     /// Verify a signature.
     ///
     /// The algorithm is chosen from the public key's length: 32 bytes is Ed25519,
-    /// 33 or 65 bytes is ECDSA P-256. `Ok(false)` means the signature does not
-    /// verify; any other key length is an `Err`, because it names no algorithm
-    /// this function can check.
+    /// 65 bytes is an uncompressed ECDSA P-256 point. `Ok(false)` means the
+    /// signature does not verify; any other key length is an `Err`, because it
+    /// names no algorithm this function can check. A 33-byte compressed P-256
+    /// key is refused by name: ring parses only uncompressed points, and an
+    /// `Ok(false)` would read as a forged signature.
     pub async fn verify(
         &self,
         public_key: &[u8],
@@ -180,7 +182,10 @@ impl KeyManager {
                 let sig = Signature::from_bytes(&sig_array);
                 Ok(verifying_key.verify(data, &sig).is_ok())
             }
-            33 | 65 => {
+            33 => Err(anyhow::anyhow!(
+                "compressed P-256 public keys (33 bytes) are not supported: give the uncompressed point (65 bytes)"
+            )),
+            65 => {
                 let public_key_input = signature::UnparsedPublicKey::new(
                     &signature::ECDSA_P256_SHA256_FIXED,
                     public_key,
@@ -188,7 +193,7 @@ impl KeyManager {
                 Ok(public_key_input.verify(data, signature).is_ok())
             }
             n => Err(anyhow::anyhow!(
-                "unsupported public key format ({n} bytes): expected Ed25519 (32) or ECDSA P-256 (33 or 65)"
+                "unsupported public key format ({n} bytes): expected Ed25519 (32) or uncompressed ECDSA P-256 (65)"
             )),
         }
     }

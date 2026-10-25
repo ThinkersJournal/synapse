@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
-### Test (rc.165): an unauthenticated request body is bounded before auth (ROADMAP row 37a)
+### Fix and tests (rc.165): deferred minors verified (ROADMAP rows 37-40)
 
-Handlers take their body before `authed()` runs, so an unauthenticated caller's body is read first; what bounds it is axum's default body limit (2 MiB). `an_unauthenticated_body_is_bounded_before_auth` pins that: 1 KiB gets the plain 401, 3 MiB is refused (413 or a closed connection) and never reaches auth. Observed to fail with the limit disabled. No behaviour change.
+**Behaviour change:** `KeyManager::verify` with a 33-byte public key now returns an `Err` ("compressed P-256 public keys (33 bytes) are not supported") instead of `Ok(false)`: ring parses only the uncompressed point, so the old answer rejected a valid signature silently (the legacy `synapse::synapse::auth` tree; nothing forged was ever accepted). Tests, no behaviour change: `an_unauthenticated_body_is_bounded_before_auth` (axum's 2 MiB default limit bounds a body read before auth; observed to fail with the limit disabled) and `describe_keeps_paths_out_of_keystore_and_io_failures` (observed to fail when the I/O arm echoes the error). ROADMAP rows 37-40 now say what is done, what is by design, and what is open.
 
 ### Feature (rc.164): `/v1/health` reports the mailbox's state in a separate field
 

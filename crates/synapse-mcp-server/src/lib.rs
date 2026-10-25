@@ -615,7 +615,36 @@ impl SynapseMcpServer {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_text;
+    use super::{describe, safe_text};
+    use synapse::keystore::KeystoreError;
+    use synapsed_client::MailError;
+
+    /// ROADMAP row 39: `describe` is what keeps a key path out of a tool result. Its two fixed-text arms
+    /// (a keystore refusal, an I/O failure) must not echo what the underlying error says, and every
+    /// other error passes through unchanged (control: the fixed text is not applied to everything).
+    #[test]
+    fn describe_keeps_paths_out_of_keystore_and_io_failures() {
+        let secret_path = r"C:\Users\someone\synapse\roles\lane.key";
+        let io = MailError::Io(std::io::Error::other(format!(
+            "{secret_path}: access denied"
+        )));
+        let shown = describe(&io);
+        assert_eq!(shown, "a local file operation failed");
+        assert!(!shown.contains("lane.key") && !shown.contains("access denied"));
+
+        let keystore = MailError::Keystore(KeystoreError::InvalidName);
+        assert_eq!(
+            describe(&keystore),
+            "the identity store refused: check the role and home with `synapse id`"
+        );
+
+        let other = MailError::NoDaemon("not running".into());
+        assert_eq!(
+            describe(&other),
+            other.to_string(),
+            "control: other errors pass through"
+        );
+    }
 
     /// #106: see the same test in `synapse-claude-channel`.
     #[test]
