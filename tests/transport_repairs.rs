@@ -3367,6 +3367,77 @@ async fn quic_evict_drops_the_pooled_connection_and_the_next_send_reopens_one() 
     );
 }
 
+/// QUIC pool eviction slice 2: the manager's `on_verification_failure` call evicts the pooled
+/// connection for the failing source, the next send reopens one, and a second failure from the same
+/// address inside the cooldown does not evict again (a peer pushing bad messages cannot make us
+/// reconnect in a loop). Spec: docs/superpowers/specs/2026-10-24-quic-pool-eviction-design.md.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_verification_failure_evicts_once_per_cooldown_and_the_next_send_reopens() {
+    use synapse::transport::abstraction::VerificationFailure;
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let alice_quic = QuicTransportImpl::new(&HashMap::new())
+        .await
+        .expect("construct a raw QUIC sender")
+        .with_evict_cooldown(Duration::from_millis(600));
+    let bob_source = pair
+        .bob_target()
+        .address
+        .clone()
+        .expect("bob_target has an address");
+
+    alice_quic
+        .send_message(&pair.bob_target(), &pair.signed(b"one"))
+        .await
+        .expect("send 1");
+    assert_eq!(alice_quic.pool_size().await, 1);
+
+    // Control first: a source that is not an address, and one that is not pooled, change nothing.
+    alice_quic
+        .on_verification_failure("not an address", VerificationFailure::Rejected)
+        .await;
+    alice_quic
+        .on_verification_failure("127.0.0.1:9", VerificationFailure::Rejected)
+        .await;
+    assert_eq!(alice_quic.pool_size().await, 1, "nothing to evict yet");
+
+    alice_quic
+        .on_verification_failure(&bob_source, VerificationFailure::Rejected)
+        .await;
+    assert_eq!(alice_quic.pool_size().await, 0, "a rejection evicts");
+
+    alice_quic
+        .send_message(&pair.bob_target(), &pair.signed(b"two"))
+        .await
+        .expect("send 2 reopens");
+    assert_eq!(alice_quic.pool_size().await, 1, "the next send reopens");
+
+    alice_quic
+        .on_verification_failure(&bob_source, VerificationFailure::Unopenable)
+        .await;
+    assert_eq!(
+        alice_quic.pool_size().await,
+        1,
+        "a second failure inside the cooldown does not evict"
+    );
+
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    alice_quic
+        .on_verification_failure(&bob_source, VerificationFailure::Unopenable)
+        .await;
+    assert_eq!(
+        alice_quic.pool_size().await,
+        0,
+        "after the cooldown a failure evicts again"
+    );
+}
+
 /// `idle_timeout_ms` = 0 or unparseable must be refused, not silently replaced by the default.
 #[tokio::test]
 async fn quic_refuses_an_unparseable_or_zero_idle_timeout() {

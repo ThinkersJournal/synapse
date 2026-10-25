@@ -18,8 +18,9 @@
 //! releases the lock, connects, then re-acquires it to insert, keeping a connection a racing
 //! sender already established instead of overwriting it. A background sweep evicts entries idle
 //! for longer than [`IDLE_TIMEOUT_MS_KEY`]; the next send to that peer transparently reopens a
-//! connection. [`QuicTransportImpl::evict`] removes a specific peer's entry on demand (wiring it
-//! to an application-layer verification failure is out of scope here).
+//! connection. [`QuicTransportImpl::evict`] removes a specific peer's entry on demand, and the
+//! manager calls [`Transport::on_verification_failure`] when a message from an address fails
+//! verification, which evicts that address (at most once per [`DEFAULT_EVICT_COOLDOWN_MS`]).
 //!
 //! # Delivery claim
 //!
@@ -76,7 +77,7 @@
 use super::abstraction::{
     self, ConnectivityResult, DeliveryConfirmation, DeliveryReceipt, IncomingMessage, RawInbox,
     Transport, TransportCapabilities, TransportEstimate, TransportFactory, TransportMetrics,
-    TransportStatus, TransportTarget, TransportType,
+    TransportStatus, TransportTarget, TransportType, VerificationFailure,
 };
 use crate::error::{Result, SynapseError};
 use crate::types::SecureMessage;
@@ -89,6 +90,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 pub const LOCAL_PORT_KEY: &str = "local_port";
+
+/// The shortest time between two verification-failure evictions of the same address: 5 seconds. A
+/// peer able to push bad messages down a pooled connection could otherwise make us reconnect on
+/// every one. See [`QuicTransportImpl::with_evict_cooldown`].
+pub const DEFAULT_EVICT_COOLDOWN_MS: u64 = 5_000;
 
 /// The config key for how long, in milliseconds, a pooled connection may go unused before the
 /// idle sweep evicts it. See the module documentation.
@@ -196,6 +202,12 @@ pub struct QuicTransportImpl {
     pool: ConnectionPool,
     /// How long a pooled connection may go unused before the idle sweep evicts it.
     idle_timeout: Duration,
+    /// The shortest time between two verification-failure evictions of one address.
+    evict_cooldown: Duration,
+    /// When each address was last evicted for a verification failure. Entries older than
+    /// `evict_cooldown` are dropped on every call, so it holds at most the addresses evicted
+    /// within one cooldown.
+    last_evicted: std::sync::Mutex<HashMap<SocketAddr, Instant>>,
     /// The largest message, in bytes of serialized JSON, `send_message` will send and a stream's
     /// `read_to_end` will accept.
     max_message_size: usize,
@@ -305,6 +317,8 @@ impl QuicTransportImpl {
             is_running: Arc::new(Mutex::new(false)),
             pool: Arc::new(Mutex::new(HashMap::new())),
             idle_timeout,
+            evict_cooldown: Duration::from_millis(DEFAULT_EVICT_COOLDOWN_MS),
+            last_evicted: std::sync::Mutex::new(HashMap::new()),
             max_message_size,
             queue_budget: Arc::new(Semaphore::new(max_queued_bytes)),
             send_timeout,
@@ -316,6 +330,12 @@ impl QuicTransportImpl {
             bytes_received: Arc::new(AtomicU64::new(0)),
             receive_failures: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// Replaces the verification-failure eviction cooldown ([`DEFAULT_EVICT_COOLDOWN_MS`]).
+    pub fn with_evict_cooldown(mut self, cooldown: Duration) -> Self {
+        self.evict_cooldown = cooldown;
+        self
     }
 
     fn local_addr(&self) -> Result<SocketAddr> {
@@ -363,12 +383,10 @@ impl QuicTransportImpl {
 
     /// Evict a pooled connection to `addr` -- for when a message received over it fails
     /// application-layer verification, so a connection that has started reaching the wrong peer
-    /// (NAT rebinding, address reuse) is not silently reused again. **Not currently called by
-    /// anything**: `TransportManager` has no way to reach a concrete `QuicTransportImpl` from its
-    /// `Box<dyn Transport>` storage to invoke this on a verification failure. This method exists
-    /// and is directly tested; the wiring is tracked separately as a deliberate cross-transport
-    /// change (see `docs/superpowers/specs/2026-09-22-quic-transport-design.md` §3, condition 3,
-    /// and <https://github.com/ciresnave/synapse/issues/49>).
+    /// (NAT rebinding, address reuse) is not silently reused again. Called by
+    /// [`Transport::on_verification_failure`], which adds the per-address cooldown; calling it
+    /// directly has none. See `docs/superpowers/specs/2026-10-24-quic-pool-eviction-design.md`
+    /// and <https://github.com/ciresnave/synapse/issues/49>.
     pub async fn evict(&self, addr: SocketAddr) {
         if let Some((conn, _)) = self.pool.lock().await.remove(&addr) {
             conn.close(0u32.into(), b"evicted: verification failure");
@@ -851,6 +869,30 @@ impl Transport for QuicTransportImpl {
         self.queue_budget.close();
         *running = false;
         Ok(())
+    }
+
+    /// Evicts the pooled connection to `source` after a message from it failed verification, at
+    /// most once per [`DEFAULT_EVICT_COOLDOWN_MS`] per address. A `source` that is not a socket
+    /// address is ignored.
+    async fn on_verification_failure(&self, source: &str, reason: VerificationFailure) {
+        let Ok(addr) = source.parse::<SocketAddr>() else {
+            tracing::debug!(
+                source,
+                ?reason,
+                "QUIC: failure source is not an address; ignored"
+            );
+            return;
+        };
+        {
+            let now = Instant::now();
+            let mut last = self.last_evicted.lock().unwrap();
+            last.retain(|_, at| now.duration_since(*at) < self.evict_cooldown);
+            if last.contains_key(&addr) {
+                return;
+            }
+            last.insert(addr, now);
+        }
+        self.evict(addr).await;
     }
 
     async fn status(&self) -> TransportStatus {

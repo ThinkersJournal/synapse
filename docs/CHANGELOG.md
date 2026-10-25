@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.176): QUIC evicts the pooled connection when a message from that address fails verification (slice 2; Part of #49)
+
+`QuicTransportImpl` implements `Transport::on_verification_failure`: the source is parsed as a socket address (anything else is ignored) and the pooled connection to it is evicted, at most once per address per 5 s (`DEFAULT_EVICT_COOLDOWN_MS`, `with_evict_cooldown`), so a peer sending bad messages cannot make us reconnect in a loop. The next send reopens a connection. This closes the gap in the QUIC spec's condition 3: `evict` was tested but called by nothing.
+
 ### Added (rc.175): `Transport::on_verification_failure` (QUIC pool eviction, slice 1; Part of #49)
 
 A new `Transport` method, default no-op, so no implementor breaks, and a `#[non_exhaustive]` `VerificationFailure { Rejected, Unopenable }`. `TransportManager::receive_messages` records `(transport, source, kind)` where it already records a knock or an unopenable message, and calls the hook after its locks are dropped. A sender nobody pinned (`UnknownSender`, `UnknownIssuer`) is not reported: it says the trust store lacks them, nothing about the connection. No transport implements the hook yet; QUIC follows in slice 2.
