@@ -1135,8 +1135,11 @@ async fn health(
     bound: SocketAddr,
     uri: Uri,
 ) -> Result<Response, ApiError> {
+    // `ok` answers "is a synapsed here"; a non-ok reply reads as a squat to clients, which then start
+    // another daemon. The mailbox's own state is a separate field (ROADMAP row 37c).
     let mut reply = json!({
         "ok": true,
+        "mailbox": mailbox_state(&shared.mailbox),
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": shared.started_at.to_rfc3339(),
     });
@@ -1159,6 +1162,19 @@ async fn health(
         return Ok(delayed(axum::Json(reply).into_response(), delay));
     }
     Ok(axum::Json(reply).into_response())
+}
+
+/// The mailbox as `/v1/health` reports it: `ok`; `poisoned` (a failed write left memory and store
+/// disagreeing, every call refuses until a restart); `unavailable` (the lock itself is poisoned);
+/// `busy` (a handler holds it right now). Never waits for the lock: a health check that hangs behind
+/// a stuck store write would read as a dead daemon.
+fn mailbox_state<S: MailStore>(mailbox: &Mutex<Mailbox<S>>) -> &'static str {
+    match mailbox.try_lock() {
+        Ok(mb) if mb.is_poisoned() => "poisoned",
+        Ok(_) => "ok",
+        Err(std::sync::TryLockError::WouldBlock) => "busy",
+        Err(std::sync::TryLockError::Poisoned(_)) => "unavailable",
+    }
 }
 
 #[derive(Deserialize)]
@@ -2117,6 +2133,33 @@ mod tests {
         assert_eq!(row(&c.health), (300, 10, 2_000, 4, u32::MAX));
         assert_eq!(row(&c.misuse), (20, 250, 10_000, 10_000, u32::MAX));
         assert_eq!(c.event_interval, std::time::Duration::from_secs(1));
+    }
+
+    /// ROADMAP row 37c: `/v1/health` says what state the mailbox is in without ever failing the probe
+    /// (a non-ok reply reads as a squat to clients). It never waits on the lock either.
+    #[test]
+    fn mailbox_state_reads_the_lock_without_waiting() {
+        use synapse::mailbox::MemoryStore;
+        let mailbox = Mutex::new(
+            Mailbox::open_volatile(MemoryStore::new(), MailConfig::default(), Utc::now()).unwrap(),
+        );
+        assert_eq!(mailbox_state(&mailbox), "ok");
+        {
+            let _held = mailbox.lock().unwrap();
+            assert_eq!(
+                mailbox_state(&mailbox),
+                "busy",
+                "held by a handler: reported, not waited for"
+            );
+        }
+        let poisoned = Arc::new(mailbox);
+        let holder = Arc::clone(&poisoned);
+        let _ = std::thread::spawn(move || {
+            let _guard = holder.lock().unwrap();
+            panic!("poison the mutex on purpose");
+        })
+        .join();
+        assert_eq!(mailbox_state(&poisoned), "unavailable");
     }
 
     /// #77 D2: `locked` on a poisoned mutex is 503 `store_unavailable`; on a healthy one it yields
