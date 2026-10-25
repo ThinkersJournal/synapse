@@ -18,8 +18,8 @@ name = "synapsed"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.171" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.171" }
+synapse = { path = "../..", version = "6.0.0-rc.172" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.172" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
 tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -29,7 +29,7 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 ring = "0.17"
 uuid = { version = "1.6", features = ["v4"] }
 configurant = "0.2.34"
-synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.171", optional = true }
+synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.172", optional = true }
 
 [features]
 # Off by default: serve the mailbox from PersistAnt SQLite (WAL, synchronous=FULL; declared Machine)
@@ -37,7 +37,7 @@ synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version =
 sqlite-store = ["dep:synapse-mailbox-persistant"]
 
 [dev-dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.171", features = ["mailbox-conformance"] }
-synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.171" }
+synapse = { path = "../..", version = "6.0.0-rc.172", features = ["mailbox-conformance"] }
+synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.172" }
 reqwest = { version = "0.13.5", features = ["json"] }
 tempfile = "3.0"
