@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs (rc.158): spec to roadmap audit
 
-`docs/SPEC_ROADMAP_AUDIT_2026-10-24.md`: every unmet or deferred item in `docs/superpowers/specs/` is now a ROADMAP row (new rows 32-35), points to an existing row or issue, or is recorded as not planned. No code.
+`docs/SPEC_ROADMAP_AUDIT_2026-10-24.md`: every unmet or deferred item in `docs/superpowers/specs/` is now a ROADMAP row (new rows 32-35, plus row 36 for the ConfigurAnt adoption), points to an existing row or issue, or is recorded as not planned. No code.
 
 ### Chore (rc.157): nine unused dependencies removed (#61)
 

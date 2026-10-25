@@ -26,6 +26,7 @@ checked against `origin/main` with the command or file named, unless it says *no
 | `2026-10-07-brute-force-hardening-design.md` section 6 | Deleting the old `synapse::api`, `blockchain`, `services` trees is "the FAM/Synapse merge's call" | Row 28, #20 (FAM-merge checklist) |
 | `2026-10-09-fetch-scan.md` | Follow-up B, the READY table | Row 24, #110 (conditional on the soak) |
 | `2026-10-23-shared-state-design.md` | Q1 to Q5 are ruled and S1 to S4b shipped (#241, #243, #244, #245, #246, #247) | Row 30 |
+| (not a spec item) | ConfigurAnt adoption in `synapsed`, waiting on a configurant publish | Row 36 |
 
 ## Closed or answered since the spec
 
