@@ -1126,7 +1126,7 @@ fn forge_stub() -> (String, Seen) {
                 .contains("authorization: bearer");
             log.lock().unwrap().push((path.clone(), auth));
             let (status, body) = if path == "/api/v1/crates/synapse" {
-                (200, r#"{"crate":{"max_version":"6.0.0-rc.161"}}"#)
+                (200, r#"{"crate":{"max_version":"6.0.0-rc.162"}}"#)
             } else if path == "/repos/o/r/pulls/7" {
                 (
                     200,
@@ -1204,7 +1204,7 @@ fn the_checker_reports_forge_facts_and_the_daemon_derives_them() {
     let shown: Value =
         serde_json::from_str(&home.ok(&["state", "show", "--role", "alpha", "T-1"])).unwrap();
     let verify = &shown["derived"]["verify"];
-    assert_eq!(verify[0]["satisfied"], true, "6.0.0-rc.161 >= 6.0.0-rc.145");
+    assert_eq!(verify[0]["satisfied"], true, "6.0.0-rc.162 >= 6.0.0-rc.145");
     assert_eq!(verify[1]["satisfied"], true, "merged");
     assert_eq!(verify[2]["satisfied"], true, "a 404 is absent");
     assert_eq!(verify[3]["satisfied"], Value::Null, "a 500 answers nothing");
