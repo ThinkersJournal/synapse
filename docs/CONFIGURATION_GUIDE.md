@@ -29,6 +29,28 @@ Names (accounts and roles) are 1 to 64 characters: letters, digits, `-` and `_`.
 the adapter's environment instead (for Claude Code, the `env` block of its `.mcp.json` entry; see
 `docs/PILOT_T0_RUNBOOK.md` section 3a).
 
+## `synapsed.toml` (since rc.161)
+
+The four `synapsed` settings above can also be set in `<home>/synapsed.toml`; the environment wins over the file,
+the file over the defaults. `SYNAPSE_HOME` is not in the file (the file lives in the home). Read through ConfigurAnt
+0.2.34; the schema is `crates/synapsed/synapsed.schema.toml`.
+
+```toml
+[listen]
+addr = "127.0.0.1:7920"      # SYNAPSE_ADDR
+[launch]
+roles = ["agentlife-launcher"] # SYNAPSE_LAUNCHER_ROLES
+[alert]
+roles = ["pm"]                 # SYNAPSE_ALERT_ROLES
+[storage]
+id = "sqlite"                  # SYNAPSE_MAILBOX_STORE (deprecated; prefer `synapse storage use`)
+[liveness]
+role_ttl_days = 30             # a role idle this long is retired; file only, at least 1
+```
+
+An unknown key, a file that does not parse, an address that is not one, or a bad role name makes `synapsed` exit 2
+naming the key. An absent file changes nothing.
+
 ## Mailbox limits (compiled in)
 
 `synapsed` opens its mailbox with `MailConfig::default()`; there is no runtime setting for any of these.

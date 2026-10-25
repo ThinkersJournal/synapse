@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.161): `synapsed` reads its settings through ConfigurAnt; `<home>/synapsed.toml`
+
+`synapsed` now takes `SYNAPSE_ADDR`, `SYNAPSE_MAILBOX_STORE`, `SYNAPSE_LAUNCHER_ROLES` and `SYNAPSE_ALERT_ROLES` through `configurant` 0.2.34 (new dependency, by crates.io version; `Cargo.lock` gains `configurant`, `toml`, `toml_datetime`, `toml_edit`). The environment works exactly as before, and the same four values can be set in an optional `<home>/synapsed.toml` (`[listen] addr`, `[launch] roles`, `[alert] roles`, `[storage] id`); the environment wins. An unknown key or an unparsable file exits 2 naming it. New: `synapsed::settings` (pure, tested without a process) and `crates/synapsed/synapsed.schema.toml`, derived from configurant's `examples/synapsed.toml` without `home.dir` (the file lives in the home), without the `persistant` provider on `storage.id` (it would refuse `sqlite`, which the running pilot pins) and without `storage.endpoint` (nothing reads it). The empty `SYNAPSE_MAILBOX_STORE` is still no pin. The role-retirement ttl, a 30-day constant since L1, is now `[liveness] role_ttl_days` (file only, at least 1; `Daemon::with_role_ttl_days`). The error text for a bad address now reads `listen.addr "..." is not an address (set SYNAPSE_ADDR, or listen.addr in synapsed.toml)`. ROADMAP row 36; new ROADMAP row 41 (efficient AI-to-AI communication, plan first).
+
 ### Test (rc.160): the channel push never claims a message is verified or sealed
 
 A guard test in `synapse-claude-channel`: the text built from a daemon payload that carries no verification or sealing field must not contain either word (ROADMAP row 35, from the 2026-10-12 FAM-vs-adapter note). Observed to fail when the word is injected into the rendered text. No behaviour change.
