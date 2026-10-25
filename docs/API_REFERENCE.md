@@ -45,7 +45,7 @@ Bound to a loopback address only (it refuses any other). Bodies are JSON and **d
 | route | method | body fields | notes |
 |---|---|---|---|
 | `/v1/health` | GET | none | proves the instance with an HMAC over a client challenge; not a liveness-only ping |
-| `/v1/claim` | POST | `audience?`, `chain_pem`, `nonce_hex`, `signed_at`, `signature_b64` | role claim; a failed claim is counted and answered after a delay |
+| `/v1/claim` | POST | `audience?`, `chain_pem`, `nonce_hex`, `signed_at`, `signature_b64` | role claim; a failed claim is counted and answered after a delay; the session it returns expires after `[session] ttl_hours` (24) unused: 401 `session_expired`, claim again |
 | `/v1/send` | POST | `to`, `message_id?`, `body_b64` | `queued` or `duplicate`; stored id is `<sender>/<client id>` (client id at most 100 bytes). 404 `unknown_recipient` for a role that never claimed or a bare name (the CLI and MCP tool qualify a bare name with the sender's account first); 410 `recipient_retired` for a retired role, nothing queued (mail queued before the retirement is kept) |
 | `/v1/fetch` | POST | `max?`, `lease_secs?`, `exclude?` | `max` defaults to 10, clamped to 100; `exclude` at most 100 ids of at most 256 bytes: passed over, not leased |
 | `/v1/ack` | POST | `message_id` | `removed` or `already_acked` |

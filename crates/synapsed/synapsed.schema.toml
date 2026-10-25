@@ -44,6 +44,13 @@ restart = true
 description = "a role idle this many days is retired (hidden from list, kept); at least 1"
 
 [[value]]
+key = "session.ttl_hours"
+type = "int"
+default = 24
+restart = true
+description = "a session unused this many hours expires and its holder claims the role again; every call renews it; at least 1"
+
+[[value]]
 key = "alert.roles"
 type = "list"
 default = []

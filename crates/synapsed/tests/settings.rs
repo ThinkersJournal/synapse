@@ -27,6 +27,21 @@ fn nothing_set_gives_the_defaults() {
         s.role_ttl_days, 30,
         "ROLE_TTL, the L1 constant, is the default"
     );
+    assert_eq!(
+        s.session_ttl_hours, 24,
+        "a session idle for a day expires (PM 2026-10-25)"
+    );
+}
+
+#[test]
+fn the_session_ttl_is_set_in_the_file_and_must_be_at_least_an_hour() {
+    let file = |value: &str| format!("[session]\nttl_hours = {value}\n");
+    let s = settings(&[], Some(&file("2"))).unwrap();
+    assert_eq!(s.session_ttl_hours, 2);
+    for bad in ["0", "-1", "\"x\""] {
+        let e = settings(&[], Some(&file(bad))).unwrap_err();
+        assert!(e.contains("ttl_hours"), "{bad}: {e}");
+    }
 }
 
 #[test]
