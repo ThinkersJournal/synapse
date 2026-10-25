@@ -157,7 +157,34 @@ pub async fn push_once<N: Notifier>(
 
 #[cfg(test)]
 mod tests {
-    use super::escape;
+    use super::{channel_params, escape};
+    use serde_json::json;
+    use synapse_mcp_server::MessageView;
+
+    /// The adapter shows the model what the daemon sent and nothing it did not: the daemon payload
+    /// carries no verification or sealing field, so no text built from it may say a message is
+    /// "verified" or "sealed" (the 2026-10-12 FAM-vs-adapter note, section 3: a layer that is not
+    /// carried must not be claimed). If the daemon ever sends such a field, this test is the place
+    /// to say what the adapter may then render.
+    #[test]
+    fn the_rendered_push_never_claims_a_message_is_verified_or_sealed() {
+        let wire = json!({
+            "message_id": "bob@acct/1",
+            "from": "bob@acct",
+            "body_b64": "aGVsbG8=",
+            "attempts": 1,
+            "enqueued_at": "2026-10-25T00:00:00Z",
+        });
+        let params = channel_params(&MessageView::from_wire(&wire));
+        let shown = params.to_string().to_lowercase();
+        for word in ["verified", "sealed"] {
+            assert!(!shown.contains(word), "the push says {word:?}: {params}");
+        }
+        assert!(
+            shown.contains("hello"),
+            "control: the body is rendered: {params}"
+        );
+    }
 
     /// #106: the bidi controls are format characters (Cf), not control characters (Cc), so
     /// `char::is_control` let them through and a sender could reorder how a body is displayed.
