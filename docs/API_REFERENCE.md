@@ -22,7 +22,8 @@ identity resolution; about 1,200 lines) was removed in rc.57 because most of its
 | `synapse requeue --role <role> <message_id>` | puts a dead message back in the inbox with its delivery count reset |
 | `synapse stats --role <role>` | per-role `sent`, `acked`, `redelivered`, `expired` since the daemon started, with `scope` and `since`, one JSON object per line |
 | `synapse list --role <role>` | every role the daemon knows, with presence and pending counts, one JSON object per line |
-| `synapse id grant --role <role> <state-read-all\|state-admin\|state-derive>` / `ungrant` | with the account key: give or take back an extra shared-state grant; it reaches the role's certificate when that is next made |
+| `synapse retire\|revive --role <caller> <target>` | needs `role-admin`: retire a role now (hidden from `list`, epoch and mail kept) or bring it back |
+| `synapse id grant --role <role> <state-read-all\|state-admin\|state-derive\|role-admin>` / `ungrant` | with the account key: give or take back an extra grant (shared state, or `role-admin`); it reaches the role's certificate when that is next made |
 | `synapse state new --role <role> --title <t> --party <p>... --owner <o> [--state s] [--notes n] [--verify FACT,OP,VALUE]... [--blocked-on T-n\|FACT,OP,VALUE]...` | create a shared-state record (you must be a party); prints it as JSON |
 | `synapse state show\|history --role <role> <T-n>` | one record, or its hash-chained history one entry per line |
 | `synapse state list --role <role> [--state a,b] [--party p]` | the records you may see, one JSON object per line |
@@ -57,6 +58,7 @@ Bound to a loopback address only (it refuses any other). Bodies are JSON and **d
 | `/v1/state/get`, `/v1/state/history` | GET | `?id=T-<n>` | a record, or its hash-chained history; a record the caller may not see answers `404` (`get`) or `403` (`history`) |
 | (mail from `daemon:state@<account>`) | | | every state write queues one message per other party, body `{"kind":"state","id","revision","changed_by","fields"}`: ids and field names only, never a title or note; message id `state:<id>:<revision>:<role>` so a crash cannot double it. Read the content with `/v1/state/get` |
 | `/v1/state/facts` | POST | `reports: [{fact, look}]` | the checker reports what it looked up (`look`: `{"found": v}`, `"absent"` or `{"failed": text}`); needs `state-derive`, which no other grant substitutes; a `fact` outside the registry is `400`. A failed look is never read as absent |
+| `/v1/roles/retire`, `/v1/roles/revive` | POST | `{"role": "<name>"}` | `role-admin` only: 403 without it, 404 for a role that never claimed; retiring twice succeeds |
 | `/v1/state/wanted` | GET | none | the distinct facts named by records that are not done or cancelled; `state-derive` only |
 | `/v1/state/list` | GET | `?state=a,b&party=p` | the records the caller may see: its own, or all with `state-read-all` / `state-admin` |
 | `/v1/state/patch` | POST | `id`, `expected_revision`, `patch` | compare-and-set; `409 stale_revision` changes nothing and carries `current` (the revision) and `record`; `403` is recorded as a `state_denied` security event |

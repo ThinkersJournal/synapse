@@ -90,6 +90,21 @@ enum Command {
         role: RoleArg,
         message_id: String,
     },
+    /// Retire a role now: it leaves `list` unless `--include-retired`, and keeps its epoch and its
+    /// queued mail. Needs the `role-admin` grant. A claim by the role itself brings it back.
+    Retire {
+        #[command(flatten)]
+        role: RoleArg,
+        /// The role to retire (a name, not `name@account`).
+        target: String,
+    },
+    /// Bring a retired role back and restart its idle clock. Needs the `role-admin` grant.
+    Revive {
+        #[command(flatten)]
+        role: RoleArg,
+        /// The role to revive (a name, not `name@account`).
+        target: String,
+    },
     /// Per-role message counters since this daemon started (a restart begins again from zero):
     /// `sent`, `acked`, `redelivered`, `expired`, one JSON object per line, each with the
     /// daemon's `scope` and `since`.
@@ -506,11 +521,14 @@ fn print_identity(identity: &synapse::keystore::RoleIdentity) {
 
 fn parse_grant(text: &str) -> Result<Permission, MailError> {
     match Permission::parse(text) {
-        Some(p @ (Permission::StateReadAll | Permission::StateAdmin | Permission::StateDerive)) => {
-            Ok(p)
-        }
+        Some(
+            p @ (Permission::StateReadAll
+            | Permission::StateAdmin
+            | Permission::StateDerive
+            | Permission::RoleAdmin),
+        ) => Ok(p),
         _ => Err(MailError::Usage(
-            "a grant is state-read-all, state-admin or state-derive".to_string(),
+            "a grant is state-read-all, state-admin, state-derive or role-admin".to_string(),
         )),
     }
 }
@@ -712,6 +730,30 @@ fn run(cli: Cli) -> Result<(), MailError> {
             println!(
                 "outcome: {}",
                 printable(reply["outcome"].as_str().unwrap_or(""))
+            );
+        }
+        Command::Retire { role, target } => {
+            let daemon = connect(&home, &role)?;
+            let reply = daemon.call(
+                &role.role,
+                "/v1/roles/retire",
+                Some(&json!({"role": target})),
+            )?;
+            println!(
+                "retired: {}",
+                printable(reply["role"].as_str().unwrap_or(""))
+            );
+        }
+        Command::Revive { role, target } => {
+            let daemon = connect(&home, &role)?;
+            let reply = daemon.call(
+                &role.role,
+                "/v1/roles/revive",
+                Some(&json!({"role": target})),
+            )?;
+            println!(
+                "revived: {}",
+                printable(reply["role"].as_str().unwrap_or(""))
             );
         }
         Command::Stats { role } => {

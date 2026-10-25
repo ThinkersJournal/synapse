@@ -758,6 +758,34 @@ impl<S: MailStore> Mailbox<S> {
         Ok(retired)
     }
 
+    /// Retire (`retire`) or revive a role at `now` and write the table through the store. Returns
+    /// whether the role exists (`false` writes nothing). Poisons the mailbox if the write fails.
+    pub fn set_role_retired(
+        &mut self,
+        global_id: &str,
+        retire: bool,
+        now: DateTime<Utc>,
+    ) -> Result<bool, MailError> {
+        self.live()?;
+        let found = if retire {
+            self.roles.retire(global_id, now)
+        } else {
+            self.roles.revive(global_id, now)
+        };
+        if !found {
+            return Ok(false);
+        }
+        let snapshot = self.roles.snapshot();
+        let written = self
+            .store
+            .write(&mut |txn| txn.set_roles(&snapshot).map_err(MailError::Store));
+        if let Err(e) = written {
+            self.poisoned = true;
+            return Err(e);
+        }
+        Ok(true)
+    }
+
     /// Lease up to `max` deliverable messages, oldest first. A message is deliverable when it has
     /// no lease, its lease expired, or its lease belongs to an older epoch (a takeover voids it).
     pub fn fetch(

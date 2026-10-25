@@ -817,6 +817,8 @@ impl Daemon {
             .route("/v1/waiting", get(waiting))
             .route("/v1/launch-result", post(launch_result))
             .route("/v1/launch-clear", post(launch_clear))
+            .route("/v1/roles/retire", post(role_retire))
+            .route("/v1/roles/revive", post(role_revive))
             .route("/v1/state/create", post(state_api::create))
             .route("/v1/state/get", get(state_api::get))
             .route("/v1/state/list", get(state_api::list))
@@ -1832,6 +1834,69 @@ async fn launch_clear(
     let global_id = format!("{}@{}", body.role, shared.account);
     let epoch = locked(&shared.launches)?.clear(&global_id);
     Ok(axum::Json(json!({ "epoch": epoch })).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoleBody {
+    role: String,
+}
+
+/// `POST /v1/roles/retire {role}`: retire a role now (hidden from `list`, kept). Needs
+/// `role-admin`. Retiring a retired role succeeds; an unknown role is 404.
+async fn role_retire(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    set_role_retired(state.0, headers, body, true)
+}
+
+/// `POST /v1/roles/revive {role}`: bring a retired role back. Needs `role-admin`.
+async fn role_revive(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    set_role_retired(state.0, headers, body, false)
+}
+
+fn set_role_retired(
+    shared: Arc<Shared>,
+    headers: HeaderMap,
+    body: Bytes,
+    retire: bool,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    if !session
+        .permissions
+        .contains(&synapse::certificate::Permission::RoleAdmin)
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "this role may not retire or revive roles",
+        ));
+    }
+    let body: RoleBody = parse(&headers, &body)?;
+    if !synapse::keystore::valid_name(&body.role) {
+        return Err(malformed("role"));
+    }
+    let global_id = format!("{}@{}", body.role, shared.account);
+    let found = locked(&shared.mailbox)?.set_role_retired(&global_id, retire, Utc::now())?;
+    if !found {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such role",
+        ));
+    }
+    eprintln!(
+        "synapsed: {} {global_id} (by {})",
+        if retire { "retired" } else { "revived" },
+        session.global_id
+    );
+    Ok(axum::Json(json!({ "role": global_id, "retired": retire })).into_response())
 }
 
 /// `list`'s entries. When the depths could not be read (a poisoned mailbox or a failed store),
