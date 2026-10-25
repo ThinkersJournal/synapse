@@ -26,6 +26,7 @@
 #[cfg(feature = "sqlite-store")]
 mod migration;
 
+pub mod settings;
 mod state_api;
 
 use std::collections::{BTreeMap, HashMap};
@@ -183,9 +184,9 @@ impl std::error::Error for DaemonError {}
 const STATE_FILE: &str = "state.redb";
 /// How recently a role must have been heard from to count as online.
 const ONLINE_WINDOW: chrono::Duration = chrono::Duration::seconds(90);
-/// A role idle this long is retired (hidden from `list`, kept): docs/ROLE_LIVENESS_DESIGN.md, the
-/// PM's ruling of 2026-10-24. A constant until the daemon has a config file to carry it.
-const ROLE_TTL: chrono::Duration = chrono::Duration::days(30);
+/// A role idle this many days is retired (hidden from `list`, kept) unless `synapsed.toml` says
+/// otherwise: docs/ROLE_LIVENESS_DESIGN.md, the PM's ruling of 2026-10-24.
+const DEFAULT_ROLE_TTL_DAYS: i64 = 30;
 const MAX_FETCH: usize = 100;
 /// The longest client-chosen message id; the stored id is `<sender>/<client id>` (review I1).
 const MAX_CLIENT_ID: usize = 100;
@@ -245,6 +246,8 @@ struct Shared {
     launches: Mutex<launch::Table>,
     /// How recently a role must have been heard from to count as online.
     online_window: chrono::Duration,
+    /// A role idle longer than this is retired by the sweep.
+    role_ttl: chrono::Duration,
 }
 
 /// How the daemon waits out an owed failure delay before answering. The default sleeps on the tokio
@@ -670,6 +673,7 @@ impl Daemon {
                 launcher: LauncherConfig::default(),
                 launches: Mutex::new(launch::Table::new(started_at)),
                 online_window: ONLINE_WINDOW,
+                role_ttl: chrono::Duration::days(DEFAULT_ROLE_TTL_DAYS),
             },
         })
     }
@@ -723,6 +727,14 @@ impl Daemon {
     #[must_use]
     pub fn with_launcher(mut self, launcher: LauncherConfig) -> Daemon {
         self.shared.launcher = launcher;
+        self
+    }
+
+    /// Sets how many days idle retires a role (default 30, at least 1). Call after `open`, before
+    /// `serve`.
+    #[must_use]
+    pub fn with_role_ttl_days(mut self, days: u32) -> Daemon {
+        self.shared.role_ttl = chrono::Duration::days(i64::from(days.max(1)));
         self
     }
 
@@ -782,12 +794,12 @@ impl Daemon {
                         .unwrap_or_default();
                     if let Ok(mut mb) = shared.mailbox.lock() {
                         let _ = mb.sweep(now);
-                        match mb.maintain_roles(&seen, now, ROLE_TTL) {
+                        match mb.maintain_roles(&seen, now, shared.role_ttl) {
                             Ok(retired) => {
                                 for role in retired {
                                     eprintln!(
                                         "synapsed: retired {role}: idle for more than {} days",
-                                        ROLE_TTL.num_days()
+                                        shared.role_ttl.num_days()
                                     );
                                 }
                             }

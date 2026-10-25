@@ -1,0 +1,51 @@
+# ConfigurAnt schema for `synapsed`: the settings it reads from the environment, which a
+# `<home>/synapsed.toml` can now set too (the environment wins). Derived from configurant 0.2.34's
+# `examples/synapsed.toml` (same owner, MIT OR Apache-2.0) with three differences, each deliberate:
+#   - `home.dir` is left out: the file lives in the home, so the home is found first (SYNAPSE_HOME or the
+#     platform default) and cannot come from the file;
+#   - `storage.id` has no `provider = "persistant"`: with that module unregistered, ConfigurAnt refuses
+#     every id but the default, which would break the pinned `SYNAPSE_MAILBOX_STORE=sqlite` of the
+#     running pilot; the ids are checked by `synapsed` itself, as before;
+#   - `storage.endpoint` is left out: nothing in `synapsed` reads it yet.
+# Nothing here is a secret.
+
+[project]
+name = "synapsed"
+version = "0.1.0"
+summary = "The Synapse daemon: where it listens, who it alerts, which mailbox store it opens"
+schema_version = 1
+
+[[value]]
+key = "listen.addr"
+type = "string"
+default = "127.0.0.1:7920"
+env = "SYNAPSE_ADDR"
+description = "socket address synapsed listens on, host:port (loopback only; a value that is not an address is refused)"
+
+[[value]]
+key = "storage.id"
+type = "string"
+env = "SYNAPSE_MAILBOX_STORE"
+restart = true
+description = "pin the mailbox store backend: `redb`, or `sqlite` in a build with the sqlite-store feature (deprecated: record a store with `synapse storage use`)"
+
+[[value]]
+key = "launch.roles"
+type = "list"
+default = []
+env = "SYNAPSE_LAUNCHER_ROLES"
+description = "roles whose lanes may be launched on a message; empty means launch signals are OFF"
+
+[[value]]
+key = "liveness.role_ttl_days"
+type = "int"
+default = 30
+restart = true
+description = "a role idle this many days is retired (hidden from list, kept); at least 1"
+
+[[value]]
+key = "alert.roles"
+type = "list"
+default = []
+env = "SYNAPSE_ALERT_ROLES"
+description = "roles that receive security alerts as mail"
