@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.155): role liveness L2, `role-admin`, `synapse retire` and `synapse revive`
+
+A new grant, `role-admin` (`Permission::RoleAdmin`; `synapse id grant --role pm role-admin`), lets a role retire and revive others: `POST /v1/roles/retire` and `/v1/roles/revive` with `{"role": "<name>"}`, and `synapse retire|revive <name>`. Without the grant the answer is 403, a role that never claimed is 404, retiring twice succeeds. Retiring leaves the epoch and queued mail; revive clears `retired_at` and restarts the idle clock; a claim by the role itself also revives it. **Breaking:** `Permission` has a new variant. New: `Roles::retire`, `Roles::revive`, `Mailbox::set_role_retired`. Slice L2 of `docs/ROLE_LIVENESS_DESIGN.md`.
+
 ### Feature (rc.154): role liveness L1, idle roles are retired and hidden from `list`
 
 **Breaking:** `synapse::roles::RoleRecord` has two new public fields, `last_seen` and `retired_at` (both default when absent, so stored state loads unchanged). A role whose last activity (`last_seen`, else `claimed_at`) is more than 30 days old is retired by the daemon's sweep: `retired_at` is set, and `list` leaves it out unless asked (`GET /v1/list?include_retired=true`, `synapse list --include-retired`). Nothing is deleted: the epoch and queued mail stay, and a valid claim revives the role. Sightings are written at most hourly per role, because presence is in memory and a restart would otherwise make every role look idle since its claim. `Roles::note_seen`, `Roles::retire_idle` and `Mailbox::maintain_roles` are new. The ttl is a daemon constant (30 days) until the daemon has a config file. Design: `docs/ROLE_LIVENESS_DESIGN.md` (slice L1 of three).

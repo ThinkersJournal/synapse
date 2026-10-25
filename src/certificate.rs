@@ -41,6 +41,9 @@ pub enum Permission {
     StateAdmin,
     /// Shared state: write derived facts. Held only by the checker role.
     StateDerive,
+    /// Role liveness: retire and revive roles (`/v1/roles/retire`, `/v1/roles/revive`). Held only
+    /// by the PM role.
+    RoleAdmin,
     /// A consumer-defined grant. Always begins `x-`; Synapse carries it and never interprets it.
     Extension(String),
 }
@@ -56,6 +59,7 @@ impl Permission {
             Permission::StateReadAll => "state-read-all".to_string(),
             Permission::StateAdmin => "state-admin".to_string(),
             Permission::StateDerive => "state-derive".to_string(),
+            Permission::RoleAdmin => "role-admin".to_string(),
             Permission::Extension(text) => text.clone(),
         }
     }
@@ -72,6 +76,7 @@ impl Permission {
             "state-read-all" => Some(Permission::StateReadAll),
             "state-admin" => Some(Permission::StateAdmin),
             "state-derive" => Some(Permission::StateDerive),
+            "role-admin" => Some(Permission::RoleAdmin),
             other if other.starts_with("x-") => Some(Permission::Extension(other.to_string())),
             _ => None,
         }

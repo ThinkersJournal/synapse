@@ -503,3 +503,28 @@ fn state_persisted_before_liveness_still_loads() {
         "claimed_at stands in for a never-seen role"
     );
 }
+
+#[test]
+fn retire_and_revive_by_hand() {
+    let f = Fixture::new();
+    let mut roles = claimed_once(&f);
+    let (t1, t2) = (t0() + Duration::days(1), t0() + Duration::days(2));
+    assert!(!roles.retire("nobody@acct", t1), "an unknown role");
+    assert!(!roles.revive("nobody@acct", t1));
+    assert!(roles.retire("lane@acct", t1));
+    assert!(roles.retire("lane@acct", t2), "twice is fine");
+    assert_eq!(
+        roles.snapshot().roles["lane@acct"].retired_at,
+        Some(t1),
+        "the first retirement stands"
+    );
+    assert!(roles.revive("lane@acct", t2));
+    let record = roles.snapshot().roles["lane@acct"].clone();
+    assert_eq!((record.retired_at, record.last_seen), (None, Some(t2)));
+    assert!(
+        roles
+            .retire_idle(t2 + Duration::days(TTL_DAYS - 1), Duration::days(TTL_DAYS))
+            .is_empty(),
+        "the idle clock restarted at the revive"
+    );
+}

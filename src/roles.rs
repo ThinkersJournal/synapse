@@ -353,6 +353,27 @@ impl Roles {
         true
     }
 
+    /// Retire `global_id` now, whatever its idle time. Returns whether the role exists; retiring
+    /// a retired role leaves its first `retired_at`.
+    pub fn retire(&mut self, global_id: &str, now: DateTime<Utc>) -> bool {
+        let Some(record) = self.roles.get_mut(global_id) else {
+            return false;
+        };
+        record.retired_at.get_or_insert(now);
+        true
+    }
+
+    /// Bring a retired role back: clear `retired_at` and start its idle clock at `now`. Returns
+    /// whether the role exists. A role that was not retired only has its clock restarted.
+    pub fn revive(&mut self, global_id: &str, now: DateTime<Utc>) -> bool {
+        let Some(record) = self.roles.get_mut(global_id) else {
+            return false;
+        };
+        record.retired_at = None;
+        record.last_seen = Some(now);
+        true
+    }
+
     /// Retire every role whose last activity (`last_seen`, else `claimed_at`) is more than `ttl`
     /// before `now` and that is not already retired. Returns the ids retired. Nothing else about
     /// a role changes: its epoch stays, so a returning session claims as usual.

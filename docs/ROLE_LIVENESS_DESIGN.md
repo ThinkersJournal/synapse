@@ -28,7 +28,7 @@ Nothing is deleted: the epoch, the certificate binding and the queued mail are k
 `list` hides retired roles unless asked (`include_retired`), and shows `retired_at` when it does.
 
 ### 3. Explicit retire and revive
-`synapse role retire <role>` and `synapse role revive <role>` (HTTP `POST /v1/roles/{role}/retire|revive`), gated by a
+`synapse retire <role>` and `synapse revive <role>` (HTTP `POST /v1/roles/retire` and `/v1/roles/revive`, body `{"role": "<name>"}`), gated by a
 new `role-admin` permission through the existing grant mechanism. Retire takes effect at once, whatever the TTL.
 Revive clears `retired_at` and restarts the TTL clock. A valid signed claim by the role's own key also revives it:
 holding the key is the authorization (the M3 rule), so a lane that returns needs no operator.
