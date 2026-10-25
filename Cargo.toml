@@ -97,7 +97,7 @@ tokio-tungstenite = { version = "0.30.0", optional = true }
 futures-util = { version = "0.3", optional = true }
 
 # NAT traversal dependencies for real implementation
-bytecodec = { version = "0.4", optional = true }
+bytecodec = { version = "0.5", optional = true }
 bytes = { version = "1.5", optional = true }
 
 # System monitoring - optional
