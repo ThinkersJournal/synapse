@@ -38,7 +38,7 @@ async fn rsa_signing_is_refused() {
 async fn verify_refuses_a_key_format_it_cannot_parse() {
     let keys = KeyManager::new().await.unwrap();
     let data = b"data";
-    // 256 bytes matches no supported format (Ed25519 = 32, P-256 = 33 or 65).
+    // 256 bytes matches no supported format (Ed25519 = 32, P-256 = 65).
     let result = keys.verify(&[3u8; 256], data, &sha256(data)).await;
     assert!(
         result.is_err(),
@@ -58,4 +58,28 @@ async fn an_ed25519_signature_does_not_verify_under_another_key() {
         .unwrap();
     let sig = keys.sign("a", b"data").await.unwrap();
     assert!(!keys.verify(&b.public_key, b"data", &sig).await.unwrap());
+}
+
+/// ROADMAP row 40: `verify` used to document "33 or 65 bytes is ECDSA P-256", but ring parses only the
+/// uncompressed (65-byte) point, so a signature under the compressed form of a real key came back
+/// `Ok(false)`: a silent rejection of a valid signature. A format this crate cannot check must be an
+/// `Err`, never an `Ok(false)` that reads as "forged".
+#[tokio::test]
+async fn a_compressed_p256_key_is_refused_not_silently_rejected() {
+    let mut keys = SynapseKeyManager::new().await.unwrap();
+    let pair = keys
+        .generate_keypair("e", KeyAlgorithm::ECDSA)
+        .await
+        .unwrap();
+    let sig = keys.sign("e", b"data").await.unwrap();
+    assert_eq!(pair.public_key.len(), 65, "uncompressed SEC1 point");
+    assert!(
+        keys.verify(&pair.public_key, b"data", &sig).await.unwrap(),
+        "control: the same key, uncompressed, verifies its signature"
+    );
+    let mut compressed = vec![0x02 | (pair.public_key[64] & 1)];
+    compressed.extend_from_slice(&pair.public_key[1..33]);
+    let result = keys.verify(&compressed, b"data", &sig).await;
+    let error = result.expect_err("a 33-byte key must be refused, not answered Ok(false)");
+    assert!(error.to_string().contains("compressed"), "{error}");
 }

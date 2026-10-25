@@ -181,6 +181,42 @@ async fn post(d: &Running, path: &str, token: Option<&str>, body: Value) -> (u16
     (status, value, text)
 }
 
+/// ROADMAP row 37(a): handlers take their body (`Bytes`) before `authed()` runs, so an unauthenticated
+/// caller's body is read first. What bounds that is axum's default body limit (2 MiB). This pins the
+/// bound: a body past it is refused 413 without ever reaching auth, and one inside it still gets the
+/// plain 401. If a future axum changes the default, or someone lifts it, this fails. The server may
+/// answer 413 or close the connection mid-upload (Windows reports that as an aborted connection):
+/// both mean the body was not accepted; what must not happen is the 401 a read-through would give.
+#[tokio::test]
+async fn an_unauthenticated_body_is_bounded_before_auth() {
+    let d = start().await;
+    let send = |len: usize| {
+        client()
+            .post(d.url("/v1/send"))
+            .header("content-type", "application/json")
+            .body(vec![b' '; len])
+            .send()
+    };
+    let small = send(1024).await.unwrap();
+    assert_eq!(
+        small.status().as_u16(),
+        401,
+        "inside the limit: auth refuses it"
+    );
+    match send(3 * 1024 * 1024).await {
+        Ok(big) => assert_eq!(
+            big.status().as_u16(),
+            413,
+            "past the default limit: refused before auth"
+        ),
+        Err(e) => assert!(
+            e.is_request() || e.is_connect(),
+            "the connection was closed on the oversize body: {e}"
+        ),
+    }
+    d.stop().await;
+}
+
 #[tokio::test]
 async fn health_answers_without_a_token() {
     let d = start().await;
