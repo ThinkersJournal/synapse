@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Chore (rc.171): the clean dependency bumps (Dependabot #263, #264)
+
+`rmcp` and `rmcp-macros` 3.5.1 -> 3.7.0 (Dependabot proposed 3.6.0 for `rmcp`; 3.7.0 was the newest) and `tokio` 1.53.3 -> 1.54.1 in `Cargo.lock` (minor and patch, no code change), and `actions/download-artifact` v8.0.1 -> v8.0.2 in the CI workflow (the new SHA matches the upstream tag). Taken over from Dependabot because the gate refuses a PR without a version line (CireSnave: newest dependencies at all times). The breaking bumps (bytecodec 0.5, hmac 0.13, parking_lot 0.13, rand 0.10) follow one PR each.
+
 ### Test (rc.170): the adapter's heartbeat is tested (ROADMAP row 39)
 
 `SynapseMcpServer::start_with_heartbeat(config, every)` is new; `start(config)` is `start_with_heartbeat(config, 30 s)`, so nothing changes for callers. `an_adapter_heartbeats_on_its_own_at_its_interval` starts one adapter on a 150 ms interval and one on the default, and checks the daemon's `last_seen` for the first keeps moving with no tool call while the second's does not. Observed to fail when the loop ignores the interval. The last item of the deferred minors recovered into ROADMAP rows 37-40.
