@@ -40,6 +40,9 @@ impl DiscoveredService {
     }
 }
 
+/// How many scan intervals a discovered service may go unseen before it is treated as gone.
+const EXPIRY_SCAN_INTERVALS: u32 = 3;
+
 /// Configuration for auto-discovery transport
 #[derive(Debug, Clone)]
 pub struct SynapseDiscoveryConfig {
@@ -74,6 +77,11 @@ impl SynapseDiscoveryConfig {
     pub fn with_protocols(mut self, protocols: Vec<String>) -> Self {
         self.protocols = protocols;
         self
+    }
+
+    /// How long a discovered service stays reachable without being seen again.
+    pub fn expiry(&self) -> Duration {
+        self.scan_interval.saturating_mul(EXPIRY_SCAN_INTERVALS)
     }
 }
 
@@ -165,12 +173,28 @@ impl DiscoveryTransport {
         Ok(())
     }
 
+    /// Whether `service` was seen recently enough to still count as present.
+    fn is_fresh(&self, service: &DiscoveredService) -> bool {
+        service.last_seen.elapsed() <= self.config.expiry()
+    }
+
     pub async fn get_discovered_services(&self) -> HashMap<String, DiscoveredService> {
-        self.discovered_services.read().await.clone()
+        self.discovered_services
+            .read()
+            .await
+            .iter()
+            .filter(|(_, service)| self.is_fresh(service))
+            .map(|(name, service)| (name.clone(), service.clone()))
+            .collect()
     }
 
     pub async fn find_service_by_name(&self, name: &str) -> Option<DiscoveredService> {
-        self.discovered_services.read().await.get(name).cloned()
+        self.discovered_services
+            .read()
+            .await
+            .get(name)
+            .filter(|service| self.is_fresh(service))
+            .cloned()
     }
 
     pub async fn find_services_by_type(&self, service_type: &str) -> Vec<DiscoveredService> {
@@ -178,7 +202,7 @@ impl DiscoveryTransport {
             .read()
             .await
             .values()
-            .filter(|service| service.service_type == service_type)
+            .filter(|service| service.service_type == service_type && self.is_fresh(service))
             .cloned()
             .collect()
     }
@@ -220,12 +244,15 @@ impl Transport for DiscoveryTransport {
         let services = self.discovered_services.read().await;
 
         // Look for exact match by identifier
-        if services.contains_key(&target.identifier) {
+        if services
+            .get(&target.identifier)
+            .is_some_and(|service| self.is_fresh(service))
+        {
             return true;
         }
 
         // Look for services with matching capabilities
-        for service in services.values() {
+        for service in services.values().filter(|s| self.is_fresh(s)) {
             if target.required_capabilities.iter().all(|cap| {
                 service.txt_records.contains_key(cap)
                     || service
@@ -266,9 +293,17 @@ impl Transport for DiscoveryTransport {
         let discovery = self.discovery.clone();
         let running = self.running.clone();
         let scan_interval = self.config.scan_interval;
+        let expiry = self.config.expiry();
 
         tokio::spawn(async move {
             while *running.read().await {
+                // Drop services no scan has seen for a few intervals: a departed peer, or one
+                // whose address another host now holds, must not stay reachable.
+                discovered_services
+                    .write()
+                    .await
+                    .retain(|_, service| service.last_seen.elapsed() <= expiry);
+
                 #[cfg(feature = "mdns")]
                 {
                     if let Some(disco) = discovery.lock().await.as_ref()
@@ -333,15 +368,21 @@ impl Transport for DiscoveryTransport {
         let services = self.discovered_services.read().await;
 
         // Find matching service
-        let service = if services.contains_key(&target.identifier) {
-            services.get(&target.identifier)
+        let service = if let Some(service) = services
+            .get(&target.identifier)
+            .filter(|service| self.is_fresh(service))
+        {
+            Some(service)
         } else {
-            services.values().find(|service| {
-                target
-                    .required_capabilities
-                    .iter()
-                    .all(|cap| service.txt_records.contains_key(cap))
-            })
+            services
+                .values()
+                .filter(|s| self.is_fresh(s))
+                .find(|service| {
+                    target
+                        .required_capabilities
+                        .iter()
+                        .all(|cap| service.txt_records.contains_key(cap))
+                })
         };
 
         // Discovery carries no messages, so it is never "connected" for sending. This used to
@@ -401,6 +442,58 @@ impl TransportReceive for DiscoveryTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_departed_service_stops_being_reachable() {
+        let transport = DiscoveryTransport::new(
+            SynapseDiscoveryConfig::new("probe".to_string(), 0)
+                .with_scan_interval(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+        let service = |name: &str, age: Duration| DiscoveredService {
+            name: name.to_string(),
+            service_type: "_synapse._tcp".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 9,
+            addresses: vec![IpAddr::from([127, 0, 0, 1])],
+            txt_records: HashMap::new(),
+            last_seen: Instant::now().checked_sub(age).unwrap(),
+        };
+        {
+            let mut map = transport.discovered_services.write().await;
+            map.insert("fresh".into(), service("fresh", Duration::ZERO));
+            map.insert("gone".into(), service("gone", Duration::from_secs(31)));
+        }
+        // Control: a recently seen service is still reachable and findable.
+        assert!(
+            transport
+                .can_reach(&TransportTarget::new("fresh".to_string()))
+                .await
+        );
+        assert!(transport.find_service_by_name("fresh").await.is_some());
+        // Unseen for more than three scan intervals: gone from every answer. (`fresh` is removed
+        // first: a target with no required capabilities matches any live service.)
+        assert!(transport.find_services_by_type("_synapse._tcp").await.len() == 1);
+        transport.discovered_services.write().await.remove("fresh");
+        let gone = TransportTarget::new("gone".to_string());
+        assert!(!transport.can_reach(&gone).await);
+        assert!(transport.find_service_by_name("gone").await.is_none());
+        assert!(
+            !transport
+                .get_discovered_services()
+                .await
+                .contains_key("gone")
+        );
+        assert!(
+            transport
+                .find_services_by_type("_synapse._tcp")
+                .await
+                .is_empty()
+        );
+        let result = transport.test_connectivity(&gone).await.unwrap();
+        assert!(result.details.is_empty(), "{:?}", result.details);
+    }
 
     #[tokio::test]
     async fn send_refuses_even_when_a_service_has_been_discovered() {
