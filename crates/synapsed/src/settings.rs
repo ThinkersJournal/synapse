@@ -26,6 +26,9 @@ pub struct Settings {
     pub store_pin_from_env: bool,
     /// Roles that may read launch signals; empty means launch is off.
     pub launcher_roles: Vec<String>,
+    /// Senders (`role` or `role@account`) whose pending mail counts toward a launch signal; empty
+    /// means no signal at all.
+    pub launch_senders: Vec<String>,
     /// Roles that receive security alerts as mail.
     pub alert_roles: Vec<String>,
     /// A role idle this many days is retired (file only; default 30).
@@ -66,6 +69,16 @@ pub fn load(env: &BTreeMap<String, String>, file: Option<&str>) -> Result<Settin
             None => Ok(list),
         }
     };
+    let senders: Vec<String> = config.get("launch.senders").map_err(|e| e.to_string())?;
+    let launch_senders: Vec<String> = senders.into_iter().filter(|r| !r.is_empty()).collect();
+    if let Some(bad) = launch_senders.iter().find(|entry| {
+        let (role, account) = entry.split_once('@').unwrap_or((entry, "x"));
+        !synapse::keystore::valid_name(role) || !synapse::keystore::valid_name(account)
+    }) {
+        return Err(format!(
+            "launch.senders: {bad:?} is not a role or role@account"
+        ));
+    }
     let days: i64 = config
         .get("liveness.role_ttl_days")
         .map_err(|e| e.to_string())?;
@@ -90,6 +103,7 @@ pub fn load(env: &BTreeMap<String, String>, file: Option<&str>) -> Result<Settin
         store_pin,
         store_pin_from_env,
         launcher_roles: roles("launch.roles")?,
+        launch_senders,
         alert_roles: roles("alert.roles")?,
         role_ttl_days,
         session_ttl_hours,

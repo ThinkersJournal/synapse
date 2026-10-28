@@ -14,12 +14,13 @@ use serde_json::{Value, json};
 use synapse::certificate::chain_to_pem;
 use synapse::keystore::Keystore;
 use synapse::roles::sign_claim_for;
-use synapsed::{Daemon, DaemonConfig, LauncherConfig};
+use synapsed::{Daemon, DaemonConfig, LaunchSenders, LauncherConfig};
 
 struct Running {
     addr: SocketAddr,
     home: tempfile::TempDir,
     started_at: DateTime<Utc>,
+    senders: LaunchSenders,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
 }
@@ -40,8 +41,12 @@ impl Running {
 }
 
 /// A daemon whose online window is short, so a role that stays silent is offline within the test,
-/// with `launcher_roles` as given and no grace.
+/// with `launcher_roles` as given, no grace, and `beta` the one allowed sender.
 async fn start(launcher_roles: &[&str]) -> Running {
+    start_with(launcher_roles, &["beta"]).await
+}
+
+async fn start_with(launcher_roles: &[&str], senders: &[&str]) -> Running {
     let home = tempfile::tempdir().unwrap();
     Keystore::init_account(home.path(), "acct").expect("init account");
     let config = DaemonConfig {
@@ -58,8 +63,10 @@ async fn start(launcher_roles: &[&str]) -> Running {
     let daemon = Daemon::open(&config)
         .expect("open daemon")
         .with_launcher(launcher)
+        .with_launch_senders(senders.iter().map(|r| (*r).to_string()).collect())
         .with_online_window(chrono::Duration::milliseconds(300));
     let started_at = daemon.started_at();
+    let handle = daemon.launch_senders();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -77,6 +84,7 @@ async fn start(launcher_roles: &[&str]) -> Running {
         addr,
         home,
         started_at,
+        senders: handle,
         stop: Some(tx),
         task: Some(task),
     }
@@ -343,3 +351,131 @@ async fn malformed_launch_requests_are_400() {
     assert!(started.elapsed() >= Duration::from_millis(900));
     d.stop().await;
 }
+
+/// `overmind` (launcher), a silent `alpha`, and `beta` and `gamma` as possible senders.
+async fn two_senders(d: &Running) -> (String, String, String) {
+    let launcher = claim(d, "overmind").await;
+    let _alpha = claim(d, "alpha").await;
+    let beta = claim(d, "beta").await;
+    let gamma = claim(d, "gamma").await;
+    (launcher, beta, gamma)
+}
+
+async fn send_to_alpha(d: &Running, token: &str, id: &str) {
+    let (s, sent) = post(
+        d,
+        "/v1/send",
+        Some(token),
+        json!({"to": "alpha@acct", "message_id": id, "body_b64": B64.encode(b"x")}),
+    )
+    .await;
+    assert_eq!(s, 200, "{sent}");
+}
+
+async fn silence(d: &Running) {
+    let _ = d;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+}
+
+#[tokio::test]
+async fn mail_from_an_allowed_sender_signals() {
+    let d = start_with(&["overmind"], &["beta"]).await;
+    let (launcher, beta, _gamma) = two_senders(&d).await;
+    send_to_alpha(&d, &beta, "m1").await;
+    silence(&d).await;
+    let (s, w) = get(&d, "/v1/waiting", &launcher).await;
+    assert_eq!(s, 200, "{w}");
+    assert_eq!(w["roles"].as_array().unwrap().len(), 1, "{w}");
+    assert_eq!(w["roles"][0]["count"], 1);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn mail_from_a_sender_not_listed_does_not_signal() {
+    let d = start_with(&["overmind"], &["beta"]).await;
+    let (launcher, _beta, gamma) = two_senders(&d).await;
+    send_to_alpha(&d, &gamma, "m1").await;
+    silence(&d).await;
+    let (s, w) = get(&d, "/v1/waiting", &launcher).await;
+    assert_eq!(s, 200, "{w}");
+    assert_eq!(w["roles"], json!([]), "{w}");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn mixed_mail_signals_on_the_allowed_messages_count_and_time() {
+    let d = start_with(&["overmind"], &["beta"]).await;
+    let (launcher, beta, gamma) = two_senders(&d).await;
+    send_to_alpha(&d, &gamma, "early").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let before_beta = Utc::now();
+    send_to_alpha(&d, &beta, "late").await;
+    silence(&d).await;
+    let (_, w) = get(&d, "/v1/waiting", &launcher).await;
+    let sig = &w["roles"][0];
+    assert_eq!(sig["count"], 1, "the unlisted message is not counted: {w}");
+    let id = sig["signal_id"].as_str().unwrap();
+    let stamp = id.strip_prefix("alpha:").expect("signal id shape");
+    let at: DateTime<Utc> = stamp.parse().unwrap();
+    assert!(
+        at >= before_beta,
+        "signal id {id} is dated by the unlisted message, not the allowed one"
+    );
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn an_empty_sender_list_signals_nothing_even_with_launcher_roles() {
+    let d = start_with(&["overmind"], &[]).await;
+    let (launcher, beta, _gamma) = two_senders(&d).await;
+    send_to_alpha(&d, &beta, "m1").await;
+    silence(&d).await;
+    let (s, w) = get(&d, "/v1/waiting", &launcher).await;
+    assert_eq!(s, 200, "{w}");
+    assert_eq!(w["roles"], json!([]), "empty must never mean anyone: {w}");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn a_changed_allowlist_applies_on_the_next_poll_and_a_role_at_account_matches() {
+    let d = start_with(&["overmind"], &["gamma"]).await;
+    let (launcher, beta, _gamma) = two_senders(&d).await;
+    send_to_alpha(&d, &beta, "m1").await;
+    silence(&d).await;
+    assert_eq!(
+        get(&d, "/v1/waiting", &launcher).await.1["roles"],
+        json!([])
+    );
+    d.senders.set(vec!["beta@acct".to_string()]);
+    let (_, w) = get(&d, "/v1/waiting", &launcher).await;
+    assert_eq!(w["roles"].as_array().unwrap().len(), 1, "{w}");
+    // Another account's beta is not this account's beta.
+    d.senders.set(vec!["beta@other".to_string()]);
+    assert_eq!(
+        get(&d, "/v1/waiting", &launcher).await.1["roles"],
+        json!([])
+    );
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn stats_says_whether_launch_senders_is_set() {
+    let set = start_with(&["overmind"], &["beta"]).await;
+    let token = claim(&set, "overmind").await;
+    assert_eq!(
+        get(&set, "/v1/stats", &token).await.1["launch_senders_set"],
+        true
+    );
+    set.stop().await;
+    let unset = start_with(&["overmind"], &[]).await;
+    let token = claim(&unset, "overmind").await;
+    assert_eq!(
+        get(&unset, "/v1/stats", &token).await.1["launch_senders_set"],
+        false
+    );
+    unset.stop().await;
+}
+
+// A sender cannot borrow a listed role's name: `a_forged_from_is_refused` and
+// `a_claim_without_key_proof_issues_no_token` in tests/api.rs pin that the sender is the claimed,
+// key-proven role and never a client-supplied value.

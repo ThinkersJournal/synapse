@@ -639,6 +639,48 @@ impl<S: MailStore> Mailbox<S> {
         Ok(out)
     }
 
+    /// Like [`Mailbox::depths`], but counting only the mail whose sender `allowed` accepts (given the
+    /// sender's global id). Dead-set mail is in no count. Reads every message of a role, so call it
+    /// only for roles already known to have mail. Changes nothing.
+    pub fn depths_from(
+        &self,
+        now: DateTime<Utc>,
+        allowed: &dyn Fn(&str) -> bool,
+    ) -> Result<BTreeMap<String, QueueDepth>, MailError> {
+        self.live()?;
+        let roles = self.roles.snapshot();
+        let mut out = BTreeMap::new();
+        self.store.read(&mut |txn| {
+            out.clear();
+            for (role, record) in &roles.roles {
+                let mut depth = QueueDepth::default();
+                txn.scan(role, &mut |stored| {
+                    if allowed(&stored.envelope.from) {
+                        if stored
+                            .lease
+                            .as_ref()
+                            .is_some_and(|held| held.epoch == record.epoch && held.until > now)
+                        {
+                            depth.leased += 1;
+                        } else {
+                            depth.queued += 1;
+                        }
+                        depth.oldest_enqueued_at = Some(
+                            depth
+                                .oldest_enqueued_at
+                                .map_or(stored.enqueued_at, |o| o.min(stored.enqueued_at)),
+                        );
+                    }
+                    true
+                })
+                .map_err(MailError::Store)?;
+                out.insert(role.clone(), depth);
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
     /// The underlying store (tests and the daemon's diagnostics).
     pub fn store(&self) -> &S {
         &self.store
