@@ -100,10 +100,15 @@ async fn main() -> ExitCode {
         .with_role_ttl_days(settings.role_ttl_days)
         .with_session_ttl_hours(settings.session_ttl_hours)
         .with_alert_roles(settings.alert_roles.clone())
+        .with_launch_senders(settings.launch_senders.clone())
         .with_launcher(synapsed::LauncherConfig {
             roles: settings.launcher_roles.clone(),
             ..synapsed::LauncherConfig::default()
         });
+    tokio::spawn(reload_launch_senders(
+        daemon.launch_senders(),
+        settings.launch_senders.clone(),
+    ));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(e) => {
@@ -195,5 +200,31 @@ async fn shutdown_signal() {
     #[cfg(not(any(unix, windows)))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Re-read `SYNAPSE_LAUNCH_SENDERS` and `synapsed.toml` every few seconds, so a changed allowlist
+/// applies on the next poll without a restart. A file that does not read or parse keeps the last
+/// good list. (The environment cannot change in a running process; the file is what moves.)
+async fn reload_launch_senders(handle: synapsed::LaunchSenders, mut current: Vec<String>) {
+    let Ok(home) = synapse::keystore::default_home() else {
+        return;
+    };
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let file = match std::fs::read_to_string(home.join(synapsed::settings::FILE_NAME)) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => continue,
+        };
+        let Ok(settings) = synapsed::settings::load(&std::env::vars().collect(), file.as_deref())
+        else {
+            continue;
+        };
+        if settings.launch_senders != current {
+            handle.set(settings.launch_senders.clone());
+            current = settings.launch_senders;
+            eprintln!("synapsed: launch.senders reloaded");
+        }
     }
 }

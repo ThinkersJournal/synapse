@@ -63,7 +63,7 @@ use synapse::security_events::{
 use synapse_security::{AlertSink, AlertTransport, FanoutSink, FileSink};
 
 pub mod launch;
-pub use launch::LauncherConfig;
+pub use launch::{LaunchSenders, LauncherConfig};
 
 /// Where and how the daemon runs.
 #[derive(Debug, Clone)]
@@ -249,6 +249,9 @@ struct Shared {
     pause: Pause,
     /// Who may read launch signals, and their timing (feature off while `roles` is empty).
     launcher: LauncherConfig,
+    /// Authenticated senders whose pending mail counts toward a launch signal; read on every poll.
+    /// Empty counts nothing (fail closed), so launch needs both this and `launcher.roles`.
+    launch_senders: LaunchSenders,
     /// Per-role launch state; in memory.
     launches: Mutex<launch::Table>,
     /// How recently a role must have been heard from to count as online.
@@ -680,6 +683,7 @@ impl Daemon {
                 security: Security::new(SecurityConfig::default(), Arc::new(sink)),
                 pause: sleep_pause(),
                 launcher: LauncherConfig::default(),
+                launch_senders: LaunchSenders::default(),
                 launches: Mutex::new(launch::Table::new(started_at)),
                 online_window: ONLINE_WINDOW,
                 role_ttl: chrono::Duration::days(DEFAULT_ROLE_TTL_DAYS),
@@ -738,6 +742,21 @@ impl Daemon {
     pub fn with_launcher(mut self, launcher: LauncherConfig) -> Daemon {
         self.shared.launcher = launcher;
         self
+    }
+
+    /// Sets which senders' mail may raise a launch signal: each entry is `role` (this account) or
+    /// `role@account`. Empty, the default, raises none. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_launch_senders(self, senders: Vec<String>) -> Daemon {
+        self.shared.launch_senders.set(senders);
+        self
+    }
+
+    /// A handle on the sender allowlist, so a caller can change it while the daemon runs; the next
+    /// `GET /v1/waiting` poll sees the change.
+    #[must_use]
+    pub fn launch_senders(&self) -> LaunchSenders {
+        self.shared.launch_senders.clone()
     }
 
     /// Sets how long a session may go unused before it expires (default 24 hours). Tests use a short
@@ -1753,6 +1772,7 @@ async fn stats(
     Ok(axum::Json(json!({
         "scope": "process",
         "since": shared.started_at.to_rfc3339(),
+        "launch_senders_set": !shared.launch_senders.is_empty(),
         "roles": out,
     }))
     .into_response())
@@ -1788,7 +1808,32 @@ fn launch_candidates(
     }
     let (roles, depths) = {
         let mailbox = locked(&shared.mailbox)?;
-        (mailbox.roles_snapshot(), mailbox.depths(now)?)
+        let roles = mailbox.roles_snapshot();
+        let depths = mailbox.depths(now)?;
+        if shared.launch_senders.is_empty() {
+            return Ok(Vec::new());
+        }
+        let account = shared.account.as_str();
+        let allowed = |from: &str| shared.launch_senders.allows(from, account);
+        // Count only the allowed senders' mail; the per-message read happens only if some role has mail.
+        let depths = if depths.values().any(|d| d.queued > 0) {
+            let by_sender = mailbox.depths_from(now, &allowed)?;
+            depths
+                .into_iter()
+                .map(|(id, d)| {
+                    let d = by_sender.get(&id).map_or(d, |q| Depth {
+                        queued: q.queued,
+                        leased: q.leased,
+                        oldest_enqueued_at: q.oldest_enqueued_at,
+                        ..d
+                    });
+                    (id, d)
+                })
+                .collect()
+        } else {
+            depths
+        };
+        (roles, depths)
     };
     let presence = locked(&shared.presence)?;
     let mut out = Vec::new();

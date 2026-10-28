@@ -37,6 +37,13 @@ env = "SYNAPSE_LAUNCHER_ROLES"
 description = "roles whose lanes may be launched on a message; empty means launch signals are OFF"
 
 [[value]]
+key = "launch.senders"
+type = "list"
+default = []
+env = "SYNAPSE_LAUNCH_SENDERS"
+description = "authenticated senders (`role` or `role@account`) whose pending mail may raise a launch signal; empty means no signal at all, even with launch.roles set"
+
+[[value]]
 key = "liveness.role_ttl_days"
 type = "int"
 default = 30

@@ -13,6 +13,7 @@
 //! token or a model.
 
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
@@ -44,6 +45,42 @@ impl Default for LauncherConfig {
                 Duration::seconds(600),
             ],
         }
+    }
+}
+
+/// The authenticated senders whose pending mail may raise a launch signal. Shared, so a change
+/// applies on the next poll. Empty allows nobody: it is never "anyone".
+#[derive(Debug, Clone, Default)]
+pub struct LaunchSenders(Arc<RwLock<Vec<String>>>);
+
+impl LaunchSenders {
+    /// Replace the list. Each entry is `role` (this daemon's account) or `role@account`.
+    pub fn set(&self, senders: Vec<String>) {
+        if let Ok(mut held) = self.0.write() {
+            *held = senders;
+        }
+    }
+
+    /// Whether no sender is allowed. A poisoned lock reads as empty (fail closed).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.read().map_or(true, |held| held.is_empty())
+    }
+
+    /// Whether `from`, a sender's global id `role@account`, is listed. A bare listed role means
+    /// `account`, this daemon's own. Compared exactly, as role@account.
+    #[must_use]
+    pub fn allows(&self, from: &str, account: &str) -> bool {
+        self.0.read().is_ok_and(|held| {
+            held.iter().any(|entry| {
+                if entry.contains('@') {
+                    entry == from
+                } else {
+                    from.split_once('@')
+                        .is_some_and(|(role, acct)| role == entry && acct == account)
+                }
+            })
+        })
     }
 }
 

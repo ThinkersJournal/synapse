@@ -18,6 +18,7 @@ variable or a compiled-in default.
 | `SYNAPSE_ADDR` | `synapse`, `synapsed` | the daemon's address; **loopback only** (the daemon refuses any other) | `127.0.0.1:7920` |
 | `SYNAPSE_ROLE` | `synapse`, both adapters | the default for `--role` | none; an adapter without `--role` or `SYNAPSE_ROLE` exits with status 2 |
 | `SYNAPSE_LAUNCHER_ROLES` | `synapsed` | comma-separated roles allowed to read the launch signals (`GET /v1/waiting`); empty means lane launch on message is off | empty (off) |
+| `SYNAPSE_LAUNCH_SENDERS` | `synapsed` | comma-separated authenticated senders (`role` for this account, or `role@account`) whose pending mail may raise a launch signal; **empty means no signal at all, even with launcher roles set**. Also `[launch] senders` in `synapsed.toml`, re-read every 5 s. `GET /v1/stats` shows `launch_senders_set` | empty (no signals) |
 | `SYNAPSE_ALERT_ROLES` | `synapsed` | comma-separated roles that receive security alerts as mail from `daemon:alerts@<account>` (a threshold of 10 events in 5 minutes for one kind, surface and subject; digests of held alerts, at most one alert per kind and surface per 15 minutes). A role that has not claimed yet gets them when it does; a body is untrusted text like any other | empty (off: nothing changes) |
 
 An unparsable `SYNAPSE_ADDR` or a bad role name in `SYNAPSE_LAUNCHER_ROLES` or `SYNAPSE_ALERT_ROLES` makes `synapsed` exit with
@@ -40,6 +41,7 @@ the file over the defaults. `SYNAPSE_HOME` is not in the file (the file lives in
 addr = "127.0.0.1:7920"      # SYNAPSE_ADDR
 [launch]
 roles = ["agentlife-launcher"] # SYNAPSE_LAUNCHER_ROLES
+senders = ["agentlife"]        # SYNAPSE_LAUNCH_SENDERS
 [alert]
 roles = ["pm"]                 # SYNAPSE_ALERT_ROLES
 [storage]

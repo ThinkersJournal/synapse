@@ -148,3 +148,14 @@ fn a_file_that_does_not_parse_or_names_an_unknown_key_is_refused() {
     let e = settings(&[], Some("[listen]\nadress = \"127.0.0.1:1\"\n")).unwrap_err();
     assert!(e.contains("adress"), "{e}");
 }
+
+#[test]
+fn launch_senders_come_from_the_environment_or_the_file_and_default_to_none() {
+    assert!(settings(&[], None).unwrap().launch_senders.is_empty());
+    let s = settings(&[("SYNAPSE_LAUNCH_SENDERS", "agentlife,pm@acct")], None).unwrap();
+    assert_eq!(s.launch_senders, ["agentlife", "pm@acct"]);
+    let s = settings(&[], Some("[launch]\nsenders = [\"from-file\"]\n")).unwrap();
+    assert_eq!(s.launch_senders, ["from-file"]);
+    let e = settings(&[("SYNAPSE_LAUNCH_SENDERS", "bad name")], None).unwrap_err();
+    assert!(e.contains("launch.senders"), "{e}");
+}
