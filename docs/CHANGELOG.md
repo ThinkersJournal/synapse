@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.177): `DiscoveryTransport` expires discovered services nobody has seen for three scan intervals (Closes #282)
+
+A scanned service stayed in `discovered_services` forever, so a peer that left, or whose address another host reused, stayed "reachable". Each scan now drops entries whose `last_seen` is older than `3 x scan_interval` (`SynapseDiscoveryConfig::expiry`, no new setting), and `can_reach`, `test_connectivity`, `find_service_by_name`, `find_services_by_type` and `get_discovered_services` ignore an expired entry even between scans.
+
 ### Fixed (rc.176): QUIC evicts the pooled connection when a message from that address fails verification (slice 2; Part of #49)
 
 `QuicTransportImpl` implements `Transport::on_verification_failure`: the source is parsed as a socket address (anything else is ignored) and the pooled connection to it is evicted, at most once per address per 5 s (`DEFAULT_EVICT_COOLDOWN_MS`, `with_evict_cooldown`), so a peer sending bad messages cannot make us reconnect in a loop. The next send reopens a connection. This closes the gap in the QUIC spec's condition 3: `evict` was tested but called by nothing.
