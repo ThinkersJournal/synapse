@@ -107,10 +107,14 @@ enum Command {
     },
     /// Per-role message counters since this daemon started (a restart begins again from zero):
     /// `sent`, `acked`, `redelivered`, `expired`, one JSON object per line, each with the
-    /// daemon's `scope` and `since`.
+    /// daemon's `scope` and `since`. With `--daemon`: instead one object about the daemon itself,
+    /// `scope`, `since` and `launch_senders_set` (whether `SYNAPSE_LAUNCH_SENDERS` lists anyone;
+    /// false means launch signals are off).
     Stats {
         #[command(flatten)]
         role: RoleArg,
+        #[arg(long)]
+        daemon: bool,
     },
     /// List every role the daemon knows, with presence, one JSON object per line. `--cwd` and
     /// `--repo` keep only roles whose self-reported presence matches exactly (a role that reports
@@ -858,9 +862,23 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 printable(reply["role"].as_str().unwrap_or(""))
             );
         }
-        Command::Stats { role } => {
+        Command::Stats {
+            role,
+            daemon: about_daemon,
+        } => {
             let daemon = connect(&home, &role)?;
             let reply = daemon.call(&role.role, "/v1/stats", None)?;
+            if about_daemon {
+                println!(
+                    "{}",
+                    json!({
+                        "scope": reply["scope"],
+                        "since": reply["since"],
+                        "launch_senders_set": reply["launch_senders_set"].as_bool().unwrap_or(false),
+                    })
+                );
+                return Ok(());
+            }
             for entry in reply["roles"].as_array().into_iter().flatten() {
                 let mut entry = entry.clone();
                 entry["scope"] = reply["scope"].clone();

@@ -184,6 +184,28 @@ fn stats_prints_one_object_per_role_with_scope_and_since() {
 }
 
 #[test]
+fn stats_daemon_says_whether_launch_senders_is_set() {
+    for (value, expected) in [(None, false), (Some("beta"), true)] {
+        let home = Home::new();
+        let mut cmd = home.command(&["stats", "--role", "alpha", "--daemon"]);
+        match value {
+            Some(v) => cmd.env("SYNAPSE_LAUNCH_SENDERS", v),
+            None => cmd.env_remove("SYNAPSE_LAUNCH_SENDERS"),
+        };
+        let out = cmd.output().expect("the synapse binary runs");
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let lines = json_lines(&String::from_utf8(out.stdout).unwrap());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(
+            lines[0]["launch_senders_set"], expected,
+            "{value:?}: {lines:?}"
+        );
+        assert_eq!(lines[0]["scope"], "process");
+        assert!(lines[0]["since"].is_string());
+    }
+}
+
+#[test]
 fn a_command_against_a_stopped_daemon_starts_it() {
     let home = Home::new();
     assert!(
@@ -1126,7 +1148,7 @@ fn forge_stub() -> (String, Seen) {
                 .contains("authorization: bearer");
             log.lock().unwrap().push((path.clone(), auth));
             let (status, body) = if path == "/api/v1/crates/synapse" {
-                (200, r#"{"crate":{"max_version":"6.0.0-rc.181"}}"#)
+                (200, r#"{"crate":{"max_version":"6.0.0-rc.182"}}"#)
             } else if path == "/repos/o/r/pulls/7" {
                 (
                     200,
@@ -1204,7 +1226,7 @@ fn the_checker_reports_forge_facts_and_the_daemon_derives_them() {
     let shown: Value =
         serde_json::from_str(&home.ok(&["state", "show", "--role", "alpha", "T-1"])).unwrap();
     let verify = &shown["derived"]["verify"];
-    assert_eq!(verify[0]["satisfied"], true, "6.0.0-rc.181 >= 6.0.0-rc.145");
+    assert_eq!(verify[0]["satisfied"], true, "6.0.0-rc.182 >= 6.0.0-rc.145");
     assert_eq!(verify[1]["satisfied"], true, "merged");
     assert_eq!(verify[2]["satisfied"], true, "a 404 is absent");
     assert_eq!(verify[3]["satisfied"], Value::Null, "a 500 answers nothing");
