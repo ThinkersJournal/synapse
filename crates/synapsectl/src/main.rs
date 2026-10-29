@@ -475,6 +475,30 @@ enum IdCommand {
         #[arg(long, default_value_t = 8)]
         days: i64,
     },
+    /// With the account key: give every role in --roles-file its own home under --lane-home-root
+    /// (`<root>/<role>`), holding that role's keys and a current certificate and NOT the account key.
+    /// A dry run unless --apply. Idempotent: a role whose certificate is current is `ok` and
+    /// untouched. Prints one line per role, `<role> <status>`, and never a key, certificate or path.
+    /// Exit 2 if any role was refused. Certificates last --days; a role within --renew-below-days of
+    /// expiry is reissued, so run this on a schedule shorter than that. Roles in one lane's home are
+    /// not hidden from other lanes of the same OS user.
+    Provision {
+        /// One role name per line; blank lines and `#` comments are skipped.
+        #[arg(long, value_name = "FILE")]
+        roles_file: std::path::PathBuf,
+        /// The directory that holds the per-role homes.
+        #[arg(long, value_name = "DIR")]
+        lane_home_root: std::path::PathBuf,
+        /// Write. Without it nothing on disk changes.
+        #[arg(long)]
+        apply: bool,
+        /// Certificate validity in days (1 to 30).
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+        /// Reissue when this many days or fewer remain.
+        #[arg(long, default_value_t = 14)]
+        renew_below_days: i64,
+    },
     /// In a role-only home: store the certificate read from standard input for --role, after
     /// checking that it certifies this home's keys.
     InstallCert {
@@ -500,6 +524,40 @@ enum IdCommand {
         #[arg(long)]
         role: Option<String>,
     },
+}
+
+/// The role names in a `--roles-file`: one per line, blank lines and `#` comments skipped. Refuses
+/// the whole file, before anything is written, on an invalid or repeated name.
+fn parse_roles_file(text: &str) -> Result<Vec<String>, String> {
+    let mut roles: Vec<String> = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let name = line.split('#').next().unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !synapse::keystore::valid_name(name) {
+            return Err(format!("roles file line {}: not a role name", n + 1));
+        }
+        if roles.iter().any(|r| r == name) {
+            return Err(format!("roles file line {}: role repeated", n + 1));
+        }
+        roles.push(name.to_string());
+    }
+    if roles.is_empty() {
+        return Err("roles file names no role".to_string());
+    }
+    Ok(roles)
+}
+
+fn provision_word(p: synapse::keystore::Provision, apply: bool) -> &'static str {
+    use synapse::keystore::Provision::{Created, Ok, Renewed};
+    match (p, apply) {
+        (Ok, _) => "ok",
+        (Created, true) => "created",
+        (Created, false) => "would-create",
+        (Renewed, true) => "renewed",
+        (Renewed, false) => "would-renew",
+    }
 }
 
 fn print_identity(identity: &synapse::keystore::RoleIdentity) {
@@ -602,6 +660,50 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 chrono::Duration::days(days),
             )?;
             std::io::stdout().write_all(pem.as_bytes())?;
+        }
+        Command::Id(IdCommand::Provision {
+            roles_file,
+            lane_home_root,
+            apply,
+            days,
+            renew_below_days,
+        }) => {
+            let text = std::fs::read_to_string(&roles_file)?;
+            let roles = parse_roles_file(&text).map_err(MailError::Usage)?;
+            let store = Keystore::open(&home)?;
+            let now = chrono::Utc::now();
+            let mut refused = 0usize;
+            for role in &roles {
+                let status = store.provision_role(
+                    &lane_home_root.join(role),
+                    role,
+                    now,
+                    chrono::Duration::days(days),
+                    chrono::Duration::days(renew_below_days),
+                    apply,
+                );
+                match status {
+                    Ok(p) => println!("{role} {}", provision_word(p, apply)),
+                    Err(e) => {
+                        refused += 1;
+                        println!("{role} refused: {e}");
+                    }
+                }
+            }
+            println!(
+                "{} role(s), {} refused{}",
+                roles.len(),
+                refused,
+                if apply {
+                    ""
+                } else {
+                    " (dry run: nothing written)"
+                }
+            );
+            if refused > 0 {
+                std::io::stdout().flush()?;
+                std::process::exit(2);
+            }
         }
         Command::Id(IdCommand::InstallCert { role }) => {
             let mut pem = String::new();

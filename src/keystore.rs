@@ -33,6 +33,17 @@ pub const CERT_VALIDITY: Duration = Duration::hours(24);
 /// A certificate with less than this left is reissued on load.
 pub const RENEW_BELOW: Duration = Duration::hours(12);
 
+/// What [`Keystore::provision_role`] did, or in a dry run would do, for one role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Provision {
+    /// The role home has a certificate that is current: nothing to do, nothing done.
+    Ok,
+    /// No certificate yet (keys are made if missing and one is issued).
+    Created,
+    /// The certificate is near expiry, expired, or no longer carries the role's grants: reissued.
+    Renewed,
+}
+
 /// What went wrong, naming only the item involved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeystoreError {
@@ -635,6 +646,56 @@ impl Keystore {
             unsigned,
             &self.account_key,
         )]))
+    }
+
+    /// Bring `role`'s own home (`role_home`, which must NOT hold an account key) to a current
+    /// certificate: make its keys if missing, issue a certificate for `valid_for`, install it. A
+    /// certificate with more than `renew_below` left and the role's current grants is left alone, so a
+    /// second run changes nothing. With `apply` false nothing is written, not even the directory.
+    /// Returns what was (or would be) done; prints and returns no key.
+    pub fn provision_role(
+        &self,
+        role_home: &Path,
+        role: &str,
+        now: DateTime<Utc>,
+        valid_for: Duration,
+        renew_below: Duration,
+        apply: bool,
+    ) -> Result<Provision> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        let wanted = with_grants(&read_grants(&self.home, role)?);
+        let cert_present = if role_home.join(ACCOUNT_DIR).exists() {
+            if account_key_exists(role_home)? {
+                return Err(KeystoreError::AccountKeyPresent);
+            }
+            if read_account_name(role_home)? != self.account {
+                return Err(KeystoreError::AccountExists);
+            }
+            let expected = format!("{role}@{}", self.account);
+            match identity_from_files(role_home, role, Some(&expected), now) {
+                Ok(id) if id.permissions == wanted && id.not_after - now >= renew_below => {
+                    return Ok(Provision::Ok);
+                }
+                Ok(_) | Err(KeystoreError::CertificateExpired) => true,
+                Err(KeystoreError::NoRoleCertificate) => false,
+                Err(e) => return Err(e),
+            }
+        } else {
+            false
+        };
+        let done = if cert_present {
+            Provision::Renewed
+        } else {
+            Provision::Created
+        };
+        if apply {
+            let keys = Keystore::init_role(role_home, &self.account, role)?;
+            let pem = self.issue_role_certificate(role, keys, now, valid_for)?;
+            Keystore::install_role_certificate(role_home, role, &pem)?;
+        }
+        Ok(done)
     }
 
     /// Give `role` an extra grant (`state-read-all`, `state-admin` or `state-derive`). Takes effect
