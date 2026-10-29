@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.179): `--version` / `-V` on `synapsed`, `synapse` and `synapse-mcp`
+
+Each prints `<bin> <crate version>` and exits 0 before opening any home, store or port. `synapsed --version` used to try to start a daemon. Tests run each binary with no `SYNAPSE_HOME` in an empty directory and check that nothing was created. Lets a cutover read which build is installed.
+
 ### Added (rc.178): `SYNAPSE_LAUNCH_SENDERS`, an allowlist of whose mail may raise a launch signal
 
 `GET /v1/waiting` now counts only pending mail whose authenticated sender is listed in `SYNAPSE_LAUNCH_SENDERS` (or `launch.senders` in `synapsed.toml`; entries are `role`, meaning this account, or `role@account`). `count`, `oldest_enqueued_at` and `signal_id` are computed over the allowed mail only, so a role whose pending mail is all from other senders gets no signal; the signal's shape is unchanged and still carries no sender or body. **Fail closed:** with launcher roles set and this list empty, no signal is raised (never "anyone"), so existing launch setups must set it. The list is held live: `synapsed` re-reads the file every 5 s and the next poll sees a change; a bad file keeps the last good list. Dead-set mail never counted. `GET /v1/stats` gains `launch_senders_set` (bool) so a doctor can refuse to enable wake without it. A sender cannot borrow a listed role's name: the sender is always the key-proven session role (`a_forged_from_is_refused`, `a_claim_without_key_proof_issues_no_token`). Relayed from AgentLife's M5 wake slice 3.

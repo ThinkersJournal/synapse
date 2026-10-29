@@ -14,6 +14,14 @@ use synapse_mcp_server::{McpConfig, SynapseMcpServer};
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Before anything else: a version query opens no home and starts no server.
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|a| a == "--version" || a == "-V")
+    {
+        println!("synapse-mcp {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
