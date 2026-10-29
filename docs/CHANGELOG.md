@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.181): `synapse id provision`, a role-only home per lane
+
+`synapse id provision --roles-file F --lane-home-root DIR [--apply] [--days 30] [--renew-below-days 14]`, run with the account key, gives each role in F (one name per line, `#` comments) its own home `DIR/<role>` holding that role's keys and a current certificate and NOT the account key. A dry run unless `--apply` (it writes nothing, not even `DIR`). Idempotent: a role with a current certificate is `ok` and untouched; one near expiry, expired, or no longer carrying its grants is `renewed`. Prints `<role> <ok|created|renewed|would-create|would-renew|refused: ...>` and never a key, certificate or path; exit 2 if any role was refused, and the rest are still done. The account home is refused as a role home. A bad or repeated name refuses the whole file before anything is written. Library: `Keystore::provision_role`, `keystore::Provision`. **Not isolation:** lanes run as one OS user, so any lane can read any role's home; this keeps the account key out of lanes and keys out of output, nothing more. Certificates last at most 30 days and lanes cannot renew them, so run this on a schedule shorter than `--renew-below-days`.
+
 ### Docs (rc.180): ROADMAP row 42, mailbox store via PersistAnt `choose`
 
 Scheduled after the cutover items: SQLite in the default build, backend chosen through persistant's `choose`/registry from a declared need, a keep-or-retire decision for redb, and WAL handling at startup. No code changes.
