@@ -25,7 +25,7 @@ use synapse::security_events::SecurityEventKind;
 use synapsed_client::{Daemon, MailError, encode_body, events, inbox_line, printable};
 
 #[derive(Parser)]
-#[command(name = "synapse", about = "Synapse command line")]
+#[command(name = "synapse", about = "Synapse command line", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
