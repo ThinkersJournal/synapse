@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.180): ROADMAP row 42, mailbox store via PersistAnt `choose`
+
+Scheduled after the cutover items: SQLite in the default build, backend chosen through persistant's `choose`/registry from a declared need, a keep-or-retire decision for redb, and WAL handling at startup. No code changes.
+
 ### Added (rc.179): `--version` / `-V` on `synapsed`, `synapse` and `synapse-mcp`
 
 Each prints `<bin> <crate version>` and exits 0 before opening any home, store or port. `synapsed --version` used to try to start a daemon. Tests run each binary with no `SYNAPSE_HOME` in an empty directory and check that nothing was created. Lets a cutover read which build is installed.
