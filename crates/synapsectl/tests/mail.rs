@@ -224,6 +224,25 @@ fn a_command_against_a_stopped_daemon_starts_it() {
     assert!(alive(pid));
 }
 
+/// `SYNAPSE_NO_AUTOSTART` makes the CLI find the owner's daemon and never start one. The same home
+/// without the variable starts a daemon (the control: the failure is the variable, not the home).
+#[test]
+fn no_autostart_never_starts_a_daemon() {
+    let home = Home::new();
+
+    let mut cmd = home.command(&["claim", "--role", "alpha"]);
+    let out = cmd.env("SYNAPSE_NO_AUTOSTART", "1").output().unwrap();
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no daemon answered"), "{err}");
+    assert!(spawned_pids(&out).is_empty(), "{out:?}");
+    assert!(home.announced_pid().is_none(), "a daemon was started");
+
+    let out = home.run(&["claim", "--role", "alpha"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(home.announced_pid().is_some(), "the control started none");
+}
+
 /// Start both commands back to back (not via `output()`, which runs each to completion in turn
 /// on its thread), so their auto-starts overlap. Several fresh homes, since a race need not
 /// happen on any one try; how many tries really raced is printed.

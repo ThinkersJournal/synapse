@@ -46,6 +46,8 @@ const ANNOUNCE_FILE: &str = "synapsed.json";
 /// process cannot see across (a WSL guest reaching a Windows daemon through a relay): its announced
 /// pid is then another machine's, so only the pid check is skipped and the health proof decides.
 const REMOTE_DAEMON_ENV: &str = "SYNAPSE_REMOTE_DAEMON";
+/// Set (not empty, not `0`): `Daemon::connect` never starts a daemon, the lane's owner runs it.
+const NO_AUTOSTART_ENV: &str = "SYNAPSE_NO_AUTOSTART";
 /// How long a started daemon gets to announce itself and answer health.
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// A starting daemon's stderr, in the home; truncated at each start.
@@ -233,8 +235,10 @@ impl Daemon {
     /// Find this home's daemon, starting it if nothing answers.
     pub fn connect(home: &Path) -> Result<Daemon, MailError> {
         // A remote daemon is run by its owner, on the other side: starting one here would be a
-        // second daemon with its own store.
-        if remote_daemon() {
+        // second daemon with its own store. `SYNAPSE_NO_AUTOSTART` asks for the same on a local
+        // one: the owner runs it (with its store and address), and a CLI that started its own
+        // would run with the wrong environment.
+        if remote_daemon() || no_autostart() {
             return Self::connect_existing(home);
         }
         let http = Self::http_client()?;
@@ -574,6 +578,10 @@ fn read_announce(home: &Path) -> Result<Option<Announce>, MailError> {
 
 fn remote_daemon() -> bool {
     is_remote(std::env::var_os(REMOTE_DAEMON_ENV).as_deref())
+}
+
+fn no_autostart() -> bool {
+    is_remote(std::env::var_os(NO_AUTOSTART_ENV).as_deref())
 }
 
 fn is_remote(value: Option<&std::ffi::OsStr>) -> bool {
