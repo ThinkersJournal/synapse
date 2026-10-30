@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fix (rc.199): a role-only home never starts a daemon (ROADMAP row 45)
+
+`Daemon::connect` (the `synapse` CLI) now behaves as with `SYNAPSE_NO_AUTOSTART` on a role-only home (no account key, as `id provision` makes), so a lane cannot start a second daemon beside the owner's while it is down. The adapter already never started one (rc.130); a test now covers a RUNNING adapter whose daemon dies. Design note and a rehearsed restart procedure for the live daemon: `docs/superpowers/specs/2026-10-30-restart-the-live-daemon.md`.
+
 ### Refactor (rc.197): one store-selection path (ROADMAP row 42, slice B)
 
 `synapsed::select_store` is now the only place the mailbox store is chosen, and `Daemon::open_selected` the only open `main` calls (`named_choice` and the second `StoreKind` match are gone). Behaviour unchanged, each case now has a test (`crates/synapsed/tests/select.rs`): a pin wins (the `SYNAPSE_MAILBOX_STORE` deprecation line still prints); else the recorded `mailbox-store.json`; else a home holding `mailbox.redb` or `mailbox.sqlite` keeps that store; else a fresh home is given and records the first file provider. Redb→SQLite migration and the both-files-no-marker refusal are untouched (`migration::prepare`).

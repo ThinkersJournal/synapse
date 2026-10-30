@@ -304,6 +304,48 @@ fn a_provisioned_lane_home_reaches_the_daemon_through_synapse_daemon_home() {
     assert!(err.contains("does not name a running daemon"), "{err}");
 }
 
+/// A lane's role-only home holds no account key, so no daemon could run from it: a command there
+/// never starts one, with or without `SYNAPSE_NO_AUTOSTART` (the lane's CLI and adapter must not
+/// split the lanes across daemons while the owner's is down, 2026-10-30 reconnect measurement).
+/// The control is `no_autostart_never_starts_a_daemon`: an account home does start one.
+#[test]
+fn a_role_only_home_never_starts_a_daemon_even_without_the_variable() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    let root = tempfile::tempdir().unwrap();
+    let roles = root.path().join("roles.txt");
+    std::fs::write(
+        &roles, "lane1
+",
+    )
+    .unwrap();
+    let lanes = root.path().join("lanes");
+    home.ok(&[
+        "id",
+        "provision",
+        "--roles-file",
+        roles.to_str().unwrap(),
+        "--lane-home-root",
+        lanes.to_str().unwrap(),
+        "--apply",
+    ]);
+    let lane = lanes.join("lane1");
+    home.kill_daemon();
+    let stale = home.announced_pid();
+
+    let mut cmd = home.command(&["claim", "--role", "lane1"]);
+    cmd.env("SYNAPSE_HOME", &lane)
+        .env_remove("SYNAPSE_NO_AUTOSTART")
+        .env_remove("SYNAPSE_DAEMON_HOME");
+    let out = cmd.output().unwrap();
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    assert!(spawned_pids(&out).is_empty(), "{out:?}");
+    for leftover in ["synapsed.json", "synapsed-start.err"] {
+        assert!(!lane.join(leftover).exists(), "{leftover} in the lane home");
+    }
+    assert_eq!(home.announced_pid(), stale, "a daemon was started");
+}
+
 /// Start both commands back to back (not via `output()`, which runs each to completion in turn
 /// on its thread), so their auto-starts overlap. Several fresh homes, since a race need not
 /// happen on any one try; how many tries really raced is printed.

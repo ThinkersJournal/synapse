@@ -111,6 +111,13 @@ impl Home {
         self.wait_up();
     }
 
+    /// Kill the daemon and leave it down, with no announce file.
+    fn stop(&mut self) {
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
+        let _ = std::fs::remove_file(self.path().join("synapsed.json"));
+    }
+
     fn path(&self) -> &Path {
         self.dir.path()
     }
@@ -492,6 +499,27 @@ async fn the_adapter_never_starts_a_daemon() {
     for leftover in ["synapsed.json", "synapsed-start.err"] {
         assert!(!dir.path().join(leftover).exists(), "{leftover} exists");
     }
+}
+
+/// The 2026-10-30 reconnect measurement saw a daemon back within ~2 s of a kill and blamed the
+/// adapter. A RUNNING adapter, with its daemon gone and the variable unset, calls, heartbeats and
+/// re-attaches, and still starts nothing (the other test covers startup). The control is that
+/// `synapsed` sits next to this binary, so a spawning client would find it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_adapter_whose_daemon_died_starts_no_replacement() {
+    let mut home = Home::new();
+    let alice = agent(&home, "alice").await;
+    alice.ok("list", json!({})).await;
+
+    home.stop();
+    for _ in 0..3 {
+        assert!(!alice.refused("list", json!({})).await.is_empty());
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+    for leftover in ["synapsed.json", "synapsed-start.err"] {
+        assert!(!home.path().join(leftover).exists(), "{leftover} exists");
+    }
+    assert!(!connects(home.path()), "a daemon answers at the home");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

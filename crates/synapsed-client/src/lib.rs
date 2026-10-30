@@ -47,6 +47,7 @@ const ANNOUNCE_FILE: &str = "synapsed.json";
 /// pid is then another machine's, so only the pid check is skipped and the health proof decides.
 const REMOTE_DAEMON_ENV: &str = "SYNAPSE_REMOTE_DAEMON";
 /// Set (not empty, not `0`): `Daemon::connect` never starts a daemon, the lane's owner runs it.
+/// It also never starts one from a role-only home (no account key), whatever the variable says.
 const NO_AUTOSTART_ENV: &str = "SYNAPSE_NO_AUTOSTART";
 /// Where to read the daemon's announce file when it is not in the caller's own home: a lane's
 /// role-only home (from `synapse id provision`) holds its keys, never the daemon's `synapsed.json`.
@@ -245,7 +246,14 @@ impl Daemon {
         // second daemon with its own store. `SYNAPSE_NO_AUTOSTART` asks for the same on a local
         // one: the owner runs it (with its store and address), and a CLI that started its own
         // would run with the wrong environment.
-        if remote_daemon() || no_autostart() || daemon_home().is_some() {
+        // A role-only home (a lane's, from `id provision`) can never run a daemon: it has no account
+        // key, so one started from it would fail, or, with the lane's environment, be a second
+        // daemon beside the owner's. The owner's is the only one lanes use.
+        if remote_daemon()
+            || no_autostart()
+            || daemon_home().is_some()
+            || synapse::keystore::Keystore::is_role_only_home(home)
+        {
             return Self::connect_existing(home);
         }
         let http = Self::http_client()?;
