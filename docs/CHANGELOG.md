@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.198): ROADMAP row 44, the PersistAnt ask to split its registry features
+
+Filed as a row with the rc.196 size and build-time measurement as its baseline; not blocking.
+
 ### Feature (rc.196): SQLite store in the default build (ROADMAP row 42, slice A)
 
 `synapsed` now has `default = ["sqlite-store"]`: a home with no mailbox file starts on PersistAnt SQLite; a home that already holds a redb mailbox stays on it. `--no-default-features` builds the redb-only daemon. Measured (release, cold target dir, Windows, `-p synapsed`): `synapsed.exe` 8,150,016 to 31,259,136 bytes; build 357 s to 417 s. The size is sqlx with sqlite, postgres and mysql, accepted for now; a PersistAnt ask to split the registry features is a ROADMAP row.
