@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.185): `SYNAPSE_NO_AUTOSTART` stops the CLI starting a daemon
+
+With `SYNAPSE_NO_AUTOSTART` set (not empty, not `0`), `Daemon::connect` behaves as `connect_existing`: it finds the daemon its owner runs, with the owner's store and address, and fails with `no daemon answered` rather than start one with the wrong environment. The MCP adapter already never started one. Unlike `SYNAPSE_REMOTE_DAEMON` it leaves the announced-pid liveness check alone.
+
 ### Changed (rc.184): configurant 0.2.34 to 0.5.22
 
 `synapsed` takes the latest ConfigurAnt (published 2026-10-30). The 0.5 line is a breaking release of that crate, but the daemon's use of it (`Loader`, `Origin`, `Schema` in `settings.rs`) compiles unchanged and the `synapsed` tests pass; no behaviour change.
