@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (rc.183): `--help` and `-h` work in all four binaries, `--version` in the two adapters
 
-`synapsed`, `synapse-mcp`, `synapse-agent` and `synapse-claude-channel` now answer `--help`/`-h` (usage on stdout) and `--version`/`-V` with exit 0 before opening any home, keystore, store or port. Before, `synapsed` and `synapse-mcp` looked up the keystore first, and the two adapters had neither flag (CodeRipper OPS-011). Also adds `SECURITY.md` with the supported-versions policy: the latest line gets security fixes, an older line only when the backport is small, and no support period is promised.
+`synapsed`, `synapse-mcp`, `synapse-agent` and `synapse-claude-channel` now answer `--help`/`-h` (usage on stdout) and `--version`/`-V` with exit 0 before opening any home, keystore, store or port. Before, `synapsed` and `synapse-mcp` looked up the keystore first, and the two adapters had neither flag (CodeRipper OPS-011). An unknown argument now exits 2 with `unknown argument` on stderr and starts nothing; before, `synapsed --bogus` started a daemon. Also adds `SECURITY.md` with the supported-versions policy: the latest line gets security fixes, an older line only when the backport is small, and no support period is promised.
 
 ### Added (rc.182): `synapse stats --daemon` shows `launch_senders_set`
 

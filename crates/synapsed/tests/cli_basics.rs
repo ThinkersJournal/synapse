@@ -41,3 +41,28 @@ fn help_and_version_flags_answer_and_create_nothing() {
         assert_eq!(listing(dir.path()), before, "{flag} created something");
     }
 }
+
+#[test]
+fn an_unknown_argument_exits_2_and_creates_nothing() {
+    for flag in ["--bogus", "bogus"] {
+        let dir = tempfile::tempdir().unwrap();
+        let before = listing(dir.path());
+        let out = Command::new(env!("CARGO_BIN_EXE_synapsed"))
+            .arg(flag)
+            .current_dir(dir.path())
+            .env_remove("SYNAPSE_HOME")
+            .env_remove("SYNAPSE_ROLE")
+            .env_remove("SYNAPSE_ADDR")
+            .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
+            .env("LOCALAPPDATA", dir.path())
+            .env("APPDATA", dir.path())
+            .env("XDG_DATA_HOME", dir.path())
+            .output()
+            .expect("the binary runs");
+        assert_eq!(out.status.code(), Some(2), "{flag}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("unknown argument"), "{flag}: {stderr:?}");
+        assert_eq!(listing(dir.path()), before, "{flag} created something");
+    }
+}
