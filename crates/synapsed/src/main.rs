@@ -15,8 +15,8 @@
 //! names the role(s), comma separated, that may read them (for example `agentlife-launcher`).
 //! Security alerts go as mail to the roles in `SYNAPSE_ALERT_ROLES` (comma separated), from
 //! `daemon:alerts@<account>`; unset, nothing changes.
-//! The mailbox store, in order: `SYNAPSE_MAILBOX_STORE` (deprecated pin: `redb`, or `sqlite` in a
-//! build with `--features sqlite-store`); else the PersistAnt provider recorded in
+//! The mailbox store (`synapsed::select_store`), in order: `SYNAPSE_MAILBOX_STORE` (deprecated pin:
+//! `redb`, or `sqlite` in a build with `--features sqlite-store`); else the PersistAnt provider recorded in
 //! `<home>/mailbox-store.json` (`synapsectl storage list` shows what this build offers, `storage use`
 //! records one); else, on a home with no mailbox file and in a `sqlite-store` build, the first
 //! provider PersistAnt lists for the mailbox's needs, which is then recorded; else redb. A different
@@ -26,7 +26,7 @@
 
 use std::process::ExitCode;
 
-use synapsed::{Daemon, DaemonConfig, StoreKind};
+use synapsed::{Daemon, DaemonConfig};
 
 const USAGE: &str = "usage: synapsed (no arguments; configured by SYNAPSE_HOME, <home>/synapsed.toml and SYNAPSE_* in the environment)";
 
@@ -89,37 +89,18 @@ async fn main() -> ExitCode {
         addr,
         sweep_every: std::time::Duration::from_secs(3600),
     };
-    #[cfg(feature = "sqlite-store")]
-    let named = match named_choice(&config.home, &settings) {
-        Ok(choice) => choice,
+    let selection = match synapsed::select_store(
+        &config.home,
+        settings.store_pin.as_deref(),
+        settings.store_pin_from_env,
+    ) {
+        Ok(selection) => selection,
         Err(e) => {
             eprintln!("synapsed: {e}");
             return ExitCode::from(2);
         }
     };
-    let kind = match settings.store_pin.as_deref() {
-        None | Some("" | "redb") => StoreKind::Redb,
-        #[cfg(feature = "sqlite-store")]
-        Some("sqlite") => StoreKind::Sqlite,
-        Some(other) => {
-            eprintln!(
-                "synapsed: the store pin (SYNAPSE_MAILBOX_STORE, or storage.id in synapsed.toml) {other:?} is not available in this build                  (redb{})",
-                if cfg!(feature = "sqlite-store") {
-                    ", sqlite"
-                } else {
-                    "; sqlite needs --features sqlite-store"
-                }
-            );
-            return ExitCode::from(2);
-        }
-    };
-    #[cfg(feature = "sqlite-store")]
-    let opened = match &named {
-        Some(choice) => Daemon::open_named(&config, choice),
-        None => Daemon::open_with(&config, kind),
-    };
-    #[cfg(not(feature = "sqlite-store"))]
-    let opened = Daemon::open_with(&config, kind);
+    let opened = Daemon::open_selected(&config, &selection);
     let daemon = match opened {
         Ok(daemon) => daemon,
         Err(e) => {
@@ -155,47 +136,6 @@ async fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
-}
-
-/// The PersistAnt provider to serve the mailbox from, or `None` for the pinned/default store.
-/// `SYNAPSE_MAILBOX_STORE` (deprecated) wins; then the recorded choice; then, on a home with no
-/// mailbox file, the first provider PersistAnt lists for the mailbox's needs, recorded so the next
-/// start opens the same one.
-#[cfg(feature = "sqlite-store")]
-fn named_choice(
-    home: &std::path::Path,
-    settings: &synapsed::settings::Settings,
-) -> Result<Option<synapse_mailbox_persistant::needs::StoreChoice>, String> {
-    use synapse_mailbox_persistant::needs::{StoreChoice, listing};
-    if settings.store_pin.is_some() {
-        if settings.store_pin_from_env {
-            eprintln!(
-                "synapsed: SYNAPSE_MAILBOX_STORE is deprecated; record a store with `synapse storage use`"
-            );
-        }
-        return Ok(None);
-    }
-    if let Some(choice) = StoreChoice::read(home).map_err(|e| e.to_string())? {
-        return Ok(Some(choice));
-    }
-    if home.join("mailbox.redb").exists() || home.join("mailbox.sqlite").exists() {
-        return Ok(None);
-    }
-    let Ok(listed) = listing(&synapse::mailbox::MailboxNeeds::MAILBOX) else {
-        return Ok(None);
-    };
-    // A server needs a URL only the operator has, so a fresh home is given the best file store.
-    let Some(top) = synapse_mailbox_persistant::needs::first_file_store(&listed) else {
-        return Ok(None);
-    };
-    let choice = StoreChoice::new(top.id, None).map_err(|e| e.to_string())?;
-    choice.write(home).map_err(|e| e.to_string())?;
-    eprintln!(
-        "synapsed: fresh home; recorded mailbox store {:?} in {}",
-        choice.id,
-        synapse_mailbox_persistant::needs::CHOICE_FILE
-    );
-    Ok(Some(choice))
 }
 
 /// Resolves on the first stop request. A handler that cannot be installed just never fires.

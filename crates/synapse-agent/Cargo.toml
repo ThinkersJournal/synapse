@@ -18,8 +18,8 @@ name = "synapse-agent"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.196" }
-synapse-mcp-server = { path = "../synapse-mcp-server", version = "6.0.0-rc.196" }
+synapse = { path = "../..", version = "6.0.0-rc.197" }
+synapse-mcp-server = { path = "../synapse-mcp-server", version = "6.0.0-rc.197" }
 genai = "0.7.0"
 serde_json = "1.0"
 tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "time"] }
@@ -27,6 +27,6 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 [dev-dependencies]
-synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.196" }
+synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.197" }
 tempfile = "3.0"
 tokio = { version = "1.46.1", features = ["net", "io-util", "process"] }
