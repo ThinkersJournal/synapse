@@ -7,9 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
-### Chore (rc.190): `persistant`, `persistant-sqlx` and `persistant-kv` 0.9 to 0.12.3 (ROADMAP row 42, slice 0)
+### Chore (rc.194): `persistant`, `persistant-sqlx` and `persistant-kv` 0.9 to 0.12.3 (ROADMAP row 42, slice 0)
 
 The three were declared at 0.9.x while 0.12.3 is current (latest-deps rule). `synapse-mailbox-persistant`, `synapsed --features sqlite-store` and `synapsectl --features storage` compile unchanged against 0.12.3; the persistant crate's tests and the whole `synapsed` suite with `sqlite-store` pass. `Cargo.lock` moves the persistant family 0.9.10 to 0.12.3, the `unisql` crates 0.24.17 to 0.27.10, and adds `capant` 0.0.7 (a dependency of `persistant-core`, from crates.io). No git or path dependencies.
+
+### Docs (rc.193): cutover readiness update 2026-10-30 and the runbook's first-soak notes
+
+`docs/CUTOVER_READINESS_2026-10-15.md` section 6 re-reads items 1-6 at `42bb441` (G5 and G7 closed, bounded-attempt delivery accepted by CireSnave, role-name table = the provisioned role list, acked is not displayed) without rewriting the 10-15 text; `docs/CUTOVER_RUNBOOK.md` section 6 records the two first-start findings. No code changes.
+
+### Fixed (rc.192): the adapter's startup failure says what the identity store refused
+
+`describe` turned every keystore error into "the identity store refused: check the role and home", so a lane whose adapter exited at its first start (soak, 2026-10-30, capant and pm-assist) gave the operator nothing to act on. It now appends the keystore's own text, which names the problem (no role certificate, expired certificate, a too-open item) and never a path. **The cause of that first-start exit was a stale installed adapter** (the `~/.cargo/bin` build of 2026-10-23 predates the role-only keystore of rc.134, so it looked for an account key in a role-only home); reproduced with that binary on a fresh provision, and a current build starts on the same home. The fix is to install a current adapter; this change only makes the next such exit name its keystore error.
+
+### Fixed (rc.191): a provisioned lane home reaches the daemon without an announce copy (`SYNAPSE_DAEMON_HOME`)
+
+A role-only home from `id provision` holds keys and no `synapsed.json`, and the client read the announce file only from its own home, so a lane's MCP adapter exited at start (`CONNECTION_CLOSED`); the cutover runbook had never been run end to end. `SYNAPSE_DAEMON_HOME`, when set, is where the announce file is read from; keys and sessions stay in `SYNAPSE_HOME`, and setting it also keeps the CLI from starting a daemon. "No daemon answered" now names the announce file it read: a missing one, or a stale copy that no longer names a running daemon, or a listener that failed the proof. Test `a_provisioned_lane_home_reaches_the_daemon_through_synapse_daemon_home` (no copy in the lane home; control without the variable; stale file after the daemon dies), sabotage-checked. `docs/CUTOVER_RUNBOOK.md` section 2 carries the variable and the stopgap.
+
+### Fixed (rc.190): the SQLite store's cold-start lines carry their own clock
+
+Each `synapse: mail store <path>: <step>` line printed while `SqliteMailStore::open` runs now ends in the wall clock it was written at (UTC, to the millisecond), the time since the previous step and the time since the open began, so a start that fails (the `pool timed out` exits of 2026-10-22, 10-24 and 10-29) shows which step was slow and when. Only the log text changes. The row 42 design note drops the WAL-checkpoint slice: a read-only copy of the live store showed the WAL at exactly 1000 frames, the default `wal_autocheckpoint`, so it is steady state, and the earlier claim that an oversized WAL caused the timeouts is retracted. The cause of the timeouts and who held `mailbox.sqlite` at the time are not established.
+
+### Chore (rc.189): the five unwaived gitleaks hits are triaged and waived with reasons
+
+The CodeRipper portfolio job's SEC-002 scan (gitleaks 8.30.1) reported 7 hits on `main` at `6b63312`; 2 were already waived. The other 5 are not credentials, and each now has a line-scoped `[[allow]]` entry in `.coderipper.toml` with its reason: a 14-character event name in `crates/synapsed/tests/api.rs`; two `format!` PEM templates in `src/auth_integration.rs` and `src/auth_integration_enhanced.rs` (history only, both files since deleted); the jwt.io documentation sample token in `tests/security_test.rs`; and the RFC 6455 sample nonce in `tests/transport_repairs.rs` (the last two by sha256 against the public values). No value is printed anywhere. Waivers are by line, not by file, so a new secret in those files is still reported.
+
+### Chore (rc.188): the CodeRipper portfolio caller is pinned to coderipper#182
+
+`ci_cd.yml` calls `ciresnave/coderipper/.github/workflows/portfolio.yml` at `b45eb41` (was `30e012b`). That revision frees runner disk before the sweep (#290's sweep ran out of disk, so three members did not build and the secrets scan never ran) and names a failed check or tool install. It also moves CodeRipper itself from 0.9.6 to the current release, so more rules run; the job stays advisory and is not a required check. Workflow only.
 
 ### Docs (rc.187): design note for the mailbox store through PersistAnt `choose` (ROADMAP row 42)
 

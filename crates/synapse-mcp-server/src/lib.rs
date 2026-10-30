@@ -155,8 +155,10 @@ pub struct SynapseMcpServer {
 /// Fixed text for failures whose own message could name a key path.
 fn describe(e: &MailError) -> String {
     match e {
-        MailError::Keystore(_) => {
-            "the identity store refused: check the role and home with `synapse id`".to_string()
+        // A `KeystoreError`'s text names the problem (a missing certificate, a too-open item), never
+        // a path, so it can be shown: a bare "refused" gave the operator nothing to act on.
+        MailError::Keystore(e) => {
+            format!("the identity store refused: {e}; check the role and home with `synapse id`")
         }
         MailError::Io(_) => "a local file operation failed".to_string(),
         other => other.to_string(),
@@ -642,8 +644,12 @@ mod tests {
         let keystore = MailError::Keystore(KeystoreError::InvalidName);
         assert_eq!(
             describe(&keystore),
-            "the identity store refused: check the role and home with `synapse id`"
+            "the identity store refused: names may contain only letters, digits, '-' and '_' (1 to 64); check the role and home with `synapse id`"
         );
+        let too_open = describe(&MailError::Keystore(KeystoreError::PermissionsTooOpen(
+            "session directory",
+        )));
+        assert!(too_open.contains("session directory"), "{too_open}");
 
         let other = MailError::NoDaemon("not running".into());
         assert_eq!(

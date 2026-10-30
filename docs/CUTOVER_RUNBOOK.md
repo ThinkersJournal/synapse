@@ -43,6 +43,14 @@ synapsed --version; synapse --version; synapse-claude-channel --version   # whic
   outside the login task). The adapters already never start one. With it set and no daemon the command exits non-zero
   with `no daemon answered`; that is the intended failure, not a bug to retry around.
 - Unknown flags exit 2 and start nothing, in all four binaries.
+- `SYNAPSE_DAEMON_HOME` *(rc.191)*: the directory to read the daemon's `synapsed.json` from, when it is not the lane's
+  own home. A role-only home from `id provision` holds keys and never an announce file, so without this the adapter
+  exits at start (`CONNECTION_CLOSED`; by hand: `no daemon answered; no announce file at <lane home>\synapsed.json`).
+  Set it to the daemon's home (`SYNAPSE_HOME` of section 1) in the lane's `.mcp.json` `env` block; keys and sessions
+  stay in `SYNAPSE_HOME`. It also stops the CLI auto-starting a daemon. Until a lane carries it, the stopgap is the
+  PM's `tools/synapse-announce-sync.sh`, which copies the announce file into each lane home and goes stale at every
+  daemon start (new `instance_id` and pid); a stale copy now fails with `announce file <path> does not name a running
+  daemon`. Remove the copies once every lane sets the variable.
 
 ## 3. Weekly provision: each lane gets a role-only home
 
@@ -88,3 +96,11 @@ changed until the PM says so in writing. Consequences to plan for:
 5. Each role home's certificate is current (the last provision printed `ok` or `renewed` for it).
 
 Rollback and the side-by-side phases are in `docs/CUTOVER_READINESS_2026-10-15.md` section 4.
+
+## 6. Dated notes
+
+- **2026-10-30, first soak lanes.** (1) A role-only home has no `synapsed.json`: set `SYNAPSE_DAEMON_HOME` (section 2); the
+  announce-copy stopgap goes stale at every daemon start. (2) An adapter that exits at its first start with "the
+  identity store refused" is an adapter older than rc.134 (the role-only keystore); the installed `synapse-claude-channel`
+  of 2026-10-23 was one. Check `synapse-claude-channel --version` (absent before rc.179) and reinstall the adapter, not
+  `synapsed`, before launching a lane. Reproduced on a fresh provision; a current build starts on the same home.
