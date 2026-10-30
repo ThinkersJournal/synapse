@@ -152,3 +152,23 @@ Not required for cutover: the launch-on-message poller (part C), broadcast (G8, 
 
 Ready means 1-6 hold and the Phase B exit conditions are met; the earliest that can be is 3 days after
 items 1-3 are done.
+
+## 6. Update 2026-10-30 (at `origin/main@42bb441`, rc.191): items 1-6 re-read
+
+The text above is the 2026-10-15 reading and is not rewritten. What moved, with the evidence:
+
+| Item | State | Evidence |
+|---|---|---|
+| 1 G5, dev-channels approval | **Closed** | `ciresnave/ciresnave` PR #13 (every lane, two channels) merged 2026-10-26 and PR #14 (Synapse only, every lane, no expiry) merged 2026-10-28. Live: the host log of the synapse lane's `lane-restart host --role synapse` launch of 2026-10-30T03:18Z shows `synapse-dev-channel-any-lane matched=true` |
+| 2 G7, daemon at login | **Closed** | scheduled task `\synapsed-cires`, at logon, interactive-only; it started the daemon (pid 15536) at 2026-10-29 20:11:24 after the reboot. Limit: it needs `cires` logged in |
+| 3 launch with `--role` and the channel; role-name table | **In progress** | a real `lane-restart host --role synapse` launch with the Synapse channel ran on 2026-10-30 (G6 launch half: yes). G6 notify half is **not** flipped (`notify_transport` unset, default broker). The PM ran `synapse id provision --apply` from the account home on CireSnave's instruction (2026-10-30): 19 role homes created, 0 refused, under `C:\Users\cires\AppData\Local\synapse-lanes\<role>`. The role list, `C:\Projects\.lane-state\roles-soak.txt`, **is the role-name table**: role = lane name, cwd `C:\Projects\<lane dir>`. No key was read for this record |
+| 4 side-by-side soak on current main | **Open** | none since the rc.33 soak; the PM's three-day Phase B starts after the switch-and-back test |
+| 5 bounded-attempt delivery | **Closed** | CireSnave, 2026-10-30, verbatim as relayed by the PM from the PM session: *"Message loss, although not ideal, is acceptable."* The soak's zero-lost stays a **measurement**, not a gate |
+| 6 claude-peers restore test | **Open** | no record that one was run; OverMind asked to run it once on a scratch broker port. Needed before Phase C, not Phase B |
+
+**Acked is not displayed.** `/v1/stats` counts, per recipient role, `sent`, `acked`, `redelivered`, `expired`, in memory since the daemon started. The adapter acks a message itself after a bounded number of push attempts, so `acked` says nothing about whether Claude Code showed it. Loss is measured end to end: numbered canary mails to a sample of lanes with a one-line reply, compared with transcripts. A per-sender tally and counters that survive a restart are a queued task.
+
+**Found by the first soak lanes (2026-10-30), both fixed or explained:**
+
+1. A role-only home from `id provision` holds no `synapsed.json`, so an adapter in it exited at start. Fix: `SYNAPSE_DAEMON_HOME` (#298, rc.191); until a lane carries it, the PM's `tools/synapse-announce-sync.sh` copies the announce file in, and goes stale at every daemon start.
+2. `synapse-claude-channel` exited at its first start with "the identity store refused". Cause, reproduced with the installed binary on a fresh provision (a current build starts on the same home): the installed adapter was the 2026-10-23 build, older than the role-only keystore (rc.134), so it looked for an account key. The CLI's `list` creating `sessions/<role>.json` made the old adapter skip the claim, which is why seeding worked. Fix: install a current adapter. #299 makes the error name the keystore's reason.
