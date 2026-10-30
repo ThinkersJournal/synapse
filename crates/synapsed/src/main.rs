@@ -28,15 +28,38 @@ use std::process::ExitCode;
 
 use synapsed::{Daemon, DaemonConfig, StoreKind};
 
+const USAGE: &str = "usage: synapsed (no arguments; configured by SYNAPSE_HOME, <home>/synapsed.toml and SYNAPSE_* in the environment)";
+
+/// The first argument that is neither one of `known` nor the value after one.
+fn unknown_arg(known: &[&str]) -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if known.contains(&a.as_str()) {
+            args.next();
+        } else {
+            return Some(a);
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    // Before anything else: a version query opens no home, store or port.
-    if std::env::args()
-        .nth(1)
-        .is_some_and(|a| a == "--version" || a == "-V")
-    {
-        println!("synapsed {}", env!("CARGO_PKG_VERSION"));
-        return ExitCode::SUCCESS;
+    // Before anything else: a help or version query opens no home, store or port.
+    match std::env::args().nth(1).as_deref() {
+        Some("--version" | "-V") => {
+            println!("synapsed {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        Some("--help" | "-h") => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
+    if let Some(bad) = unknown_arg(&[]) {
+        eprintln!("synapsed: unknown argument {bad:?}; {USAGE}");
+        return ExitCode::from(2);
     }
     let home = match synapse::keystore::default_home() {
         Ok(home) => home,
