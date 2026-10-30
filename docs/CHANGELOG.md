@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Filed as a row with the rc.196 size and build-time measurement as its baseline; not blocking.
 
+### Refactor (rc.197): one store-selection path (ROADMAP row 42, slice B)
+
+`synapsed::select_store` is now the only place the mailbox store is chosen, and `Daemon::open_selected` the only open `main` calls (`named_choice` and the second `StoreKind` match are gone). Behaviour unchanged, each case now has a test (`crates/synapsed/tests/select.rs`): a pin wins (the `SYNAPSE_MAILBOX_STORE` deprecation line still prints); else the recorded `mailbox-store.json`; else a home holding `mailbox.redb` or `mailbox.sqlite` keeps that store; else a fresh home is given and records the first file provider. Redb→SQLite migration and the both-files-no-marker refusal are untouched (`migration::prepare`).
+
+**Planned (slice C), not a promise date (PM ruling 2026-10-30): the `redb` mailbox variant (`StoreKind::Redb`, `SYNAPSE_MAILBOX_STORE=redb`) is removed no earlier than 2026-11-30, and only after (a) the live daemon's home is migrated to SQLite by a tested path and (b) the 3-day Phase B soak is closed and Phase C decided; `redb` stays for the daemon's state engine. Migration window: `migration::prepare` copies and verifies `mailbox.redb` while no daemon holds it, so mail accepted before the stop is carried; sends during the gap from stop to the new daemon's first start get the no-daemon answer and are not queued, and going back to redb after the move loses every message accepted since (message loss on the migration is acceptable: CireSnave 2026-10-30, archive 326). Slice C gets its own ROADMAP row then.
+
 ### Feature (rc.196): SQLite store in the default build (ROADMAP row 42, slice A)
 
 `synapsed` now has `default = ["sqlite-store"]`: a home with no mailbox file starts on PersistAnt SQLite; a home that already holds a redb mailbox stays on it. `--no-default-features` builds the redb-only daemon. Measured (release, cold target dir, Windows, `-p synapsed`): `synapsed.exe` 8,150,016 to 31,259,136 bytes; build 357 s to 417 s. The size is sqlx with sqlite, postgres and mysql, accepted for now; a PersistAnt ask to split the registry features is a ROADMAP row.
