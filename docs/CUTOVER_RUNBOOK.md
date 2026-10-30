@@ -43,6 +43,14 @@ synapsed --version; synapse --version; synapse-claude-channel --version   # whic
   outside the login task). The adapters already never start one. With it set and no daemon the command exits non-zero
   with `no daemon answered`; that is the intended failure, not a bug to retry around.
 - Unknown flags exit 2 and start nothing, in all four binaries.
+- `SYNAPSE_DAEMON_HOME` *(rc.191)*: the directory to read the daemon's `synapsed.json` from, when it is not the lane's
+  own home. A role-only home from `id provision` holds keys and never an announce file, so without this the adapter
+  exits at start (`CONNECTION_CLOSED`; by hand: `no daemon answered; no announce file at <lane home>\synapsed.json`).
+  Set it to the daemon's home (`SYNAPSE_HOME` of section 1) in the lane's `.mcp.json` `env` block; keys and sessions
+  stay in `SYNAPSE_HOME`. It also stops the CLI auto-starting a daemon. Until a lane carries it, the stopgap is the
+  PM's `tools/synapse-announce-sync.sh`, which copies the announce file into each lane home and goes stale at every
+  daemon start (new `instance_id` and pid); a stale copy now fails with `announce file <path> does not name a running
+  daemon`. Remove the copies once every lane sets the variable.
 
 ## 3. Weekly provision: each lane gets a role-only home
 
