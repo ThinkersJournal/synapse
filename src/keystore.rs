@@ -757,6 +757,13 @@ impl Keystore {
         )
     }
 
+    /// Whether `home` is a lane's role-only home: it names an account but holds no account key,
+    /// so no daemon could run from it. Anything unreadable counts as not role-only.
+    #[must_use]
+    pub fn is_role_only_home(home: &Path) -> bool {
+        Keystore::open_role_only(home).is_ok()
+    }
+
     /// Open a home that must NOT hold an account key. Refuses one that does.
     pub fn open_role_only(home: &Path) -> Result<RoleOnlyKeystore> {
         if account_key_exists(home)? {
