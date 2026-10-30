@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Chore (rc.190): `persistant`, `persistant-sqlx` and `persistant-kv` 0.9 to 0.12.3 (ROADMAP row 42, slice 0)
+
+The three were declared at 0.9.x while 0.12.3 is current (latest-deps rule). `synapse-mailbox-persistant`, `synapsed --features sqlite-store` and `synapsectl --features storage` compile unchanged against 0.12.3; the persistant crate's tests and the whole `synapsed` suite with `sqlite-store` pass. `Cargo.lock` moves the persistant family 0.9.10 to 0.12.3, the `unisql` crates 0.24.17 to 0.27.10, and adds `capant` 0.0.7 (a dependency of `persistant-core`, from crates.io). No git or path dependencies.
+
 ### Docs (rc.187): design note for the mailbox store through PersistAnt `choose` (ROADMAP row 42)
 
 `docs/superpowers/specs/2026-10-30-mailbox-store-choose.md`. Reading the code first: selection through `choose` already exists behind `sqlite-store`, so the work left is SQLite in the default build, one selection path, the redb decision, and WAL handling, with the WAL item held until the cause of the pool timeouts is captured (a checkpoint runs after the connect that timed out). Finds the `persistant` crates three minor lines behind (0.9 declared, 0.12.3 current), proposed as slice 0. No code changes.
