@@ -51,22 +51,21 @@ treatment as the migration did. Not started until A has merged.
 - Recommendation: keep redb as a read-only migration source for one release line after A, then drop the mailbox-store
   variant and keep the dependency only for state. Needs the PM or CireSnave to confirm; nothing here depends on it.
 
-**D. WAL handling at startup (the evidence is thinner than the row implies).**
-- Evidence: the daemon exited with `pool timed out while waiting for an open connection` on 2026-10-22, 2026-10-24 and
-  2026-10-29; the 2026-10-29 note records a 4 MB un-checkpointed WAL. `retry_pool_timeouts` (3 attempts, 30 s busy wait
-  each) was added for the first.
-- A checkpoint cannot cure a connect that timed out: it runs after the pool exists. `PersistAnt` exposes the pool
-  (`SqliteBackend::pool()`), so `PRAGMA wal_checkpoint(TRUNCATE)` after `open_durable` is possible, and it would stop
-  an oversized WAL from persisting across restarts and shorten the next recovery. Neither `persistant-sqlx` 0.9.10 nor
-  0.12.3 has a checkpoint helper or sets `wal_autocheckpoint`/`journal_size_limit` (searched `src/` of both).
-- What is NOT known: why a 4 MB WAL made a connection wait 30 s three times. Recovering a WAL of that size should be quick (not measured here);
-  a 30 s wait suggests another process holding the file (a second daemon, an antivirus scan, the previous process still
-  exiting) rather than WAL size. **Before writing a checkpoint, capture it:** the `step(...)` timings the open already
-  prints, and who holds `mailbox.sqlite` / `mailbox.sqlite-wal` at the time (`Get-Process` / handle listing). If it is a
-  second holder, the fix is the lock, not the checkpoint.
-- Proposed code, once the cause is known: checkpoint-and-truncate at open (failure is a warning, never fatal), and again at
-  graceful shutdown, each with a test that a grown WAL is truncated. Do not ship it as a cure for the timeout unless the
-  capture says so.
+**D. WAL handling at startup: dropped (2026-10-30, PM agreed).**
+- The premise was wrong. A read-only inspection of a COPY of the live `mailbox.sqlite`, `-wal` and `-shm` found the WAL at
+  4,120,032 bytes = 32 + 1000 x (4096 + 24): exactly 1000 frames, which is SQLite's default `wal_autocheckpoint` (1000
+  pages). That is the steady-state size of a WAL that is checkpointed and reused, not growth. `checkpoint_seq` was 3,
+  `integrity_check` ok, `persistant_kv` 346 rows. The earlier statement that "a 4 MB un-checkpointed WAL" caused the
+  pool timeout is retracted. A checkpoint at start is therefore not built.
+- What the daemon's own log (`task/synapsed.log`) does show: 5 `pool timed out` failures between 2026-10-22 and
+  2026-10-29, and on the first start after the 2026-10-29 reboot the step "sqlite and key-value layer open" ended 10 s
+  after the open began (a warm start took 23 ms). The slow part was the pool connect.
+- **Cause: not established. Who held `mailbox.sqlite` at the failures: not established** (`handle64.exe` printed nothing from
+  an unelevated shell; the process table at capture time held one `synapsed`, four adapters and Windows Defender's
+  `MsMpEng`, none shown to hold the file). Nothing here claims a cause.
+- Done instead (rc.191): every cold-start step line now carries its own UTC clock, the time since the previous step and
+  since the open began, so the next failure brings its own evidence. A bounded retry exists already (`OPEN_RETRIES`);
+  whether more is needed waits for a failure that carries those timestamps.
 
 ## 3. Dependency lag to resolve first (standing rule: newest dependencies)
 
@@ -81,12 +80,13 @@ rule wants, or the work is redone. This is a bump PR of its own (read the 0.10, 
 0. `persistant` 0.9 to 0.12 (section 3).
 1. A: SQLite in the default build, with the size and install-time measurement.
 2. B: one selection path.
-3. D: capture the cause of the pool timeout; then the checkpoint if the capture supports it.
+3. D: dropped; step lines timestamped instead (rc.191).
 4. C: redb decision applied (code only after the decision).
 
-## 5. Open calls for the PM
+## 5. The PM's answers (2026-10-30)
 
-1. Is the persistant bump (slice 0) mine to start now? It predates this row and the rule says it was due.
-2. A's cost: accept sqlx for all three databases in every build, or ask PersistAnt to split the registry features?
-3. C: keep redb for one line as a migration source, then drop the mailbox variant?
-4. D: allowed to capture handle and timing evidence on the live daemon (read-only), or does the PM run it?
+1. Slice 0 (persistant 0.9 to 0.12.3): yes, now. Done as #296 (rc.190).
+2. A: accept sqlx for SQLite, PostgreSQL and MySQL in the default build for now; file a PersistAnt ask to make the registry
+   features splittable, as a scheduled ROADMAP row (not blocking).
+3. C: keep redb for one release line as a migration source, then drop the mailbox variant, with the drop dated in the CHANGELOG.
+4. D: read-only capture done by the synapse lane on copies; slice D dropped (section 2).

@@ -87,14 +87,22 @@ impl SqliteMailStore {
     /// When the file is too open, or the database cannot be opened.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
-        // One line per cold-start step with the time since the open began, so a start that hangs
-        // (the 2026-10-24 pool timeouts) shows which step it was in.
+        // One line per cold-start step with its own clock (UTC), the time since the previous step
+        // and since the open began, so a start that hangs (the 2026-10-24 pool timeouts) shows
+        // which step it was in and when, to line up with anything else that ran at that time.
         let begun = std::time::Instant::now();
+        let last = std::cell::Cell::new(begun);
         let step = |what: &str| {
+            let now = std::time::Instant::now();
             eprintln!(
-                "synapse: mail store {}: {what} ({:.0?} since the open began)",
-                path.display(),
-                begun.elapsed()
+                "{}",
+                step_line(
+                    &path,
+                    what,
+                    Utc::now(),
+                    now.duration_since(last.replace(now)),
+                    now.duration_since(begun)
+                )
             );
         };
         step("opening");
@@ -140,6 +148,24 @@ impl SqliteMailStore {
         store._lock = Some(lock);
         Ok(store)
     }
+}
+
+/// One cold-start line: the step, the wall clock it ended at (UTC, to the millisecond), the time
+/// since the previous step and since the open began.
+fn step_line(
+    path: &Path,
+    what: &str,
+    at: DateTime<Utc>,
+    since_previous: std::time::Duration,
+    since_begun: std::time::Duration,
+) -> String {
+    format!(
+        "synapse: mail store {}: {what} at {} (+{:.0?} since the previous step, {:.0?} since the open began)",
+        path.display(),
+        at.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+        since_previous,
+        since_begun
+    )
 }
 
 /// How many times an open is repeated after the pool gave up waiting for a connection.
@@ -925,6 +951,28 @@ impl<K: KvBackend + Send + Sync + 'static> MailStore for PersistantMailStore<K> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_step_line_carries_its_clock_and_both_elapsed_times() {
+        let at = DateTime::parse_from_rfc3339("2026-10-29T20:11:28.123456Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let line = step_line(
+            Path::new("home/mailbox.sqlite"),
+            "runtime started",
+            at,
+            std::time::Duration::from_millis(156),
+            std::time::Duration::from_millis(657),
+        );
+        assert_eq!(
+            line,
+            [
+                "synapse: mail store home/mailbox.sqlite: runtime started at 2026-10-29T20:11:28.123Z",
+                " (+156ms since the previous step, 657ms since the open began)",
+            ]
+            .concat()
+        );
+    }
 
     fn timed_out() -> Result<u8, String> {
         Err("database unavailable: pool timed out while waiting for an open connection".into())

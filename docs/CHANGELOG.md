@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.191): the SQLite store's cold-start lines carry their own clock
+
+Each `synapse: mail store <path>: <step>` line printed while `SqliteMailStore::open` runs now ends in the wall clock it was written at (UTC, to the millisecond), the time since the previous step and the time since the open began, so a start that fails (the `pool timed out` exits of 2026-10-22, 10-24 and 10-29) shows which step was slow and when. Only the log text changes. The row 42 design note drops the WAL-checkpoint slice: a read-only copy of the live store showed the WAL at exactly 1000 frames, the default `wal_autocheckpoint`, so it is steady state, and the earlier claim that an oversized WAL caused the timeouts is retracted. The cause of the timeouts and who held `mailbox.sqlite` at the time are not established.
+
 ### Docs (rc.187): design note for the mailbox store through PersistAnt `choose` (ROADMAP row 42)
 
 `docs/superpowers/specs/2026-10-30-mailbox-store-choose.md`. Reading the code first: selection through `choose` already exists behind `sqlite-store`, so the work left is SQLite in the default build, one selection path, the redb decision, and WAL handling, with the WAL item held until the cause of the pool timeouts is captured (a checkpoint runs after the connect that timed out). Finds the `persistant` crates three minor lines behind (0.9 declared, 0.12.3 current), proposed as slice 0. No code changes.
