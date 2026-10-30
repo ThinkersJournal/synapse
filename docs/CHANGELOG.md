@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
-### Docs (rc.193): cutover readiness update 2026-10-30 and the runbook's first-soak notes
+### Fixed (rc.192): the adapter's startup failure says what the identity store refused
 
-`docs/CUTOVER_READINESS_2026-10-15.md` section 6 re-reads items 1-6 at `42bb441` (G5 and G7 closed, bounded-attempt delivery accepted by CireSnave, role-name table = the provisioned role list, acked is not displayed) without rewriting the 10-15 text; `docs/CUTOVER_RUNBOOK.md` section 6 records the two first-start findings. No code changes.
+`describe` turned every keystore error into "the identity store refused: check the role and home", so a lane whose adapter exited at its first start (soak, 2026-10-30, capant and pm-assist) gave the operator nothing to act on. It now appends the keystore's own text, which names the problem (no role certificate, expired certificate, a too-open item) and never a path. **The cause of that first-start exit was a stale installed adapter** (the `~/.cargo/bin` build of 2026-10-23 predates the role-only keystore of rc.134, so it looked for an account key in a role-only home); reproduced with that binary on a fresh provision, and a current build starts on the same home. The fix is to install a current adapter; this change only makes the next such exit name its keystore error.
 
 ### Fixed (rc.191): a provisioned lane home reaches the daemon without an announce copy (`SYNAPSE_DAEMON_HOME`)
 
