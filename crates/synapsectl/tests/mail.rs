@@ -243,6 +243,67 @@ fn no_autostart_never_starts_a_daemon() {
     assert!(home.announced_pid().is_some(), "the control started none");
 }
 
+/// A lane's role-only home (from `id provision`) holds its keys and never the daemon's announce
+/// file; `SYNAPSE_DAEMON_HOME` points the announce lookup at the owner's home. The control is the
+/// same lane without it, which names the missing file; a stale file names itself.
+#[test]
+fn a_provisioned_lane_home_reaches_the_daemon_through_synapse_daemon_home() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    let root = tempfile::tempdir().unwrap();
+    let roles = root.path().join("roles.txt");
+    std::fs::write(
+        &roles, "lane1
+",
+    )
+    .unwrap();
+    let lanes = root.path().join("lanes");
+    home.ok(&[
+        "id",
+        "provision",
+        "--roles-file",
+        roles.to_str().unwrap(),
+        "--lane-home-root",
+        lanes.to_str().unwrap(),
+        "--apply",
+    ]);
+    let lane = lanes.join("lane1");
+    assert!(
+        !lane.join("synapsed.json").exists(),
+        "the lane holds no announce copy"
+    );
+    let claim = |daemon_home: Option<&Path>| {
+        let mut cmd = home.command(&["claim", "--role", "lane1"]);
+        cmd.env("SYNAPSE_HOME", &lane)
+            .env("SYNAPSE_NO_AUTOSTART", "1");
+        if let Some(dir) = daemon_home {
+            cmd.env("SYNAPSE_DAEMON_HOME", dir);
+        }
+        cmd.output().unwrap()
+    };
+
+    let out = claim(None);
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no announce file at"), "{err}");
+    assert!(err.contains("SYNAPSE_DAEMON_HOME"), "{err}");
+
+    let out = claim(Some(home.path()));
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        !lane.join("synapsed.json").exists(),
+        "nothing was copied into the lane"
+    );
+
+    // The daemon dies; the announce file it left is a stale copy and the message says so.
+    home.kill_daemon();
+    let out = claim(Some(home.path()));
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("synapsed.json"), "{err}");
+    assert!(err.contains("does not name a running daemon"), "{err}");
+}
+
 /// Start both commands back to back (not via `output()`, which runs each to completion in turn
 /// on its thread), so their auto-starts overlap. Several fresh homes, since a race need not
 /// happen on any one try; how many tries really raced is printed.

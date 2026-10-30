@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.191): a provisioned lane home reaches the daemon without an announce copy (`SYNAPSE_DAEMON_HOME`)
+
+A role-only home from `id provision` holds keys and no `synapsed.json`, and the client read the announce file only from its own home, so a lane's MCP adapter exited at start (`CONNECTION_CLOSED`); the cutover runbook had never been run end to end. `SYNAPSE_DAEMON_HOME`, when set, is where the announce file is read from; keys and sessions stay in `SYNAPSE_HOME`, and setting it also keeps the CLI from starting a daemon. "No daemon answered" now names the announce file it read: a missing one, or a stale copy that no longer names a running daemon, or a listener that failed the proof. Test `a_provisioned_lane_home_reaches_the_daemon_through_synapse_daemon_home` (no copy in the lane home; control without the variable; stale file after the daemon dies), sabotage-checked. `docs/CUTOVER_RUNBOOK.md` section 2 carries the variable and the stopgap.
+
 ### Fixed (rc.190): the SQLite store's cold-start lines carry their own clock
 
 Each `synapse: mail store <path>: <step>` line printed while `SqliteMailStore::open` runs now ends in the wall clock it was written at (UTC, to the millisecond), the time since the previous step and the time since the open began, so a start that fails (the `pool timed out` exits of 2026-10-22, 10-24 and 10-29) shows which step was slow and when. Only the log text changes. The row 42 design note drops the WAL-checkpoint slice: a read-only copy of the live store showed the WAL at exactly 1000 frames, the default `wal_autocheckpoint`, so it is steady state, and the earlier claim that an oversized WAL caused the timeouts is retracted. The cause of the timeouts and who held `mailbox.sqlite` at the time are not established.

@@ -48,6 +48,9 @@ const ANNOUNCE_FILE: &str = "synapsed.json";
 const REMOTE_DAEMON_ENV: &str = "SYNAPSE_REMOTE_DAEMON";
 /// Set (not empty, not `0`): `Daemon::connect` never starts a daemon, the lane's owner runs it.
 const NO_AUTOSTART_ENV: &str = "SYNAPSE_NO_AUTOSTART";
+/// Where to read the daemon's announce file when it is not in the caller's own home: a lane's
+/// role-only home (from `synapse id provision`) holds its keys, never the daemon's `synapsed.json`.
+const DAEMON_HOME_ENV: &str = "SYNAPSE_DAEMON_HOME";
 /// How long a started daemon gets to announce itself and answer health.
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// A starting daemon's stderr, in the home; truncated at each start.
@@ -216,8 +219,12 @@ impl Daemon {
             }
         }
         Err(MailError::NoDaemon(match &squat.0 {
-            Some(addr) => squat_warning(addr),
-            None => "no daemon answered; start synapsed with its own environment".to_string(),
+            Some(addr) => format!(
+                "{} (announce file {})",
+                squat_warning(addr),
+                announce_path(home).display()
+            ),
+            None => no_daemon_answered(home),
         }))
     }
 
@@ -238,7 +245,7 @@ impl Daemon {
         // second daemon with its own store. `SYNAPSE_NO_AUTOSTART` asks for the same on a local
         // one: the owner runs it (with its store and address), and a CLI that started its own
         // would run with the wrong environment.
-        if remote_daemon() || no_autostart() {
+        if remote_daemon() || no_autostart() || daemon_home().is_some() {
             return Self::connect_existing(home);
         }
         let http = Self::http_client()?;
@@ -573,7 +580,44 @@ fn answering(http: &reqwest::blocking::Client, home: &Path) -> Result<Answer, Ma
 /// dead daemon is ignored, so a process that took its port gets no token (#74); a file others can
 /// reach is an error, since whoever can write it chooses where the token goes.
 fn read_announce(home: &Path) -> Result<Option<Announce>, MailError> {
-    read_announce_with(home, remote_daemon())
+    read_announce_with(&announce_dir(home), remote_daemon())
+}
+
+/// `SYNAPSE_DAEMON_HOME`, when set to something.
+fn daemon_home() -> Option<PathBuf> {
+    std::env::var_os(DAEMON_HOME_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The directory holding the daemon's announce file: `SYNAPSE_DAEMON_HOME` if set, else `home`.
+/// Keys and sessions stay in `home` either way.
+fn announce_dir(home: &Path) -> PathBuf {
+    daemon_home().unwrap_or_else(|| home.to_path_buf())
+}
+
+fn announce_path(home: &Path) -> PathBuf {
+    announce_dir(home).join(ANNOUNCE_FILE)
+}
+
+/// Why nothing answered, naming the announce file read, so a copy gone stale at a daemon restart
+/// (or a lane home with none) is told apart from a daemon that is simply down.
+fn no_daemon_answered(home: &Path) -> String {
+    let path = announce_path(home);
+    let hint = format!(
+        "start synapsed with its own environment, or point {DAEMON_HOME_ENV} at the home it announces in"
+    );
+    if path.try_exists().unwrap_or(false) {
+        format!(
+            "no daemon answered; announce file {} does not name a running daemon (a copy goes stale at every daemon restart); {hint}",
+            path.display()
+        )
+    } else {
+        format!(
+            "no daemon answered; no announce file at {}; {hint}",
+            path.display()
+        )
+    }
 }
 
 fn remote_daemon() -> bool {
