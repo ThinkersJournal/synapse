@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 New `submitted` per role (messages that role itself sent; `sent` stays mail queued for the role). The counters are written to `stats.json` in the home when they change (at most every 2 s) and at a clean shutdown, and read back at start, so a daemon restart no longer zeroes them: `since` is when counting began, the new `daemon_started` is this run, and `scope` is now `home` (was `process`). A kill loses at most the last 2 s; an unreadable file starts from zero and says so on stderr. Message counts only, never content. Test `stats_count_per_sender_and_survive_a_restart` restarts a daemon on the same home (sabotage: not loading the file fails it). `acked` still does not show a message was displayed (readiness doc section 6).
 
+### Chore (rc.194): `persistant`, `persistant-sqlx` and `persistant-kv` 0.9 to 0.12.3 (ROADMAP row 42, slice 0)
+
+The three were declared at 0.9.x while 0.12.3 is current (latest-deps rule). `synapse-mailbox-persistant`, `synapsed --features sqlite-store` and `synapsectl --features storage` compile unchanged against 0.12.3; the persistant crate's tests and the whole `synapsed` suite with `sqlite-store` pass. `Cargo.lock` moves the persistant family 0.9.10 to 0.12.3, the `unisql` crates 0.24.17 to 0.27.10, and adds `capant` 0.0.7 (a dependency of `persistant-core`, from crates.io). No git or path dependencies.
+
 ### Docs (rc.193): cutover readiness update 2026-10-30 and the runbook's first-soak notes
 
 `docs/CUTOVER_READINESS_2026-10-15.md` section 6 re-reads items 1-6 at `42bb441` (G5 and G7 closed, bounded-attempt delivery accepted by CireSnave, role-name table = the provisioned role list, acked is not displayed) without rewriting the 10-15 text; `docs/CUTOVER_RUNBOOK.md` section 6 records the two first-start findings. No code changes.

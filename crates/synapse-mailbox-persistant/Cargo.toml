@@ -10,9 +10,9 @@ repository = "https://github.com/ThinkersJournal/synapse"
 
 [dependencies]
 synapse = { path = "../..", version = "6.0.0-rc.195" }
-persistant-kv = "0.9.4"
-persistant-sqlx = { version = "0.9.4", features = ["sqlite"] }
-persistant = { version = "0.9.10", features = ["registry-sqlite", "registry-postgres", "registry-mysql"] }
+persistant-kv = "0.12.3"
+persistant-sqlx = { version = "0.12.3", features = ["sqlite"] }
+persistant = { version = "0.12.3", features = ["registry-sqlite", "registry-postgres", "registry-mysql"] }
 tokio = { version = "1.46.1", features = ["rt-multi-thread", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
