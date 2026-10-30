@@ -96,3 +96,11 @@ changed until the PM says so in writing. Consequences to plan for:
 5. Each role home's certificate is current (the last provision printed `ok` or `renewed` for it).
 
 Rollback and the side-by-side phases are in `docs/CUTOVER_READINESS_2026-10-15.md` section 4.
+
+## 6. Dated notes
+
+- **2026-10-30, first soak lanes.** (1) A role-only home has no `synapsed.json`: set `SYNAPSE_DAEMON_HOME` (section 2); the
+  announce-copy stopgap goes stale at every daemon start. (2) An adapter that exits at its first start with "the
+  identity store refused" is an adapter older than rc.134 (the role-only keystore); the installed `synapse-claude-channel`
+  of 2026-10-23 was one. Check `synapse-claude-channel --version` (absent before rc.179) and reinstall the adapter, not
+  `synapsed`, before launching a lane. Reproduced on a fresh provision; a current build starts on the same home.

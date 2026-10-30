@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.193): cutover readiness update 2026-10-30 and the runbook's first-soak notes
+
+`docs/CUTOVER_READINESS_2026-10-15.md` section 6 re-reads items 1-6 at `42bb441` (G5 and G7 closed, bounded-attempt delivery accepted by CireSnave, role-name table = the provisioned role list, acked is not displayed) without rewriting the 10-15 text; `docs/CUTOVER_RUNBOOK.md` section 6 records the two first-start findings. No code changes.
+
 ### Fixed (rc.191): a provisioned lane home reaches the daemon without an announce copy (`SYNAPSE_DAEMON_HOME`)
 
 A role-only home from `id provision` holds keys and no `synapsed.json`, and the client read the announce file only from its own home, so a lane's MCP adapter exited at start (`CONNECTION_CLOSED`); the cutover runbook had never been run end to end. `SYNAPSE_DAEMON_HOME`, when set, is where the announce file is read from; keys and sessions stay in `SYNAPSE_HOME`, and setting it also keeps the CLI from starting a daemon. "No daemon answered" now names the announce file it read: a missing one, or a stale copy that no longer names a running daemon, or a listener that failed the proof. Test `a_provisioned_lane_home_reaches_the_daemon_through_synapse_daemon_home` (no copy in the lane home; control without the variable; stale file after the daemon dies), sabotage-checked. `docs/CUTOVER_RUNBOOK.md` section 2 carries the variable and the stopgap.
