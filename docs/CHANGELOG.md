@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Chore (rc.188): the CodeRipper portfolio caller is pinned to coderipper#182
+
+`ci_cd.yml` calls `ciresnave/coderipper/.github/workflows/portfolio.yml` at `b45eb41` (was `30e012b`). That revision frees runner disk before the sweep (#290's sweep ran out of disk, so three members did not build and the secrets scan never ran) and names a failed check or tool install. It also moves CodeRipper itself from 0.9.6 to the current release, so more rules run; the job stays advisory and is not a required check. Workflow only.
+
 ### Docs (rc.187): design note for the mailbox store through PersistAnt `choose` (ROADMAP row 42)
 
 `docs/superpowers/specs/2026-10-30-mailbox-store-choose.md`. Reading the code first: selection through `choose` already exists behind `sqlite-store`, so the work left is SQLite in the default build, one selection path, the redb decision, and WAL handling, with the WAL item held until the cause of the pool timeouts is captured (a checkpoint runs after the connect that timed out). Finds the `persistant` crates three minor lines behind (0.9 declared, 0.12.3 current), proposed as slice 0. No code changes.
