@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.198): ROADMAP row 44, the PersistAnt ask to split its registry features
+
+Filed as a row with the rc.196 size and build-time measurement as its baseline; not blocking.
+
 ### Refactor (rc.197): one store-selection path (ROADMAP row 42, slice B)
 
 `synapsed::select_store` is now the only place the mailbox store is chosen, and `Daemon::open_selected` the only open `main` calls (`named_choice` and the second `StoreKind` match are gone). Behaviour unchanged, each case now has a test (`crates/synapsed/tests/select.rs`): a pin wins (the `SYNAPSE_MAILBOX_STORE` deprecation line still prints); else the recorded `mailbox-store.json`; else a home holding `mailbox.redb` or `mailbox.sqlite` keeps that store; else a fresh home is given and records the first file provider. Redb→SQLite migration and the both-files-no-marker refusal are untouched (`migration::prepare`).
