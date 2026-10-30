@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (rc.192): the adapter's startup failure says what the identity store refused
 
-`describe` turned every keystore error into "the identity store refused: check the role and home", so a lane whose adapter exited at its first start (soak, 2026-10-30, capant and pm-assist) gave the operator nothing to act on. It now appends the keystore's own text, which names the problem (no role certificate, expired certificate, a too-open item) and never a path. **The cause of that first-start exit is not established**: in a scratch account, a just-provisioned home started the adapter on its first run (roles `lane1`, `capant`, `pm-assist`; `sessions/<role>.json` was created by that run), so I could not reproduce it; the new text will name it on the next occurrence.
+`describe` turned every keystore error into "the identity store refused: check the role and home", so a lane whose adapter exited at its first start (soak, 2026-10-30, capant and pm-assist) gave the operator nothing to act on. It now appends the keystore's own text, which names the problem (no role certificate, expired certificate, a too-open item) and never a path. **The cause of that first-start exit was a stale installed adapter** (the `~/.cargo/bin` build of 2026-10-23 predates the role-only keystore of rc.134, so it looked for an account key in a role-only home); reproduced with that binary on a fresh provision, and a current build starts on the same home. The fix is to install a current adapter; this change only makes the next such exit name its keystore error.
 
 ### Fixed (rc.191): a provisioned lane home reaches the daemon without an announce copy (`SYNAPSE_DAEMON_HOME`)
 
