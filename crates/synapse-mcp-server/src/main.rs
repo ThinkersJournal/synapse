@@ -12,15 +12,21 @@ use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use synapse_mcp_server::{McpConfig, SynapseMcpServer};
 
+const USAGE: &str = "usage: synapse-mcp --role <role> [--home <dir>] (or SYNAPSE_ROLE)";
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    // Before anything else: a version query opens no home and starts no server.
-    if std::env::args()
-        .nth(1)
-        .is_some_and(|a| a == "--version" || a == "-V")
-    {
-        println!("synapse-mcp {}", env!("CARGO_PKG_VERSION"));
-        return ExitCode::SUCCESS;
+    // Before anything else: a help or version query opens no home, store or port.
+    match std::env::args().nth(1).as_deref() {
+        Some("--version" | "-V") => {
+            println!("synapse-mcp {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        Some("--help" | "-h") => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
     }
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -28,7 +34,7 @@ async fn main() -> ExitCode {
         .init();
 
     let Some(role) = arg("--role").or_else(|| std::env::var("SYNAPSE_ROLE").ok()) else {
-        eprintln!("synapse-mcp: usage: synapse-mcp --role <role> [--home <dir>] (or SYNAPSE_ROLE)");
+        eprintln!("synapse-mcp: {USAGE}");
         return ExitCode::from(2);
     };
     let home = match arg("--home") {

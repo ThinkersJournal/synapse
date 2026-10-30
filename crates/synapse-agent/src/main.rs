@@ -19,6 +19,18 @@ const USAGE: &str = "usage: synapse-agent --role <role> --model <model> [--endpo
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Before anything else: a help or version query opens no home, store or port.
+    match std::env::args().nth(1).as_deref() {
+        Some("--version" | "-V") => {
+            println!("synapse-agent {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        Some("--help" | "-h") => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
