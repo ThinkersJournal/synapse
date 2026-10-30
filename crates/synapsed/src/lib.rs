@@ -26,6 +26,7 @@
 #[cfg(feature = "sqlite-store")]
 mod migration;
 
+mod select;
 pub mod settings;
 mod state_api;
 
@@ -64,6 +65,7 @@ use synapse_security::{AlertSink, AlertTransport, FanoutSink, FileSink};
 
 pub mod launch;
 pub use launch::{LaunchSenders, LauncherConfig};
+pub use select::{Selection, select_store};
 
 /// Where and how the daemon runs.
 #[derive(Debug, Clone)]
@@ -605,6 +607,15 @@ impl Daemon {
     /// second daemon on the same home (redb's file lock).
     pub fn open(cfg: &DaemonConfig) -> Result<Daemon, DaemonError> {
         Self::open_with(cfg, StoreKind::default())
+    }
+
+    /// As [`Daemon::open`], serving the mailbox from what [`select_store`] chose.
+    pub fn open_selected(cfg: &DaemonConfig, selection: &Selection) -> Result<Daemon, DaemonError> {
+        match selection {
+            Selection::Kind(kind) => Self::open_with(cfg, *kind),
+            #[cfg(feature = "sqlite-store")]
+            Selection::Named(choice) => Self::open_named(cfg, choice),
+        }
     }
 
     /// As [`Daemon::open`], serving the mailbox from `kind`.
