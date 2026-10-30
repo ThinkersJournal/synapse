@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.187): design note for the mailbox store through PersistAnt `choose` (ROADMAP row 42)
+
+`docs/superpowers/specs/2026-10-30-mailbox-store-choose.md`. Reading the code first: selection through `choose` already exists behind `sqlite-store`, so the work left is SQLite in the default build, one selection path, the redb decision, and WAL handling, with the WAL item held until the cause of the pool timeouts is captured (a checkpoint runs after the connect that timed out). Finds the `persistant` crates three minor lines behind (0.9 declared, 0.12.3 current), proposed as slice 0. No code changes.
+
 ### Docs (rc.186): cutover runbook (`docs/CUTOVER_RUNBOOK.md`)
 
 The settings a cutover depends on and the check that proves each took: the daemon wrapper's environment (`SYNAPSE_MAILBOX_STORE=sqlite`, `SYNAPSE_LAUNCHER_ROLES`, `SYNAPSE_LAUNCH_SENDERS` and its fail-closed rule), the lane's (`SYNAPSE_NO_AUTOSTART`), the weekly `synapse id provision` and why the schedule must be shorter than `--renew-below-days`, the home decision (promote the pilot home; redb to SQLite migrates on first start), and what to read after a restart. No code changes; it starts no task and touches no key.
