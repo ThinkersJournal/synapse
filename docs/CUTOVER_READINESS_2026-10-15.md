@@ -166,7 +166,7 @@ The text above is the 2026-10-15 reading and is not rewritten. What moved, with 
 | 5 bounded-attempt delivery | **Closed** | CireSnave, 2026-10-30, verbatim as relayed by the PM from the PM session: *"Message loss, although not ideal, is acceptable."* The soak's zero-lost stays a **measurement**, not a gate |
 | 6 claude-peers restore test | **Open** | no record that one was run; OverMind asked to run it once on a scratch broker port. Needed before Phase C, not Phase B |
 
-**Acked is not displayed.** `/v1/stats` counts, per recipient role, `sent`, `acked`, `redelivered`, `expired`, in memory since the daemon started. The adapter acks a message itself after a bounded number of push attempts, so `acked` says nothing about whether Claude Code showed it. Loss is measured end to end: numbered canary mails to a sample of lanes with a one-line reply, compared with transcripts. A per-sender tally and counters that survive a restart are a queued task.
+**Acked is not displayed.** `/v1/stats` counts, per recipient role, `sent`, `acked`, `redelivered`, `expired` (in memory, zeroed at each daemon start, until rc.195). The adapter acks a message itself after a bounded number of push attempts, so `acked` says nothing about whether Claude Code showed it. Loss is measured end to end: numbered canary mails to a sample of lanes with a one-line reply, compared with transcripts. Since rc.195 the counters also carry a per-sender `submitted` and survive a daemon restart (`stats.json`); `acked` still proves nothing about display.
 
 **Found by the first soak lanes (2026-10-30), both fixed or explained:**
 

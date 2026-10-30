@@ -1468,7 +1468,7 @@ async fn stats_count_sent_acked_redelivered_and_expired_per_role() {
     let (s, stats, _) = get_stats(&d, Some(&alpha)).await;
     assert_eq!(s, 200, "{stats}");
     assert_eq!(counters(&stats, "beta@acct"), [0, 0, 0, 0], "fresh daemon");
-    assert_eq!(stats["scope"], "process");
+    assert_eq!(stats["scope"], "home");
     assert!(stats["since"].is_string(), "{stats}");
 
     let m1 = send_to(&d, &alpha, "beta@acct", b"SECRET-ONE").await;
@@ -1516,6 +1516,84 @@ async fn stats_count_sent_acked_redelivered_and_expired_per_role() {
     for leak in ["SECRET", "body", "message_id", &m1, &beta, &beta2] {
         assert!(!text.contains(leak), "stats leaked {leak:?}: {text}");
     }
+    d.stop().await;
+}
+
+/// Stop `d` cleanly and start a new daemon on the same home.
+async fn restart(mut d: Running) -> Running {
+    if let Some(tx) = d.stop.take() {
+        let _ = tx.send(());
+    }
+    if let Some(task) = d.task.take() {
+        let _ = task.await;
+    }
+    let _ = std::fs::remove_file(d.home.path().join("synapsed.json"));
+    let daemon = open_daemon(&config(d.home.path())).expect("reopen daemon");
+    let started_at = daemon.started_at();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(daemon.serve(listener, async move {
+        let _ = rx.await;
+    }));
+    let announce = d.home.path().join("synapsed.json");
+    for _ in 0..200 {
+        if announce.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    d.addr = addr;
+    d.started_at = started_at;
+    d.stop = Some(tx);
+    d.task = Some(task);
+    d
+}
+
+fn role_field(stats: &Value, role: &str, field: &str) -> u64 {
+    stats["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["global_id"] == role)
+        .unwrap_or_else(|| panic!("{role} not in {stats}"))[field]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{field} missing in {stats}"))
+}
+
+/// The counters outlive the daemon: `sent` (to the recipient) and `submitted` (by the sender) are
+/// the same after a clean restart, and `since` keeps the original start of counting while
+/// `daemon_started` moves. The control is the fresh home, which starts at zero.
+#[tokio::test]
+async fn stats_count_per_sender_and_survive_a_restart() {
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (_beta, _) = claim(&d, "beta").await;
+    send_to(&d, &alpha, "beta@acct", b"one").await;
+    send_to(&d, &alpha, "beta@acct", b"two").await;
+    let (_, before, _) = get_stats(&d, Some(&alpha)).await;
+    assert_eq!(
+        role_field(&before, "alpha@acct", "submitted"),
+        2,
+        "{before}"
+    );
+    assert_eq!(role_field(&before, "alpha@acct", "sent"), 0);
+    assert_eq!(role_field(&before, "beta@acct", "sent"), 2);
+    assert_eq!(role_field(&before, "beta@acct", "submitted"), 0);
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let d = restart(d).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (s, after, _) = get_stats(&d, Some(&alpha)).await;
+    assert_eq!(s, 200, "{after}");
+    assert_eq!(role_field(&after, "alpha@acct", "submitted"), 2, "{after}");
+    assert_eq!(role_field(&after, "beta@acct", "sent"), 2, "{after}");
+    assert_eq!(after["since"], before["since"], "counting did not restart");
+    assert_ne!(after["daemon_started"], before["daemon_started"]);
+
+    send_to(&d, &alpha, "beta@acct", b"three").await;
+    let (_, more, _) = get_stats(&d, Some(&alpha)).await;
+    assert_eq!(role_field(&more, "beta@acct", "sent"), 3, "{more}");
     d.stop().await;
 }
 

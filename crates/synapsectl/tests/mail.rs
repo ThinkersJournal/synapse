@@ -179,7 +179,7 @@ fn stats_prints_one_object_per_role_with_scope_and_since() {
     assert!(
         stats
             .iter()
-            .all(|r| r["scope"] == "process" && r["since"].is_string())
+            .all(|r| r["scope"] == "home" && r["since"].is_string())
     );
 }
 
@@ -200,7 +200,7 @@ fn stats_daemon_says_whether_launch_senders_is_set() {
             lines[0]["launch_senders_set"], expected,
             "{value:?}: {lines:?}"
         );
-        assert_eq!(lines[0]["scope"], "process");
+        assert_eq!(lines[0]["scope"], "home");
         assert!(lines[0]["since"].is_string());
     }
 }

@@ -46,8 +46,8 @@ use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use synapse::certificate::{RevocationLookup, chain_from_pem};
 use synapse::keystore::{Keystore, KeystoreError};
@@ -182,6 +182,10 @@ impl std::error::Error for DaemonError {}
 
 /// The shared-state store under the home.
 const STATE_FILE: &str = "state.redb";
+/// The `/v1/stats` counters, kept across restarts: written when they change (at most every
+/// `STATS_FLUSH`) and at a clean shutdown, so a kill loses at most the last interval.
+const STATS_FILE: &str = "stats.json";
+const STATS_FLUSH: std::time::Duration = std::time::Duration::from_secs(2);
 /// How recently a role must have been heard from to count as online.
 const ONLINE_WINDOW: chrono::Duration = chrono::Duration::seconds(90);
 /// A role idle this many days is retired (hidden from `list`, kept) unless `synapsed.toml` says
@@ -231,9 +235,12 @@ struct Shared {
     /// Woken after a state write, so its notices go out at once rather than on the retry tick.
     state_nudge: tokio::sync::Notify,
     presence: Mutex<HashMap<String, Presence>>,
-    /// Cumulative per-role counters for `/v1/stats`. In memory: a restart zeroes them, and the
-    /// answer says so (`scope`, `since`).
+    /// Cumulative per-role counters for `/v1/stats`, loaded from and flushed to `stats.json` in the
+    /// home, so a restart keeps them (`since` is when counting began, `daemon_started` this run).
     stats: Mutex<HashMap<String, RoleCounters>>,
+    stats_since: DateTime<Utc>,
+    /// Set by `count`, cleared by the flusher that writes the file.
+    stats_dirty: std::sync::atomic::AtomicBool,
     /// This daemon's account name: it serves `<role>@<account>` only.
     account: String,
     account_key_id: String,
@@ -660,6 +667,7 @@ impl Daemon {
         let instance = random_bytes::<16>().ok_or(DaemonError::NoRandomness)?;
         let instance_id = hex(&instance);
         let summary = keystore.account();
+        let loaded = load_stats(&cfg.home, started_at);
         Ok(Daemon {
             alerts: None,
             shared: Shared {
@@ -671,7 +679,9 @@ impl Daemon {
                 state_nudge: tokio::sync::Notify::new(),
                 sessions: Mutex::new(HashMap::new()),
                 presence: Mutex::new(HashMap::new()),
-                stats: Mutex::new(HashMap::new()),
+                stats: Mutex::new(loaded.0),
+                stats_since: loaded.1,
+                stats_dirty: std::sync::atomic::AtomicBool::new(false),
                 account: summary.account,
                 account_key_id: summary.key_id,
                 account_key: keystore.account_public_key(),
@@ -855,6 +865,16 @@ impl Daemon {
         let alert_task =
             alerts.map(|delivery| tokio::spawn(deliver_alerts(shared.clone(), delivery)));
         let notice_task = tokio::spawn(deliver_state_notices(shared.clone()));
+        let stats_task = {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(STATS_FLUSH);
+                loop {
+                    tick.tick().await;
+                    flush_stats(&shared);
+                }
+            })
+        };
         let app = Router::new()
             .route(
                 "/v1/health",
@@ -888,12 +908,14 @@ impl Daemon {
             .layer(middleware::from_fn(move |req: Request, next: Next| {
                 host_guard(bound, req, next)
             }))
-            .with_state(shared);
+            .with_state(shared.clone());
         let result = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown)
             .await;
         sweeper.abort();
         notice_task.abort();
+        stats_task.abort();
+        flush_stats(&shared);
         if let Some(task) = alert_task {
             task.abort();
         }
@@ -1438,6 +1460,7 @@ async fn send(
     };
     if outcome == Enqueued::Queued {
         count(&shared, &to, |c| c.sent += 1);
+        count(&shared, &session.global_id, |c| c.submitted += 1);
     }
     Ok(axum::Json(json!({
         "message_id": message_id,
@@ -1727,10 +1750,13 @@ async fn list(
 }
 
 /// What one role has been through since the daemon started. Message counts only, never content.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct RoleCounters {
     /// New messages queued for the role (a duplicate send is not one).
     sent: u64,
+    /// New messages the role itself sent (the per-sender side of `sent`; same rule for duplicates).
+    submitted: u64,
     /// Messages the role acked (an idempotent repeat is not one).
     acked: u64,
     /// Deliveries after a message's first: its lease ran out, or a takeover voided it.
@@ -1743,11 +1769,80 @@ fn count(shared: &Shared, role: &str, bump: impl FnOnce(&mut RoleCounters)) {
     // A poisoned counter table loses a count, never the request it was riding on.
     if let Ok(mut stats) = shared.stats.lock() {
         bump(stats.entry(role.to_string()).or_default());
+        shared
+            .stats_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
-/// `GET /v1/stats`: the soak's cumulative counters, per role. Per-process: `since` is when this
-/// daemon started counting, and a restart begins again from zero.
+#[derive(Serialize, Deserialize)]
+struct StatsFile {
+    since: DateTime<Utc>,
+    roles: HashMap<String, RoleCounters>,
+}
+
+/// The counters a previous run left in `<home>/stats.json` and when counting began. A missing file
+/// starts fresh from `now`; one that is there but unreadable does too, and says so on stderr.
+fn load_stats(
+    home: &std::path::Path,
+    now: DateTime<Utc>,
+) -> (HashMap<String, RoleCounters>, DateTime<Utc>) {
+    let path = home.join(STATS_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<StatsFile>(&text) {
+            Ok(file) => (file.roles, file.since),
+            Err(e) => {
+                eprintln!("synapsed: {STATS_FILE} is unreadable ({e}); counting from zero");
+                (HashMap::new(), now)
+            }
+        },
+        Err(_) => (HashMap::new(), now),
+    }
+}
+
+/// Write the counters if any changed since the last write: temp file then rename, owner-only on
+/// Unix (on Windows it inherits the home's ACL). A failed write leaves the flag set to retry.
+fn flush_stats(shared: &Shared) {
+    use std::sync::atomic::Ordering;
+    if !shared.stats_dirty.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let Ok(snapshot) = shared.stats.lock().map(|s| s.clone()) else {
+        return;
+    };
+    let Ok(body) = serde_json::to_vec(&StatsFile {
+        since: shared.stats_since,
+        roles: snapshot,
+    }) else {
+        return;
+    };
+    let temp = shared
+        .home
+        .join(format!(".tmp-stats-{}", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        file.write_all(&body)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, shared.home.join(STATS_FILE))
+    })();
+    if let Err(e) = written {
+        eprintln!("synapsed: {STATS_FILE} not written: {e}");
+        shared.stats_dirty.store(true, Ordering::Release);
+    }
+}
+
+/// `GET /v1/stats`: the soak's cumulative counters, per role. They survive a restart (`stats.json` in
+/// the home): `since` is when counting began, `daemon_started` when this run did. `sent` is mail
+/// queued FOR the role, `submitted` mail the role itself sent. A kill loses at most `STATS_FLUSH`.
 async fn stats(
     State(shared): State<Arc<Shared>>,
     headers: HeaderMap,
@@ -1763,6 +1858,7 @@ async fn stats(
             json!({
                 "global_id": global_id,
                 "sent": c.sent,
+                "submitted": c.submitted,
                 "acked": c.acked,
                 "redelivered": c.redelivered,
                 "expired": c.expired,
@@ -1770,8 +1866,9 @@ async fn stats(
         })
         .collect();
     Ok(axum::Json(json!({
-        "scope": "process",
-        "since": shared.started_at.to_rfc3339(),
+        "scope": "home",
+        "since": shared.stats_since.to_rfc3339(),
+        "daemon_started": shared.started_at.to_rfc3339(),
         "launch_senders_set": !shared.launch_senders.is_empty(),
         "roles": out,
     }))
