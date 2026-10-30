@@ -654,12 +654,13 @@ dependencies = [
 
 [[package]]
 name = "configurant"
-version = "0.2.34"
+version = "0.5.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b610a501a970cc9a54423557fa107cb739c7fc22b3d2c2c39a3f0bb69c4ee9e"
+checksum = "79a04172b97a6a98471b659c30881abfaf8a95e596c452eb83c7610c6121ec10"
 dependencies = [
  "clap",
  "serde",
+ "sha2 0.11.1",
  "thiserror 2.0.21",
  "toml 1.1.8+spec-1.1.0",
  "toml_edit",
@@ -1127,7 +1128,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2923,7 +2924,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3258,7 +3259,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3317,7 +3318,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4012,7 +4013,7 @@ dependencies = [
 
 [[package]]
 name = "synapse"
-version = "6.0.0-rc.183"
+version = "6.0.0-rc.184"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4083,7 +4084,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-agent"
-version = "6.0.0-rc.183"
+version = "6.0.0-rc.184"
 dependencies = [
  "genai",
  "serde_json",
@@ -4098,7 +4099,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-claude-channel"
-version = "6.0.0-rc.183"
+version = "6.0.0-rc.184"
 dependencies = [
  "base64 0.23.1",
  "rmcp",
@@ -4113,7 +4114,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mailbox-persistant"
-version = "6.0.0-rc.183"
+version = "6.0.0-rc.184"
 dependencies = [
  "chrono",
  "persistant",
@@ -4129,7 +4130,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mcp-server"
-version = "6.0.0-rc.183"
+version = "6.0.0-rc.184"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4149,7 +4150,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-security"
-version = "6.0.0-rc.183"
+version = "6.0.0-rc.184"
 dependencies = [
  "chrono",
  "serde_json",
@@ -4159,7 +4160,7 @@ dependencies = [
 
 [[package]]
 name = "synapsectl"
-version = "6.0.0-rc.183"
+version = "6.0.0-rc.184"
 dependencies = [
  "chrono",
  "clap",
@@ -4175,7 +4176,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed"
-version = "6.0.0-rc.183"
+version = "6.0.0-rc.184"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4196,7 +4197,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed-client"
-version = "6.0.0-rc.183"
+version = "6.0.0-rc.184"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4270,10 +4271,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5110,7 +5111,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
