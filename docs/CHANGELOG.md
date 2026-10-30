@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.192): the adapter's startup failure says what the identity store refused
+
+`describe` turned every keystore error into "the identity store refused: check the role and home", so a lane whose adapter exited at its first start (soak, 2026-10-30, capant and pm-assist) gave the operator nothing to act on. It now appends the keystore's own text, which names the problem (no role certificate, expired certificate, a too-open item) and never a path. **The cause of that first-start exit is not established**: in a scratch account, a just-provisioned home started the adapter on its first run (roles `lane1`, `capant`, `pm-assist`; `sessions/<role>.json` was created by that run), so I could not reproduce it; the new text will name it on the next occurrence.
+
 ### Fixed (rc.191): a provisioned lane home reaches the daemon without an announce copy (`SYNAPSE_DAEMON_HOME`)
 
 A role-only home from `id provision` holds keys and no `synapsed.json`, and the client read the announce file only from its own home, so a lane's MCP adapter exited at start (`CONNECTION_CLOSED`); the cutover runbook had never been run end to end. `SYNAPSE_DAEMON_HOME`, when set, is where the announce file is read from; keys and sessions stay in `SYNAPSE_HOME`, and setting it also keeps the CLI from starting a daemon. "No daemon answered" now names the announce file it read: a missing one, or a stale copy that no longer names a running daemon, or a listener that failed the proof. Test `a_provisioned_lane_home_reaches_the_daemon_through_synapse_daemon_home` (no copy in the lane home; control without the variable; stale file after the daemon dies), sabotage-checked. `docs/CUTOVER_RUNBOOK.md` section 2 carries the variable and the stopgap.
