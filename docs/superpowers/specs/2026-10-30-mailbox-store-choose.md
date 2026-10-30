@@ -63,7 +63,7 @@ treatment as the migration did. Not started until A has merged.
 - **Cause: not established. Who held `mailbox.sqlite` at the failures: not established** (`handle64.exe` printed nothing from
   an unelevated shell; the process table at capture time held one `synapsed`, four adapters and Windows Defender's
   `MsMpEng`, none shown to hold the file). Nothing here claims a cause.
-- Done instead (rc.191): every cold-start step line now carries its own UTC clock, the time since the previous step and
+- Done instead (rc.190): every cold-start step line now carries its own UTC clock, the time since the previous step and
   since the open began, so the next failure brings its own evidence. A bounded retry exists already (`OPEN_RETRIES`);
   whether more is needed waits for a failure that carries those timestamps.
 
@@ -80,7 +80,7 @@ rule wants, or the work is redone. This is a bump PR of its own (read the 0.10, 
 0. `persistant` 0.9 to 0.12 (section 3).
 1. A: SQLite in the default build, with the size and install-time measurement.
 2. B: one selection path.
-3. D: dropped; step lines timestamped instead (rc.191).
+3. D: dropped; step lines timestamped instead (rc.190).
 4. C: redb decision applied (code only after the decision).
 
 ## 5. The PM's answers (2026-10-30)

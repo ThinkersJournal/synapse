@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
-### Fixed (rc.191): the SQLite store's cold-start lines carry their own clock
+### Fixed (rc.190): the SQLite store's cold-start lines carry their own clock
 
 Each `synapse: mail store <path>: <step>` line printed while `SqliteMailStore::open` runs now ends in the wall clock it was written at (UTC, to the millisecond), the time since the previous step and the time since the open began, so a start that fails (the `pool timed out` exits of 2026-10-22, 10-24 and 10-29) shows which step was slow and when. Only the log text changes. The row 42 design note drops the WAL-checkpoint slice: a read-only copy of the live store showed the WAL at exactly 1000 frames, the default `wal_autocheckpoint`, so it is steady state, and the earlier claim that an oversized WAL caused the timeouts is retracted. The cause of the timeouts and who held `mailbox.sqlite` at the time are not established.
+
+### Chore (rc.188): the CodeRipper portfolio caller is pinned to coderipper#182
+
+`ci_cd.yml` calls `ciresnave/coderipper/.github/workflows/portfolio.yml` at `b45eb41` (was `30e012b`). That revision frees runner disk before the sweep (#290's sweep ran out of disk, so three members did not build and the secrets scan never ran) and names a failed check or tool install. It also moves CodeRipper itself from 0.9.6 to the current release, so more rules run; the job stays advisory and is not a required check. Workflow only.
 
 ### Docs (rc.187): design note for the mailbox store through PersistAnt `choose` (ROADMAP row 42)
 
