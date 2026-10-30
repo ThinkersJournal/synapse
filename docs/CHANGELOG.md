@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.186): cutover runbook (`docs/CUTOVER_RUNBOOK.md`)
+
+The settings a cutover depends on and the check that proves each took: the daemon wrapper's environment (`SYNAPSE_MAILBOX_STORE=sqlite`, `SYNAPSE_LAUNCHER_ROLES`, `SYNAPSE_LAUNCH_SENDERS` and its fail-closed rule), the lane's (`SYNAPSE_NO_AUTOSTART`), the weekly `synapse id provision` and why the schedule must be shorter than `--renew-below-days`, the home decision (promote the pilot home; redb to SQLite migrates on first start), and what to read after a restart. No code changes; it starts no task and touches no key.
+
 ### Feature (rc.185): `SYNAPSE_NO_AUTOSTART` stops the CLI starting a daemon
 
 With `SYNAPSE_NO_AUTOSTART` set (not empty, not `0`), `Daemon::connect` behaves as `connect_existing`: it finds the daemon its owner runs, with the owner's store and address, and fails with `no daemon answered` rather than start one with the wrong environment. The MCP adapter already never started one. Unlike `SYNAPSE_REMOTE_DAEMON` it leaves the announced-pid liveness check alone.
