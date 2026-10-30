@@ -18,8 +18,8 @@ name = "synapsed"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.195" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.195" }
+synapse = { path = "../..", version = "6.0.0-rc.196" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.196" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
 tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -29,15 +29,17 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 ring = "0.17"
 uuid = { version = "1.6", features = ["v4"] }
 configurant = "0.5.22"
-synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.195", optional = true }
+synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.196", optional = true }
 
 [features]
-# Off by default: serve the mailbox from PersistAnt SQLite (WAL, synchronous=FULL; declared Machine)
-# instead of redb. Selected at run time with SYNAPSE_MAILBOX_STORE=sqlite. Board 229.
+# On by default (ROADMAP row 42, slice A): a new home is served from PersistAnt SQLite (WAL,
+# synchronous=FULL; declared Machine); an existing redb home stays on redb until moved. Build with
+# `--no-default-features` for the redb-only daemon. Selected at run time with SYNAPSE_MAILBOX_STORE.
+default = ["sqlite-store"]
 sqlite-store = ["dep:synapse-mailbox-persistant"]
 
 [dev-dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.195", features = ["mailbox-conformance"] }
-synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.195" }
+synapse = { path = "../..", version = "6.0.0-rc.196", features = ["mailbox-conformance"] }
+synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.196" }
 reqwest = { version = "0.13.5", features = ["json"] }
 tempfile = "3.0"
