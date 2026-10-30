@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Chore (rc.189): the five unwaived gitleaks hits are triaged and waived with reasons
+
+The CodeRipper portfolio job's SEC-002 scan (gitleaks 8.30.1) reported 7 hits on `main` at `6b63312`; 2 were already waived. The other 5 are not credentials, and each now has a line-scoped `[[allow]]` entry in `.coderipper.toml` with its reason: a 14-character event name in `crates/synapsed/tests/api.rs`; two `format!` PEM templates in `src/auth_integration.rs` and `src/auth_integration_enhanced.rs` (history only, both files since deleted); the jwt.io documentation sample token in `tests/security_test.rs`; and the RFC 6455 sample nonce in `tests/transport_repairs.rs` (the last two by sha256 against the public values). No value is printed anywhere. Waivers are by line, not by file, so a new secret in those files is still reported.
+
 ### Docs (rc.187): design note for the mailbox store through PersistAnt `choose` (ROADMAP row 42)
 
 `docs/superpowers/specs/2026-10-30-mailbox-store-choose.md`. Reading the code first: selection through `choose` already exists behind `sqlite-store`, so the work left is SQLite in the default build, one selection path, the redb decision, and WAL handling, with the WAL item held until the cause of the pool timeouts is captured (a checkpoint runs after the connect that timed out). Finds the `persistant` crates three minor lines behind (0.9 declared, 0.12.3 current), proposed as slice 0. No code changes.
