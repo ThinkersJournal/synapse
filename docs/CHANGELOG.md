@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fix (rc.199): a role-only home never starts a daemon (ROADMAP row 45)
+
 ### Docs (rc.198): ROADMAP row 44, the PersistAnt ask to split its registry features
 
 Filed as a row with the rc.196 size and build-time measurement as its baseline; not blocking.
