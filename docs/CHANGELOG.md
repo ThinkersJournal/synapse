@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.200): row 42 slice C design, retiring the redb mailbox store
+
+`docs/superpowers/specs/2026-10-30-slice-c-retire-redb-mailbox.md`: scope of C1 (redb stops being a daemon option) and C2 (the migration reader goes), the live home already on SQLite, the migration window. Not scheduled: earliest 2026-11-30 and gated by the PM.
+
 ### Fix (rc.199): a role-only home never starts a daemon (ROADMAP row 45)
 
 ### Docs (rc.198): ROADMAP row 44, the PersistAnt ask to split its registry features
