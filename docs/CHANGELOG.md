@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.196): SQLite store in the default build (ROADMAP row 42, slice A)
+
+`synapsed` now has `default = ["sqlite-store"]`: a home with no mailbox file starts on PersistAnt SQLite; a home that already holds a redb mailbox stays on it. `--no-default-features` builds the redb-only daemon. Measured (release, cold target dir, Windows, `-p synapsed`): `synapsed.exe` 8,150,016 to 31,259,136 bytes; build 357 s to 417 s. The size is sqlx with sqlite, postgres and mysql, accepted for now; a PersistAnt ask to split the registry features is a ROADMAP row.
+
 ### Feature (rc.195): `/v1/stats` counts per sender and keeps its counters across a restart
 
 New `submitted` per role (messages that role itself sent; `sent` stays mail queued for the role). The counters are written to `stats.json` in the home when they change (at most every 2 s) and at a clean shutdown, and read back at start, so a daemon restart no longer zeroes them: `since` is when counting began, the new `daemon_started` is this run, and `scope` is now `home` (was `process`). A kill loses at most the last 2 s; an unreadable file starts from zero and says so on stderr. Message counts only, never content. Test `stats_count_per_sender_and_survive_a_restart` restarts a daemon on the same home (sabotage: not loading the file fails it). `acked` still does not show a message was displayed (readiness doc section 6).

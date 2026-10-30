@@ -331,7 +331,7 @@ jobs:
 
   # THE SQLITE STORE (board 229) IS A SEPARATE, NON-REQUIRED JOB (PM ruling 2026-10-20): the daemon's
   # API suite takes ~10 minutes against SQLite (about 21 seconds against redb), and `sqlite-store` is
-  # off by default, so no step of `build` compiles it. Not in branch protection; a red here is read
+  # now a default feature (rc.196), so `build` compiles it but runs the API suite against redb only. Not in branch protection; a red here is read
   # as a finding about the SQLite store, and `Build and Test` stays the gate for everything else.
   sqlite-store:
     name: SQLite store (signal, not a gate)
