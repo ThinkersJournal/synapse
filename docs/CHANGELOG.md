@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
-### Fix (rc.199): a role-only home never starts a daemon (ROADMAP row 45)
+### Docs (rc.198): ROADMAP row 44, the PersistAnt ask to split its registry features
 
-`Daemon::connect` (the `synapse` CLI) now behaves as with `SYNAPSE_NO_AUTOSTART` on a role-only home (no account key, as `id provision` makes), so a lane cannot start a second daemon beside the owner's while it is down. The adapter already never started one (rc.130); a test now covers a RUNNING adapter whose daemon dies. Design note and a rehearsed restart procedure for the live daemon: `docs/superpowers/specs/2026-10-30-restart-the-live-daemon.md`.
+Filed as a row with the rc.196 size and build-time measurement as its baseline; not blocking.
 
 ### Refactor (rc.197): one store-selection path (ROADMAP row 42, slice B)
 
