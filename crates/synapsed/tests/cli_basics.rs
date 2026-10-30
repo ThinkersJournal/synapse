@@ -37,7 +37,10 @@ fn help_and_version_flags_answer_and_create_nothing() {
         } else {
             "usage: synapsed"
         };
-        assert!(stdout.trim_start().starts_with(wanted), "{flag}: {stdout:?}");
+        assert!(
+            stdout.trim_start().starts_with(wanted),
+            "{flag}: {stdout:?}"
+        );
         assert_eq!(listing(dir.path()), before, "{flag} created something");
     }
 }

@@ -44,7 +44,15 @@ async fn main() -> ExitCode {
         }
         _ => {}
     }
-    if let Some(bad) = unknown_arg(&["--role", "--model", "--endpoint", "--key-env", "--home", "--every", "--allow-send"]) {
+    if let Some(bad) = unknown_arg(&[
+        "--role",
+        "--model",
+        "--endpoint",
+        "--key-env",
+        "--home",
+        "--every",
+        "--allow-send",
+    ]) {
         eprintln!("synapse-agent: unknown argument {bad:?}; {USAGE}");
         return ExitCode::from(2);
     }
