@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.190): the SQLite store's cold-start lines carry their own clock
+
+Each `synapse: mail store <path>: <step>` line printed while `SqliteMailStore::open` runs now ends in the wall clock it was written at (UTC, to the millisecond), the time since the previous step and the time since the open began, so a start that fails (the `pool timed out` exits of 2026-10-22, 10-24 and 10-29) shows which step was slow and when. Only the log text changes. The row 42 design note drops the WAL-checkpoint slice: a read-only copy of the live store showed the WAL at exactly 1000 frames, the default `wal_autocheckpoint`, so it is steady state, and the earlier claim that an oversized WAL caused the timeouts is retracted. The cause of the timeouts and who held `mailbox.sqlite` at the time are not established.
+
 ### Chore (rc.189): the five unwaived gitleaks hits are triaged and waived with reasons
 
 The CodeRipper portfolio job's SEC-002 scan (gitleaks 8.30.1) reported 7 hits on `main` at `6b63312`; 2 were already waived. The other 5 are not credentials, and each now has a line-scoped `[[allow]]` entry in `.coderipper.toml` with its reason: a 14-character event name in `crates/synapsed/tests/api.rs`; two `format!` PEM templates in `src/auth_integration.rs` and `src/auth_integration_enhanced.rs` (history only, both files since deleted); the jwt.io documentation sample token in `tests/security_test.rs`; and the RFC 6455 sample nonce in `tests/transport_repairs.rs` (the last two by sha256 against the public values). No value is printed anywhere. Waivers are by line, not by file, so a new secret in those files is still reported.
