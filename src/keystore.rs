@@ -242,12 +242,13 @@ fn default_permissions() -> Vec<Permission> {
 }
 
 /// The extra grants an account holder may give a role, beyond the defaults. `state-write` is a
-/// default; these four are not.
-const GRANTABLE: [Permission; 4] = [
+/// default; these five are not.
+const GRANTABLE: [Permission; 5] = [
     Permission::StateReadAll,
     Permission::StateAdmin,
     Permission::StateDerive,
     Permission::RoleAdmin,
+    Permission::DaemonAdmin,
 ];
 const GRANTS: &str = "grants";
 

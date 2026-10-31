@@ -44,6 +44,8 @@ pub enum Permission {
     /// Role liveness: retire and revive roles (`/v1/roles/retire`, `/v1/roles/revive`). Held only
     /// by the PM role.
     RoleAdmin,
+    /// Daemon control: stop the daemon cleanly (`/v1/daemon/shutdown`). Held only by the PM role.
+    DaemonAdmin,
     /// A consumer-defined grant. Always begins `x-`; Synapse carries it and never interprets it.
     Extension(String),
 }
@@ -60,6 +62,7 @@ impl Permission {
             Permission::StateAdmin => "state-admin".to_string(),
             Permission::StateDerive => "state-derive".to_string(),
             Permission::RoleAdmin => "role-admin".to_string(),
+            Permission::DaemonAdmin => "daemon-admin".to_string(),
             Permission::Extension(text) => text.clone(),
         }
     }
@@ -77,6 +80,7 @@ impl Permission {
             "state-admin" => Some(Permission::StateAdmin),
             "state-derive" => Some(Permission::StateDerive),
             "role-admin" => Some(Permission::RoleAdmin),
+            "daemon-admin" => Some(Permission::DaemonAdmin),
             other if other.starts_with("x-") => Some(Permission::Extension(other.to_string())),
             _ => None,
         }
