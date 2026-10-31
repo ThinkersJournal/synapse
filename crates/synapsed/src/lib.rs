@@ -53,8 +53,8 @@ use serde_json::{Value, json};
 use synapse::certificate::{RevocationLookup, chain_from_pem};
 use synapse::keystore::{Keystore, KeystoreError};
 use synapse::mailbox::{
-    Acked, Depth, DurabilityClass, Enqueued, Envelope, MailConfig, MailError, MailStore, MailTxn,
-    Mailbox, RedbStore, StoreError,
+    Acked, Depth, DurabilityClass, Enqueued, Envelope, Exhausted, MailConfig, MailError, MailStore,
+    MailTxn, Mailbox, RedbStore, StoreError,
 };
 use synapse::roles::{ClaimRequest, RolesState};
 use synapse::security_events::{
@@ -187,6 +187,11 @@ const STATE_FILE: &str = "state.redb";
 /// The `/v1/stats` counters, kept across restarts: written when they change (at most every
 /// `STATS_FLUSH`) and at a clean shutdown, so a kill loses at most the last interval.
 const STATS_FILE: &str = "stats.json";
+/// How often exhausted messages are looked for (the default of `redelivery_check`).
+const REDELIVERY_CHECK: std::time::Duration = std::time::Duration::from_secs(30);
+/// The sender of the daemon's own notices (`[UNACKED]`); a notice about one of these is never sent,
+/// so a notice that itself goes unacked cannot start a loop.
+const NOTICE_SENDER: &str = "synapsed";
 const STATS_FLUSH: std::time::Duration = std::time::Duration::from_secs(2);
 /// How recently a role must have been heard from to count as online.
 const ONLINE_WINDOW: chrono::Duration = chrono::Duration::seconds(90);
@@ -254,6 +259,8 @@ struct Shared {
     home: PathBuf,
     started_at: DateTime<Utc>,
     sweep_every: std::time::Duration,
+    /// How often to look for messages whose redeliveries ran out (see `Mailbox::dead_exhausted`).
+    redelivery_check: std::time::Duration,
     security: Security,
     pause: Pause,
     /// Fired by `/v1/daemon/shutdown`; `serve` stops gracefully when it does.
@@ -703,6 +710,7 @@ impl Daemon {
                 home: cfg.home.clone(),
                 started_at,
                 sweep_every: cfg.sweep_every,
+                redelivery_check: REDELIVERY_CHECK,
                 security: Security::new(SecurityConfig::default(), Arc::new(sink)),
                 pause: sleep_pause(),
                 stop: tokio::sync::Notify::new(),
@@ -797,6 +805,27 @@ impl Daemon {
         self.with_session_ttl(chrono::Duration::hours(i64::from(hours.max(1))))
     }
 
+    /// Sets the redelivery back-off: how long an unacked message stays hidden after each delivery.
+    /// The count of gaps is also how many deliveries it gets before it is set aside as dead and its
+    /// sender is told; empty turns the back-off off. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_redelivery_gaps(mut self, gaps: Vec<chrono::Duration>) -> Daemon {
+        self.shared
+            .mailbox
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_redelivery_gaps(gaps);
+        self
+    }
+
+    /// How often exhausted messages are looked for and their senders told (default 30 s). Call after
+    /// `open`, before `serve`.
+    #[must_use]
+    pub fn with_redelivery_check(mut self, every: std::time::Duration) -> Daemon {
+        self.shared.redelivery_check = every;
+        self
+    }
+
     /// Sets how many days idle retires a role (default 30, at least 1). Call after `open`, before
     /// `serve`.
     #[must_use]
@@ -886,6 +915,16 @@ impl Daemon {
         let alert_task =
             alerts.map(|delivery| tokio::spawn(deliver_alerts(shared.clone(), delivery)));
         let notice_task = tokio::spawn(deliver_state_notices(shared.clone()));
+        let redelivery_task = {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(shared.redelivery_check);
+                loop {
+                    tick.tick().await;
+                    report_exhausted(&shared);
+                }
+            })
+        };
         let stats_task = {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -936,6 +975,7 @@ impl Daemon {
             .await;
         sweeper.abort();
         notice_task.abort();
+        redelivery_task.abort();
         stats_task.abort();
         flush_stats(&shared);
         if let Some(task) = alert_task {
@@ -1810,6 +1850,65 @@ struct RoleCounters {
     last_fetch_at: Option<DateTime<Utc>>,
     /// When the role last acked a message (an idempotent repeat does not move it).
     last_ack_at: Option<DateTime<Utc>>,
+    /// Messages for the role set aside as dead after their deliveries ran out without an ack.
+    dead_lettered: u64,
+}
+
+/// Set aside the messages whose deliveries ran out, count them against the role they were for, and
+/// tell each sender with one short mail: `[UNACKED] to=<role> id=<message_id> age=<time>
+/// attempts=<n>`. The message is not dropped: it waits in the dead set and comes back when the role
+/// next claims. A message the daemon itself sent (an earlier notice) is set aside quietly, so
+/// there is never a notice about a notice.
+fn report_exhausted(shared: &Shared) {
+    let now = Utc::now();
+    let exhausted = match shared.mailbox.lock() {
+        Ok(mut mailbox) => match mailbox.dead_exhausted(now) {
+            Ok(list) => list,
+            Err(e) => {
+                eprintln!("synapsed: redeliveries not checked: {e}");
+                return;
+            }
+        },
+        Err(_) => return,
+    };
+    for gone in exhausted {
+        count(shared, &gone.to, |c| c.dead_lettered += 1);
+        let Some(notice) = unacked_notice(&gone, &shared.account, now) else {
+            continue;
+        };
+        let Ok(mut mailbox) = shared.mailbox.lock() else {
+            return;
+        };
+        if let Err(e) = mailbox.enqueue(notice, now) {
+            eprintln!("synapsed: an [UNACKED] notice was not queued: {e}");
+        }
+    }
+}
+
+/// The `[UNACKED]` mail for `gone`'s sender, or `None` when `gone` was itself a notice from the
+/// daemon: a notice that goes unacked is set aside quietly, never reported, so there is no loop.
+fn unacked_notice(gone: &Exhausted, account: &str, now: DateTime<Utc>) -> Option<Envelope> {
+    let notice_from = format!("{NOTICE_SENDER}@{account}");
+    if gone.from == notice_from {
+        return None;
+    }
+    let age = (now - gone.enqueued_at).max(chrono::Duration::zero());
+    let age = if age < chrono::Duration::minutes(2) {
+        format!("{}s", age.num_seconds())
+    } else {
+        format!("{}m", age.num_minutes())
+    };
+    let role = gone.to.split_once('@').map_or(gone.to.as_str(), |(r, _)| r);
+    Some(Envelope {
+        message_id: format!("{notice_from}/unacked-{}", uuid::Uuid::new_v4()),
+        to: gone.from.clone(),
+        from: notice_from,
+        body: format!(
+            "[UNACKED] to={role} id={} age={age} attempts={}",
+            gone.message_id, gone.attempts
+        )
+        .into_bytes(),
+    })
 }
 
 fn count(shared: &Shared, role: &str, bump: impl FnOnce(&mut RoleCounters)) {
@@ -1911,6 +2010,7 @@ async fn stats(
                 "expired": c.expired,
                 "last_fetch_at": c.last_fetch_at.map(|at| at.to_rfc3339()),
                 "last_ack_at": c.last_ack_at.map(|at| at.to_rfc3339()),
+                "dead_lettered": c.dead_lettered,
             })
         })
         .collect();
@@ -2261,6 +2361,32 @@ fn list_entries(
 mod tests {
     use super::*;
     use synapse::roles::RoleRecord;
+
+    fn gone(from: &str) -> Exhausted {
+        Exhausted {
+            to: "b@acct".into(),
+            from: from.into(),
+            message_id: "a@acct/m1".into(),
+            enqueued_at: Utc::now() - chrono::Duration::minutes(31),
+            attempts: 4,
+        }
+    }
+
+    /// A lost message earns its sender one notice in the documented shape; a lost NOTICE earns
+    /// none. Sabotage: dropping the `NOTICE_SENDER` check makes the second assertion fail.
+    #[test]
+    fn a_lost_message_is_reported_to_its_sender_and_a_lost_notice_is_not() {
+        let notice = unacked_notice(&gone("a@acct"), "acct", Utc::now()).expect("a notice");
+        assert_eq!(
+            (notice.to.as_str(), notice.from.as_str()),
+            ("a@acct", "synapsed@acct")
+        );
+        assert_eq!(
+            String::from_utf8(notice.body).unwrap(),
+            "[UNACKED] to=b id=a@acct/m1 age=31m attempts=4"
+        );
+        assert!(unacked_notice(&gone("synapsed@acct"), "acct", Utc::now()).is_none());
+    }
 
     /// S-1: with depths, each entry carries them; without (the mailbox could not be read), every
     /// `pending` is `null` and presence is still served.

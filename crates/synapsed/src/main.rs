@@ -111,6 +111,13 @@ async fn main() -> ExitCode {
     let daemon = daemon
         .with_role_ttl_days(settings.role_ttl_days)
         .with_session_ttl_hours(settings.session_ttl_hours)
+        .with_redelivery_gaps(
+            settings
+                .redelivery_gaps_secs
+                .iter()
+                .map(|s| chrono::Duration::seconds(i64::try_from(*s).unwrap_or(i64::MAX)))
+                .collect(),
+        )
         .with_alert_roles(settings.alert_roles.clone())
         .with_launch_senders(settings.launch_senders.clone())
         .with_launcher(synapsed::LauncherConfig {

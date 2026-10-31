@@ -52,6 +52,11 @@ pub enum AckPolicy {
     /// daemon's `attempts` has reached [`PushConfig::max_pushes`] AND this process has written it
     /// at least twice. Bounded attempts, not a confirmation that anything was shown.
     BoundedAttempts,
+    /// The adapter never acks and never stops pushing: every time the daemon hands the message out
+    /// again (on its back-off schedule) it is written to the client again, and only the receiver's
+    /// `ack`, or the daemon setting the message aside after its last delivery, ends it. A receiver that
+    /// restarts therefore always gets the message again.
+    Never,
 }
 
 /// What differs between MCP clients that accept pushed mail.
@@ -277,6 +282,7 @@ pub async fn push_once_with<R: Renderer, N: Notifier>(
                 AckPolicy::BoundedAttempts => {
                     should_ack(message.attempts(), ledger.pushes(id), config.max_pushes)
                 }
+                AckPolicy::Never => false,
                 AckPolicy::ReceiverOnly => {
                     // Two writes at least, as for `BoundedAttempts`: the first can precede the
                     // client's registration (the c7 case).

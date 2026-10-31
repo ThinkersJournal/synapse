@@ -137,8 +137,9 @@ fn the_view_reports_a_missing_id_as_none_rather_than_inventing_one() {
 }
 
 #[test]
-fn claude_code_keeps_the_bounded_attempts_policy() {
-    // rc.33 is a measured trade for this client; the generic default must not reach it.
+fn claude_code_never_acks_for_the_model() {
+    // CireSnave 2026-10-31: a lane that restarts must get the message again, so the adapter never
+    // removes one. Sabotage: any other policy fails this.
     use synapse_claude_channel::{AckPolicy, ClaudeChannel, Renderer};
-    assert_eq!(ClaudeChannel.ack_policy(), AckPolicy::BoundedAttempts);
+    assert_eq!(ClaudeChannel.ack_policy(), AckPolicy::Never);
 }
