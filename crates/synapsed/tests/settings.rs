@@ -159,3 +159,38 @@ fn launch_senders_come_from_the_environment_or_the_file_and_default_to_none() {
     let e = settings(&[("SYNAPSE_LAUNCH_SENDERS", "bad name")], None).unwrap_err();
     assert!(e.contains("launch.senders"), "{e}");
 }
+
+#[test]
+fn the_redelivery_back_off_defaults_to_two_four_eight_and_sixteen_minutes() {
+    let s = settings(&[], None).unwrap();
+    assert_eq!(
+        s.redelivery_gaps_secs,
+        [120, 240, 480, 960],
+        "30 minutes in all (CireSnave 2026-10-31)"
+    );
+}
+
+#[test]
+fn the_back_off_is_set_by_the_environment_or_the_file_and_checked() {
+    let s = settings(&[("SYNAPSE_REDELIVERY_GAPS", "60,300")], None).unwrap();
+    assert_eq!(s.redelivery_gaps_secs, [60, 300]);
+    let file = r#"[delivery]
+gaps_secs = ["30", "90"]
+"#;
+    let s = settings(&[], Some(file)).unwrap();
+    assert_eq!(s.redelivery_gaps_secs, [30, 90]);
+    let off = r#"[delivery]
+gaps_secs = []
+"#;
+    let s = settings(&[], Some(off)).unwrap();
+    assert!(
+        s.redelivery_gaps_secs.is_empty(),
+        "an empty list turns it off"
+    );
+    for bad in ["0", "x", "-5", "86401"] {
+        let e = settings(&[("SYNAPSE_REDELIVERY_GAPS", bad)], None).unwrap_err();
+        assert!(e.contains("delivery.gaps_secs"), "{bad}: {e}");
+    }
+    let many = vec!["60"; 17].join(",");
+    assert!(settings(&[("SYNAPSE_REDELIVERY_GAPS", &many)], None).is_err());
+}

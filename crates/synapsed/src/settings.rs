@@ -35,6 +35,9 @@ pub struct Settings {
     pub role_ttl_days: u32,
     /// A session unused this many hours expires (file only; default 24).
     pub session_ttl_hours: u32,
+    /// Seconds an unacked message stays hidden after each delivery (see `MailConfig::redelivery_gaps`);
+    /// empty means no back-off.
+    pub redelivery_gaps_secs: Vec<u64>,
 }
 
 /// Resolve the settings from `env` (the whole process environment is fine) and the text of
@@ -91,6 +94,27 @@ pub fn load(env: &BTreeMap<String, String>, file: Option<&str>) -> Result<Settin
         .ok()
         .filter(|h| *h >= 1)
         .ok_or_else(|| format!("session.ttl_hours is {hours}: it must be at least 1"))?;
+    let gaps: Vec<String> = config
+        .get("delivery.gaps_secs")
+        .map_err(|e| e.to_string())?;
+    let redelivery_gaps_secs = gaps
+        .iter()
+        .map(|g| g.trim())
+        .filter(|g| !g.is_empty())
+        .map(|g| {
+            g.parse::<u64>()
+                .ok()
+                .filter(|s| (1..=86_400).contains(s))
+                .ok_or_else(|| {
+                    format!(
+                        "delivery.gaps_secs: {g:?} is not a whole number of seconds from 1 to 86400"
+                    )
+                })
+        })
+        .collect::<Result<Vec<u64>, String>>()?;
+    if redelivery_gaps_secs.len() > 16 {
+        return Err("delivery.gaps_secs: at most 16 gaps".to_string());
+    }
     let store_pin: Option<String> = config.get("storage.id").ok();
     let store_pin_from_env = store_pin.is_some()
         && config.explain("storage.id").is_ok_and(|e| {
@@ -107,5 +131,6 @@ pub fn load(env: &BTreeMap<String, String>, file: Option<&str>) -> Result<Settin
         alert_roles: roles("alert.roles")?,
         role_ttl_days,
         session_ttl_hours,
+        redelivery_gaps_secs,
     })
 }

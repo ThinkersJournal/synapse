@@ -72,6 +72,7 @@ impl Home {
             .current_dir(dir.path())
             .env("SYNAPSE_HOME", dir.path())
             .env("SYNAPSE_ADDR", "127.0.0.1:0")
+            .env("SYNAPSE_REDELIVERY_GAPS", "")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -238,6 +239,23 @@ async fn discover_is_rejected_and_initialize_negotiates_2025_11_25_with_the_chan
         "{init}"
     );
     assert!(instructions.contains("act on it ONCE"), "{init}");
+    // CireSnave 2026-10-31: firm wording, no auto-ack, the schedule and the sender notice stated.
+    for must in [
+        "ACK EVERY MESSAGE",
+        "as soon as you start acting on it, before any long tool run",
+        "The adapter never acks for you",
+        "2, 4, 8 and 16 minutes",
+        "the sender is told",
+    ] {
+        assert!(
+            instructions.contains(must),
+            "{must:?} missing: {instructions}"
+        );
+    }
+    assert!(
+        !instructions.contains(" may ack") && !instructions.contains("MAY ack"),
+        "{instructions}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -409,8 +427,7 @@ fn flaky(fail: usize) -> Flaky {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unacked_message_is_acked_by_the_adapter_at_its_third_attempt_with_the_same_id_each_time()
- {
+async fn the_adapter_never_acks_whatever_the_attempts_so_a_restarted_lane_gets_the_message_again() {
     let home = Home::new();
     let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
     let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
@@ -422,7 +439,8 @@ async fn an_unacked_message_is_acked_by_the_adapter_at_its_third_attempt_with_th
     let (notifier, ledger) = (flaky(0), PushLedger::default());
     send(&alice, "bob", "the model never acks this").await;
 
-    for _ in 0..3 {
+    // Past the old bound of three pushes, one per lease: the adapter keeps pushing and never acks.
+    for _ in 0..4 {
         assert_eq!(
             push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
             1
@@ -431,82 +449,18 @@ async fn an_unacked_message_is_acked_by_the_adapter_at_its_third_attempt_with_th
     }
     {
         let sent = notifier.sent.lock().unwrap();
-        assert_eq!(sent.len(), 3, "pushed {} times", sent.len());
+        assert_eq!(sent.len(), 4, "pushed {} times", sent.len());
         let ids: Vec<&str> = sent
             .iter()
             .map(|p| p["meta"]["message_id"].as_str().unwrap())
             .collect();
         assert!(ids.iter().all(|i| *i == ids[0]), "ids differ: {ids:?}");
     }
-    // The adapter acked it after the third push: nothing comes back when the lease ends.
-    // The lease from the last push has run out, so a message still pending would be fetched now.
-    assert!(bob.pull(10, 5).await.unwrap().is_empty(), "still pending");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_message_whose_leases_earlier_sessions_spent_is_pushed_twice_before_the_adapter_acks_it()
-{
-    let home = Home::new();
-    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
-    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
-    let config = ChannelConfig {
-        lease_secs: 5,
-        max_pushes: 3,
-        ..quick()
-    };
-    send(&alice, "bob", "outlived two sessions").await;
-
-    // Two earlier sessions leased it and went away: the daemon counts attempts 1 and 2.
-    for expected in [1, 2] {
-        let got = bob.pull(10, 5).await.unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0]["attempts"], expected, "the daemon's attempts count");
-        tokio::time::sleep(Duration::from_millis(5500)).await;
-    }
-
-    // A new process (empty ledger) reaches attempt 3 at its first pull, but one push proves
-    // nothing (the c7 case: the client may not be registered yet), so it pushes twice.
-    let (notifier, ledger) = (flaky(0), PushLedger::default());
-    assert_eq!(
-        push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
-        1
-    );
-    tokio::time::sleep(Duration::from_millis(5500)).await;
-    assert_eq!(
-        push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
-        1
-    );
-    tokio::time::sleep(Duration::from_millis(5500)).await;
-    assert_eq!(notifier.sent.lock().unwrap().len(), 2);
-    // The lease from the last push has run out, so a message still pending would be fetched now.
-    assert!(bob.pull(10, 5).await.unwrap().is_empty(), "still pending");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_write_does_not_count_toward_the_two_pushes_the_ack_needs() {
-    let home = Home::new();
-    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
-    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
-    let config = ChannelConfig {
-        lease_secs: 5,
-        max_pushes: 2,
-        ..quick()
-    };
-    let (notifier, ledger) = (flaky(1), PushLedger::default());
-    send(&alice, "bob", "second try").await;
-
-    // Lease 1: the write fails. Lease 2: one write succeeded, so the message is NOT acked yet even
-    // though the daemon's attempts has reached 2. Lease 3: the second success acks it.
-    for expected in [0, 1, 1] {
-        assert_eq!(
-            push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
-            expected
-        );
-        tokio::time::sleep(Duration::from_millis(5500)).await;
-    }
-    assert_eq!(notifier.sent.lock().unwrap().len(), 2);
-    // The lease from the last push has run out, so a message still pending would be fetched now.
-    assert!(bob.pull(10, 5).await.unwrap().is_empty(), "still pending");
+    // Nothing parked it, nothing acked it: a new session still receives it (attempts 5).
+    assert!(ledger.parked().is_empty());
+    let again = bob.pull(10, 5).await.unwrap();
+    assert_eq!(again.len(), 1, "still pending for a restarted lane");
+    assert_eq!(again[0]["attempts"], 5);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

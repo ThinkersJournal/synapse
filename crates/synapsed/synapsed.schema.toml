@@ -58,6 +58,14 @@ restart = true
 description = "a session unused this many hours expires and its holder claims the role again; every call renews it; at least 1"
 
 [[value]]
+key = "delivery.gaps_secs"
+type = "list"
+default = ["120", "240", "480", "960"]
+env = "SYNAPSE_REDELIVERY_GAPS"
+restart = true
+description = "seconds an unacked message stays hidden after its 1st, 2nd, 3rd... delivery (the last repeats); the count of gaps is also the number of deliveries before it is set aside as dead and its sender is told, and their sum is the total wait (default 2, 4, 8 and 16 minutes: 30 in all); an empty list turns the back-off off"
+
+[[value]]
 key = "alert.roles"
 type = "list"
 default = []

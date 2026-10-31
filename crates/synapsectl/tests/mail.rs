@@ -53,6 +53,7 @@ impl Home {
         cmd.args(args)
             .env("SYNAPSE_HOME", self.path())
             .env("SYNAPSE_ADDR", "127.0.0.1:0")
+            .env("SYNAPSE_REDELIVERY_GAPS", "")
             .env_remove("SYNAPSE_ROLE");
         cmd
     }
@@ -946,6 +947,7 @@ fn claim_in(home: &Path) -> Output {
         .args(["claim", "--role", "alpha"])
         .env("SYNAPSE_HOME", home)
         .env("SYNAPSE_ADDR", "127.0.0.1:0")
+        .env("SYNAPSE_REDELIVERY_GAPS", "")
         .env_remove("SYNAPSE_ROLE")
         .output()
         .expect("the synapse binary runs")

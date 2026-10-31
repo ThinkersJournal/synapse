@@ -677,6 +677,160 @@ pub fn a_message_leased_max_deliveries_times_goes_dead_and_is_kept<S: MailStore>
     assert_eq!(depth_of(&mb, LANE, at).dead, 0);
 }
 
+fn backoff_config() -> MailConfig {
+    MailConfig {
+        redelivery_gaps: [2, 4, 8, 16].map(Duration::minutes).to_vec(),
+        ..MailConfig::default()
+    }
+}
+
+fn backoff_mailbox<S: MailStore>(make: &impl Fn() -> S) -> Mailbox<S> {
+    Mailbox::open_volatile(make(), backoff_config(), t0() - Duration::seconds(1)).expect("open")
+}
+
+/// Deliver `m` at 0, 2, 6 and 14 minutes (gaps 2, 4, 8, 16) and check each lease, so the tests
+/// below can start from a known point.
+fn deliver_on_schedule<S: MailStore>(mb: &mut Mailbox<S>, epoch: u64, upto: usize) {
+    let gaps = [2i64, 4, 8, 16];
+    for (n, minute) in [0i64, 2, 6, 14].into_iter().take(upto).enumerate() {
+        let at = t0() + Duration::minutes(minute);
+        if minute > 0 {
+            assert!(
+                mb.fetch(LANE, epoch, 10, None, at - Duration::seconds(1))
+                    .unwrap()
+                    .is_empty(),
+                "still hidden a second before minute {minute}"
+            );
+        }
+        let got = mb.fetch(LANE, epoch, 10, None, at).unwrap();
+        assert_eq!(ids_of(&got), ["m"], "delivery {} at minute {minute}", n + 1);
+        assert_eq!(got[0].attempts, n as u32 + 1);
+        assert_eq!(got[0].lease_until, at + Duration::minutes(gaps[n]));
+    }
+}
+
+/// An unacked message is redelivered after 2, 4, 8 and 16 minutes (30 in all); when the last lease
+/// runs out it goes to the dead set (kept, counted) and is reported once, with its sender, so the
+/// sender can be told.
+pub fn redelivery_backs_off_then_goes_dead_and_names_the_sender<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let mut mb = backoff_mailbox(&make);
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m", LANE, b"x"), t0()).unwrap();
+    deliver_on_schedule(&mut mb, epoch, 4);
+    let end = t0() + Duration::minutes(30);
+    assert!(
+        mb.dead_exhausted(end - Duration::seconds(1))
+            .unwrap()
+            .is_empty(),
+        "the last lease has not run out"
+    );
+    let gone = mb.dead_exhausted(end).unwrap();
+    assert_eq!(gone.len(), 1, "{gone:?}");
+    assert_eq!(
+        (
+            gone[0].to.as_str(),
+            gone[0].from.as_str(),
+            gone[0].message_id.as_str()
+        ),
+        (LANE, "peer@acct", "m")
+    );
+    assert_eq!((gone[0].attempts, gone[0].enqueued_at), (4, t0()));
+    let depth = depth_of(&mb, LANE, end);
+    assert_eq!((depth.queued, depth.leased, depth.dead), (0, 0, 1));
+    assert_eq!(
+        mb.dead_letters(LANE, epoch).unwrap().len(),
+        1,
+        "kept, body and all"
+    );
+    let later = end + Duration::minutes(1);
+    assert!(mb.fetch(LANE, epoch, 10, None, later).unwrap().is_empty());
+    assert!(
+        mb.dead_exhausted(later).unwrap().is_empty(),
+        "reported once"
+    );
+}
+
+/// A reader that keeps polling finds the message exhausted on its own fetch; the report still
+/// comes out of `dead_exhausted`, once.
+pub fn a_polling_reader_also_reports_the_exhausted_message<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = backoff_mailbox(&make);
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m", LANE, b"x"), t0()).unwrap();
+    deliver_on_schedule(&mut mb, epoch, 4);
+    let end = t0() + Duration::minutes(30);
+    assert!(mb.fetch(LANE, epoch, 10, None, end).unwrap().is_empty());
+    assert_eq!(depth_of(&mb, LANE, end).dead, 1);
+    let gone = mb.dead_exhausted(end).unwrap();
+    assert_eq!(gone.len(), 1, "{gone:?}");
+    assert_eq!(gone[0].message_id, "m");
+    assert!(mb.dead_exhausted(end).unwrap().is_empty());
+}
+
+/// An ack at the second attempt ends it: no third delivery, nothing dead, nothing to report.
+pub fn an_ack_at_the_second_attempt_ends_the_schedule_with_no_notice<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let mut mb = backoff_mailbox(&make);
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m", LANE, b"x"), t0()).unwrap();
+    deliver_on_schedule(&mut mb, epoch, 2);
+    let at = t0() + Duration::minutes(2);
+    assert_eq!(mb.ack(LANE, epoch, "m", at).unwrap(), Acked::Removed);
+    for minute in [3, 6, 14, 30, 45] {
+        let at = t0() + Duration::minutes(minute);
+        assert!(
+            mb.fetch(LANE, epoch, 10, None, at).unwrap().is_empty(),
+            "minute {minute}"
+        );
+        assert!(mb.dead_exhausted(at).unwrap().is_empty(), "minute {minute}");
+    }
+    let depth = depth_of(&mb, LANE, t0() + Duration::minutes(45));
+    assert_eq!((depth.queued, depth.leased, depth.dead), (0, 0, 0));
+}
+
+/// A lane that restarts mid-schedule (a new epoch) is given the message again at once, not at the
+/// end of the old lease, and the schedule carries on from its attempt count.
+pub fn a_restart_mid_schedule_gets_the_message_again<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = backoff_mailbox(&make);
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m", LANE, b"x"), t0()).unwrap();
+    deliver_on_schedule(&mut mb, epoch, 2);
+    let restart = t0() + Duration::minutes(3);
+    let epoch2 = ids.claim(&mut mb, "lane", restart);
+    assert!(epoch2 > epoch);
+    let got = mb.fetch(LANE, epoch2, 10, None, restart).unwrap();
+    assert_eq!(ids_of(&got), ["m"]);
+    assert_eq!(got[0].attempts, 3, "the count survives the restart");
+    assert_eq!(got[0].lease_until, restart + Duration::minutes(8));
+}
+
+/// A message set aside for lack of an ack is not lost to a restart: the role's next claim puts it
+/// back in the queue with a fresh count, and it is delivered again.
+pub fn a_dead_message_is_delivered_again_when_the_role_next_claims<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let mut mb = backoff_mailbox(&make);
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m", LANE, b"x"), t0()).unwrap();
+    deliver_on_schedule(&mut mb, epoch, 4);
+    let end = t0() + Duration::minutes(30);
+    assert_eq!(mb.dead_exhausted(end).unwrap().len(), 1);
+    let back = end + Duration::minutes(1);
+    let epoch2 = ids.claim(&mut mb, "lane", back);
+    assert!(mb.dead_letters(LANE, epoch2).unwrap().is_empty());
+    let got = mb.fetch(LANE, epoch2, 10, None, back).unwrap();
+    assert_eq!(ids_of(&got), ["m"]);
+    assert_eq!(got[0].attempts, 1, "a fresh count");
+    assert_eq!(got[0].lease_until, back + Duration::minutes(2));
+}
+
 /// A full dead set never costs a message: the one past the cap stays queued and is leased again.
 pub fn a_full_dead_set_keeps_the_message_queued<S: MailStore>(make: impl Fn() -> S) {
     let ids = Ids::new();
@@ -918,6 +1072,25 @@ pub fn run_all<S: MailStore>(make: impl Fn() -> S) {
     case("a_dead_message_can_be_requeued", || {
         a_dead_message_can_be_requeued(&make)
     });
+    case(
+        "redelivery_backs_off_then_goes_dead_and_names_the_sender",
+        || redelivery_backs_off_then_goes_dead_and_names_the_sender(&make),
+    );
+    case(
+        "a_polling_reader_also_reports_the_exhausted_message",
+        || a_polling_reader_also_reports_the_exhausted_message(&make),
+    );
+    case(
+        "an_ack_at_the_second_attempt_ends_the_schedule_with_no_notice",
+        || an_ack_at_the_second_attempt_ends_the_schedule_with_no_notice(&make),
+    );
+    case("a_restart_mid_schedule_gets_the_message_again", || {
+        a_restart_mid_schedule_gets_the_message_again(&make)
+    });
+    case(
+        "a_dead_message_is_delivered_again_when_the_role_next_claims",
+        || a_dead_message_is_delivered_again_when_the_role_next_claims(&make),
+    );
 }
 
 fn case(name: &str, f: impl FnOnce()) {

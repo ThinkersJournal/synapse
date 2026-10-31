@@ -72,6 +72,7 @@ impl Home {
             .current_dir(dir.path())
             .env("SYNAPSE_HOME", dir.path())
             .env("SYNAPSE_ADDR", "127.0.0.1:0")
+            .env("SYNAPSE_REDELIVERY_GAPS", "")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

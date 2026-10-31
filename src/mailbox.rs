@@ -43,6 +43,47 @@ pub struct MailConfig {
     /// fails every time) is otherwise redelivered for as long as it is queued. The dead set is
     /// bounded and visible, never silently dropped: see [`Mailbox::dead_letters`].
     pub max_deliveries: u32,
+    /// Back-off between redeliveries of a message nobody acked (empty: none, the lease alone
+    /// decides). A message leased for the nth time is hidden for `redelivery_gaps[n - 1]`, in place of the requested lease
+    /// (the last gap repeats), so the same text is not put in front of its reader every lease. The
+    /// gaps also bound the deliveries: a message that has been leased `redelivery_gaps.len()` times
+    /// (or `max_deliveries`, if smaller) and whose last lease has run out is set aside in the dead
+    /// set and reported by [`Mailbox::dead_exhausted`]. The sum of the gaps is the total time a
+    /// sender waits before it is told.
+    pub redelivery_gaps: Vec<Duration>,
+}
+
+impl MailConfig {
+    /// Deliveries after which an unacked message is set aside (`0`: never).
+    fn delivery_cap(&self) -> u32 {
+        let gaps = u32::try_from(self.redelivery_gaps.len()).unwrap_or(u32::MAX);
+        match (self.max_deliveries, gaps) {
+            (0, g) => g,
+            (m, 0) => m,
+            (m, g) => m.min(g),
+        }
+    }
+
+    /// How long a message already leased `attempts` times stays hidden when leased again.
+    fn gap_for(&self, attempts: u32) -> Option<Duration> {
+        let last = self.redelivery_gaps.len().checked_sub(1)?;
+        self.redelivery_gaps
+            .get(usize::try_from(attempts).map_or(last, |n| n.min(last)))
+            .copied()
+    }
+}
+
+/// A message that used up its deliveries without an ack and was set aside in the dead set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exhausted {
+    /// The role it was for (a global id).
+    pub to: String,
+    /// The role that sent it (a global id), who should be told.
+    pub from: String,
+    pub message_id: String,
+    pub enqueued_at: DateTime<Utc>,
+    /// How many times it was leased.
+    pub attempts: u32,
 }
 
 impl Default for MailConfig {
@@ -55,6 +96,7 @@ impl Default for MailConfig {
             max_messages: 10_000,
             max_bytes: 64 * 1024 * 1024,
             max_deliveries: 10,
+            redelivery_gaps: Vec::new(),
         }
     }
 }
@@ -559,6 +601,8 @@ pub struct Mailbox<S: MailStore> {
     config: MailConfig,
     roles: Roles,
     poisoned: bool,
+    /// Messages set aside since the daemon last asked ([`Mailbox::dead_exhausted`]).
+    exhausted: Vec<Exhausted>,
 }
 
 impl<S: MailStore> Mailbox<S> {
@@ -597,7 +641,13 @@ impl<S: MailStore> Mailbox<S> {
             config,
             roles,
             poisoned: false,
+            exhausted: Vec::new(),
         })
+    }
+
+    /// Replace the redelivery back-off (see [`MailConfig::redelivery_gaps`]); empty turns it off.
+    pub fn set_redelivery_gaps(&mut self, gaps: Vec<Duration>) {
+        self.config.redelivery_gaps = gaps;
     }
 
     /// `Ok` only for the role's current epoch; the daemon checks every session with this (M5).
@@ -774,6 +824,9 @@ impl<S: MailStore> Mailbox<S> {
             self.poisoned = true;
             return Err(e);
         }
+        // A message set aside for lack of an ack is delivered again when the role next connects
+        // (a restarted lane must get it). Best effort: a failure here never fails the claim.
+        let _ = self.revive_dead(&grant.global_id);
         Ok(grant)
     }
 
@@ -870,13 +923,15 @@ impl<S: MailStore> Mailbox<S> {
             return Err(MailError::LeaseOutOfRange);
         }
         let config = self.config.clone();
-        let until = now + lease;
+        let cap = config.delivery_cap();
         let mut out = Vec::new();
+        let mut moved: Vec<Exhausted> = Vec::new();
         if max == 0 {
             return Ok(out);
         }
         self.store.write(&mut |txn| {
             out.clear();
+            moved.clear();
             // Collect up to `max` free messages in order, stopping the scan early, then lease them.
             let mut picked: Vec<Stored> = Vec::new();
             txn.scan_free(role, epoch, now, &mut |stored| {
@@ -892,7 +947,7 @@ impl<S: MailStore> Mailbox<S> {
                 // Leased `max_deliveries` times already and still here: set it aside, body and all,
                 // instead of leasing it again. If the dead set is itself full it stays queued: a
                 // message is never dropped to make room.
-                if config.max_deliveries > 0 && stored.attempts >= config.max_deliveries {
+                if cap > 0 && stored.attempts >= cap {
                     let (count, bytes) = txn.stats(&dead_set).map_err(MailError::Store)?;
                     if count < config.max_messages
                         && bytes.saturating_add(stored.envelope.body.len() as u64)
@@ -901,11 +956,21 @@ impl<S: MailStore> Mailbox<S> {
                         let id = stored.envelope.message_id.clone();
                         txn.remove(role, &id).map_err(MailError::Store)?;
                         stored.lease = None;
+                        moved.push(Exhausted {
+                            to: role.to_string(),
+                            from: stored.envelope.from.clone(),
+                            message_id: id,
+                            enqueued_at: stored.enqueued_at,
+                            attempts: stored.attempts,
+                        });
                         txn.put(&dead_set, stored).map_err(MailError::Store)?;
                         continue;
                     }
                 }
                 let prior_lease_lapsed = stored.lease.is_some_and(|held| held.until <= now);
+                // The back-off schedule sets the lease of a message once it is configured: the
+                // requested lease (still range-checked) is the schedule's only when none is set.
+                let until = now + config.gap_for(stored.attempts).unwrap_or(lease);
                 stored.lease = Some(Lease { epoch, until });
                 stored.attempts = stored.attempts.saturating_add(1);
                 out.push(Delivery {
@@ -919,6 +984,7 @@ impl<S: MailStore> Mailbox<S> {
             }
             Ok(())
         })?;
+        self.exhausted.append(&mut moved);
         Ok(out)
     }
 
@@ -1026,6 +1092,95 @@ impl<S: MailStore> Mailbox<S> {
             .map_err(MailError::Store)
         })?;
         Ok(out)
+    }
+
+    /// Set aside every message that used up its deliveries and whose last lease has run out (a
+    /// reader that is gone never fetches again, so the fetch path cannot find these), and return all
+    /// that were set aside since the last call, this path's and the fetch path's, for the caller to
+    /// tell their senders. Nothing is dropped: they sit in the dead set, visible in `list`, until the
+    /// role next claims (see [`Mailbox::claim`]) or `requeue` puts one back.
+    pub fn dead_exhausted(&mut self, now: DateTime<Utc>) -> Result<Vec<Exhausted>, MailError> {
+        self.live()?;
+        let config = self.config.clone();
+        let cap = config.delivery_cap();
+        let roles = self.roles.snapshot();
+        let mut moved: Vec<Exhausted> = Vec::new();
+        if cap > 0 {
+            self.store.write(&mut |txn| {
+                moved.clear();
+                for role in roles.roles.keys() {
+                    let mut due = Vec::new();
+                    txn.scan(role, &mut |stored| {
+                        if stored.attempts >= cap
+                            && stored.lease.as_ref().is_none_or(|held| held.until <= now)
+                        {
+                            due.push(stored.clone());
+                        }
+                        true
+                    })
+                    .map_err(MailError::Store)?;
+                    let dead_set = dead_role(role);
+                    for mut stored in due {
+                        let (count, bytes) = txn.stats(&dead_set).map_err(MailError::Store)?;
+                        if count >= config.max_messages
+                            || bytes.saturating_add(stored.envelope.body.len() as u64)
+                                > config.max_bytes
+                        {
+                            continue;
+                        }
+                        let id = stored.envelope.message_id.clone();
+                        txn.remove(role, &id).map_err(MailError::Store)?;
+                        stored.lease = None;
+                        moved.push(Exhausted {
+                            to: role.clone(),
+                            from: stored.envelope.from.clone(),
+                            message_id: id,
+                            enqueued_at: stored.enqueued_at,
+                            attempts: stored.attempts,
+                        });
+                        txn.put(&dead_set, stored).map_err(MailError::Store)?;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        self.exhausted.append(&mut moved);
+        Ok(std::mem::take(&mut self.exhausted))
+    }
+
+    /// Move every dead message of `role` back to its queue with the delivery count reset, as far as
+    /// the queue bound allows (the rest stay dead). Returns how many moved.
+    fn revive_dead(&mut self, role: &str) -> Result<usize, MailError> {
+        let config = self.config.clone();
+        let mut revived = 0;
+        self.store.write(&mut |txn| {
+            revived = 0;
+            let dead = dead_role(role);
+            let mut ids = Vec::new();
+            txn.scan(&dead, &mut |stored| {
+                ids.push(stored.envelope.message_id.clone());
+                true
+            })
+            .map_err(MailError::Store)?;
+            for id in ids {
+                let Some(mut stored) = txn.queued(&dead, &id).map_err(MailError::Store)? else {
+                    continue;
+                };
+                let (count, bytes) = txn.stats(role).map_err(MailError::Store)?;
+                if count + 1 > config.max_messages
+                    || bytes.saturating_add(stored.envelope.body.len() as u64) > config.max_bytes
+                {
+                    break;
+                }
+                txn.remove(&dead, &id).map_err(MailError::Store)?;
+                stored.attempts = 0;
+                stored.lease = None;
+                txn.put(role, stored).map_err(MailError::Store)?;
+                revived += 1;
+            }
+            Ok(())
+        })?;
+        Ok(revived)
     }
 
     /// Put a dead message back in the role's queue with its delivery count reset. The queue bound
