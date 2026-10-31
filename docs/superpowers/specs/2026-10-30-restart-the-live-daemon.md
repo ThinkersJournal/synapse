@@ -66,10 +66,19 @@ its launcher then be run again at once?* From the code:
   A non-zero result is what the task's restart-on-failure retries a minute later; exit 0 is a finished run.
 - So: there was no remote stop. Added: `synapse shutdown` (`POST /v1/daemon/shutdown`, grant `daemon-admin`), which
   ends `serve` through the same graceful path and exits 0. Then `schtasks /Run` starts the task at once.
-- **Not proven:** that Task Scheduler treats this exit 0 as no-retry and lets `/Run` start immediately. That is
-  exactly the step that needs the real task; per board 342 a throwaway task is authorised only if it does not
-  work on the live restart. The running daemon lacks the endpoint, so the first restart onto rc.201 still uses the
-  old stop; the clean stop is for the one after.
+- **Rehearsed 2026-10-31** (board 342 ruled A; one throwaway user-level task `synapse-rehearse-342`, scratch home and
+  port 127.0.0.1:7951, same settings as the live task: restart 3 times at 1 minute, IgnoreNew, Interactive, Limited;
+  wrapper `exit /b %RC%` as the live one; deleted afterwards and read back as gone, with `synapsed-cires` found by
+  the same query as the control). Measured:
+  - `synapse shutdown`: daemon down in 1.4 s; task `Ready`, last result `0`. `schtasks /Run` straight after: healthy
+    again in 0.9 s. No second start in the following 100 s.
+  - Control, a kill by pid (exit 1): task `Ready`, last result `1`. `schtasks /Run` straight after: healthy in
+    about 5 s (including a 1 s pause). Killed again with no `/Run`: **not restarted by the task in 6 minutes**.
+  - So, in this rehearsal, restart-on-failure did **not** fire on a non-zero exit, and `/Run` is never delayed by
+    it: there was no one-minute wait to remove. The clean stop's value is a proper exit (counters flushed, announce
+    file removed, in-flight requests finished) and a result of 0, not the removal of a retry. **Not shown:** that
+    the live task behaves the same (read-only comparison: its restart settings equal the rehearsal's).
+  The running daemon lacks the endpoint, so the first restart onto rc.201 still uses the old stop.
 
 ## 4. Slices
 

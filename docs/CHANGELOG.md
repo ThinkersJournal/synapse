@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.202): board 342 rehearsal result
+
+The restart note, ROADMAP row 47 and the rc.201 entry now carry the measured result of the throwaway-task rehearsal (they merged saying "not rehearsed"). No code change.
+
 ### Feature (rc.201): `synapse shutdown` stops the daemon cleanly (board 342)
 
-`POST /v1/daemon/shutdown {}` and `synapse shutdown --role <caller>`, gated by a new `daemon-admin` grant (`synapse id grant --role pm daemon-admin`; 401 without a session, 403 without the grant). The daemon finishes in-flight requests, flushes its counters, removes its announce file and exits 0. Before this the only ways to stop the live daemon were a signal to a console process or a kill, and a kill is a non-zero exit that a restart-on-failure scheduled task retries a minute later. A clean exit 0 passes through the task's wrapper (`exit /b %RC%`), so the task ends successfully and `schtasks /Run` can start it again at once. **Not rehearsed:** the Task Scheduler's own treatment of an exit 0 (no throwaway task registered; board 342 authorises one only if this does not work). **Breaking:** `synapse::certificate::Permission` has a new variant, `DaemonAdmin`. The running daemon has no such endpoint until it is restarted onto this build, so the next restart still stops it the old way. Test `only_daemon_admin_may_stop_the_daemon` (sabotage: not firing the stop fails it).
+`POST /v1/daemon/shutdown {}` and `synapse shutdown --role <caller>`, gated by a new `daemon-admin` grant (`synapse id grant --role pm daemon-admin`; 401 without a session, 403 without the grant). The daemon finishes in-flight requests, flushes its counters, removes its announce file and exits 0. Before this the only ways to stop the live daemon were a signal to a console process or a kill, and a kill is a non-zero exit that a restart-on-failure scheduled task retries a minute later. A clean exit 0 passes through the task's wrapper (`exit /b %RC%`), so the task ends successfully and `schtasks /Run` can start it again at once. Rehearsed on a throwaway task (board 342): after `synapse shutdown` the task is `Ready` with result 0 and `schtasks /Run` restarts the daemon in under a second; a kill (exit 1) was not retried by the task at all in 6 minutes, so the expected one-minute retry did not appear (restart note section 3a). **Breaking:** `synapse::certificate::Permission` has a new variant, `DaemonAdmin`. The running daemon has no such endpoint until it is restarted onto this build, so the next restart still stops it the old way. Test `only_daemon_admin_may_stop_the_daemon` (sabotage: not firing the stop fails it).
 
 ### Docs (rc.200): row 42 slice C design, retiring the redb mailbox store
 
