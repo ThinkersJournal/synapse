@@ -799,6 +799,9 @@ fn run(cli: Cli) -> Result<(), MailError> {
             let field = |name: &str| printable(reply[name].as_str().unwrap_or(""));
             println!("message id: {}", field("message_id"));
             println!("outcome: {}", field("outcome"));
+            if reply["warning"].is_string() {
+                println!("warning: {}", field("warning"));
+            }
         }
         Command::Inbox {
             role,

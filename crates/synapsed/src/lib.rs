@@ -26,6 +26,7 @@
 #[cfg(feature = "sqlite-store")]
 mod migration;
 
+pub mod format_lint;
 mod select;
 pub mod settings;
 mod state_api;
@@ -1465,13 +1466,15 @@ async fn send(
         None => uuid::Uuid::new_v4().to_string(),
     };
     let message_id = format!("{}/{client_id}", session.global_id);
+    let body_bytes = B64
+        .decode(&body.body_b64)
+        .map_err(|_| malformed("body_b64"))?;
+    let lint = format_lint::warning(&body_bytes);
     let envelope = Envelope {
         message_id: message_id.clone(),
         to: body.to,
         from: session.global_id.clone(),
-        body: B64
-            .decode(&body.body_b64)
-            .map_err(|_| malformed("body_b64"))?,
+        body: body_bytes,
     };
     let (to, outcome) = {
         let mut mailbox = locked(&shared.mailbox)?;
@@ -1522,13 +1525,19 @@ async fn send(
     };
     if outcome == Enqueued::Queued {
         count(&shared, &to, |c| c.sent += 1);
-        count(&shared, &session.global_id, |c| c.submitted += 1);
+        count(&shared, &session.global_id, |c| {
+            c.submitted += 1;
+            c.lint_warnings += u64::from(lint.is_some());
+        });
     }
-    Ok(axum::Json(json!({
+    let mut reply = json!({
         "message_id": message_id,
         "outcome": match outcome { Enqueued::Queued => "queued", Enqueued::Duplicate => "duplicate" },
-    }))
-    .into_response())
+    });
+    if let Some(warning) = lint {
+        reply["warning"] = Value::String(warning);
+    }
+    Ok(axum::Json(reply).into_response())
 }
 
 /// A recipient as an error message shows it: at most a global id's length, control characters
@@ -1852,6 +1861,9 @@ struct RoleCounters {
     last_ack_at: Option<DateTime<Utc>>,
     /// Messages for the role set aside as dead after their deliveries ran out without an ack.
     dead_lettered: u64,
+    /// New messages the role sent whose first line was not a `MESSAGE-FORMATS` v1 header (a soft lint
+    /// that never rejects). Compare with `submitted` for the rate.
+    lint_warnings: u64,
 }
 
 /// Set aside the messages whose deliveries ran out, count them against the role they were for, and
@@ -2011,6 +2023,7 @@ async fn stats(
                 "last_fetch_at": c.last_fetch_at.map(|at| at.to_rfc3339()),
                 "last_ack_at": c.last_ack_at.map(|at| at.to_rfc3339()),
                 "dead_lettered": c.dead_lettered,
+                "lint_warnings": c.lint_warnings,
             })
         })
         .collect();
