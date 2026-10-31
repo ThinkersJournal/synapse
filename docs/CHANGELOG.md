@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Feature (rc.203): `last_fetch_at` and `last_ack_at` per role in `list` and `stats` (row 41; PM 2026-10-31)
+
+Delivery evidence from the daemon's own side, so a cutover check does not depend on a lane's word. `last_fetch_at` is when a fetch last handed the role at least one message (an empty poll does not move it); `last_ack_at` is when the role last acked one (an idempotent repeat does not). Both are `null` until the first, are kept across restarts in `stats.json` (older files load unchanged), and are timestamps only, never content. They show the adapter received and acked; they do not show a model read the message (readiness doc section 6). Test `list_and_stats_show_when_a_role_last_fetched_and_acked` (sabotage: not recording the fetch fails it).
+
 ### Docs (rc.202): board 342 rehearsal result
 
 The restart note, ROADMAP row 47 and the rc.201 entry now carry the measured result of the throwaway-task rehearsal (they merged saying "not rehearsed"). No code change.

@@ -1562,6 +1562,10 @@ async fn fetch(
         })
         .collect();
     drop(senders);
+    if !messages.is_empty() {
+        let now = Utc::now();
+        count(&shared, &session.global_id, |c| c.last_fetch_at = Some(now));
+    }
     if redelivered > 0 {
         count(&shared, &session.global_id, |c| {
             c.redelivered += redelivered as u64;
@@ -1610,7 +1614,11 @@ async fn ack(
         Err(e) => return Err(e.into()),
     };
     if outcome == Acked::Removed {
-        count(&shared, &session.global_id, |c| c.acked += 1);
+        let now = Utc::now();
+        count(&shared, &session.global_id, |c| {
+            c.acked += 1;
+            c.last_ack_at = Some(now);
+        });
     }
     Ok(axum::Json(json!({
         "outcome": match outcome { Acked::Removed => "removed", Acked::AlreadyAcked => "already_acked" },
@@ -1768,6 +1776,18 @@ async fn list(
             out.retain(|entry| entry[key].as_str() == Some(want.as_str()));
         }
     }
+    // Delivery evidence from the daemon's own counters (null until the role has fetched or acked).
+    if let Ok(counters) = shared.stats.lock() {
+        for entry in &mut out {
+            let c = entry["global_id"]
+                .as_str()
+                .and_then(|id| counters.get(id))
+                .copied()
+                .unwrap_or_default();
+            entry["last_fetch_at"] = json!(c.last_fetch_at.map(|at| at.to_rfc3339()));
+            entry["last_ack_at"] = json!(c.last_ack_at.map(|at| at.to_rfc3339()));
+        }
+    }
     Ok(axum::Json(json!({ "roles": out })).into_response())
 }
 
@@ -1785,6 +1805,11 @@ struct RoleCounters {
     redelivered: u64,
     /// The subset of `redelivered` whose previous lease had run out; the rest are takeovers.
     expired: u64,
+    /// When a fetch last handed the role at least one message (the adapter received it). An empty
+    /// poll does not move it.
+    last_fetch_at: Option<DateTime<Utc>>,
+    /// When the role last acked a message (an idempotent repeat does not move it).
+    last_ack_at: Option<DateTime<Utc>>,
 }
 
 fn count(shared: &Shared, role: &str, bump: impl FnOnce(&mut RoleCounters)) {
@@ -1884,6 +1909,8 @@ async fn stats(
                 "acked": c.acked,
                 "redelivered": c.redelivered,
                 "expired": c.expired,
+                "last_fetch_at": c.last_fetch_at.map(|at| at.to_rfc3339()),
+                "last_ack_at": c.last_ack_at.map(|at| at.to_rfc3339()),
             })
         })
         .collect();
