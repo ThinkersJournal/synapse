@@ -105,6 +105,12 @@ enum Command {
         /// The role to revive (a name, not `name@account`).
         target: String,
     },
+    /// Stop the daemon cleanly (it exits 0, so the scheduled task does not retry). Needs the
+    /// `daemon-admin` grant. Start it again afterwards the way you started it.
+    Shutdown {
+        #[command(flatten)]
+        role: RoleArg,
+    },
     /// Per-role message counters since this daemon started (a restart begins again from zero):
     /// `sent`, `acked`, `redelivered`, `expired`, one JSON object per line, each with the
     /// daemon's `scope` and `since`. With `--daemon`: instead one object about the daemon itself,
@@ -587,10 +593,12 @@ fn parse_grant(text: &str) -> Result<Permission, MailError> {
             p @ (Permission::StateReadAll
             | Permission::StateAdmin
             | Permission::StateDerive
-            | Permission::RoleAdmin),
+            | Permission::RoleAdmin
+            | Permission::DaemonAdmin),
         ) => Ok(p),
         _ => Err(MailError::Usage(
-            "a grant is state-read-all, state-admin, state-derive or role-admin".to_string(),
+            "a grant is state-read-all, state-admin, state-derive, role-admin or daemon-admin"
+                .to_string(),
         )),
     }
 }
@@ -861,6 +869,11 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 "revived: {}",
                 printable(reply["role"].as_str().unwrap_or(""))
             );
+        }
+        Command::Shutdown { role } => {
+            let daemon = connect(&home, &role)?;
+            daemon.call(&role.role, "/v1/daemon/shutdown", Some(&json!({})))?;
+            println!("stopping");
         }
         Command::Stats {
             role,

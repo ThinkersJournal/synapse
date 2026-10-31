@@ -54,6 +54,23 @@ answered by the new version took **2.6 s**; `b`'s inbox held all 3 messages afte
 `stats.json` itself (it is written on the first counted event after the restart, none occurred in the rehearsal).
 The counters of the old build are in memory and are lost at this restart; they begin persisting from it.
 
+## 3a. Board 342: why a stop waits a minute, and the clean stop (rc.201)
+
+CireSnave asked (2026-10-30): *why doesn't synapsed have a shutdown command that cancels the retry, and why can't
+its launcher then be run again at once?* From the code:
+
+- `synapsed` already stops cleanly on Ctrl-C, Ctrl-Break, console close, logoff and shutdown
+  (`shutdown_signal`, `crates/synapsed/src/main.rs`) and then returns `ExitCode::SUCCESS`. But a task has no console
+  to send those to from another session, so the only outside lever was a kill, which is a non-zero exit.
+- The task's wrapper (`synapsed-run-*.cmd`) ends with `exit /b %RC%`, so the daemon's exit code is the task's result.
+  A non-zero result is what the task's restart-on-failure retries a minute later; exit 0 is a finished run.
+- So: there was no remote stop. Added: `synapse shutdown` (`POST /v1/daemon/shutdown`, grant `daemon-admin`), which
+  ends `serve` through the same graceful path and exits 0. Then `schtasks /Run` starts the task at once.
+- **Not proven:** that Task Scheduler treats this exit 0 as no-retry and lets `/Run` start immediately. That is
+  exactly the step that needs the real task; per board 342 a throwaway task is authorised only if it does not
+  work on the live restart. The running daemon lacks the endpoint, so the first restart onto rc.201 still uses the
+  old stop; the clean stop is for the one after.
+
 ## 4. Slices
 
 1. This PR: `is_role_only_home` guard, the two tests, this note, ROADMAP row 45.

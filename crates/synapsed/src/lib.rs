@@ -256,6 +256,8 @@ struct Shared {
     sweep_every: std::time::Duration,
     security: Security,
     pause: Pause,
+    /// Fired by `/v1/daemon/shutdown`; `serve` stops gracefully when it does.
+    stop: tokio::sync::Notify,
     /// Who may read launch signals, and their timing (feature off while `roles` is empty).
     launcher: LauncherConfig,
     /// Authenticated senders whose pending mail counts toward a launch signal; read on every poll.
@@ -703,6 +705,7 @@ impl Daemon {
                 sweep_every: cfg.sweep_every,
                 security: Security::new(SecurityConfig::default(), Arc::new(sink)),
                 pause: sleep_pause(),
+                stop: tokio::sync::Notify::new(),
                 launcher: LauncherConfig::default(),
                 launch_senders: LaunchSenders::default(),
                 launches: Mutex::new(launch::Table::new(started_at)),
@@ -834,6 +837,13 @@ impl Daemon {
         let alerts = self.alerts;
         let shared = Arc::new(self.shared);
         let pause = shared.pause.clone();
+        let stop_shared = shared.clone();
+        let shutdown = async move {
+            tokio::select! {
+                () = shutdown => {}
+                () = stop_shared.stop.notified() => {}
+            }
+        };
         write_announce(&shared.home, bound, &shared.instance_id)?;
         // Removed however `serve` ends: shutdown, error or unwind (#74). A kill runs no code, which
         // is why clients rely on the health proof, not on the file's absence.
@@ -903,6 +913,7 @@ impl Daemon {
             .route("/v1/waiting", get(waiting))
             .route("/v1/launch-result", post(launch_result))
             .route("/v1/launch-clear", post(launch_clear))
+            .route("/v1/daemon/shutdown", post(daemon_shutdown))
             .route("/v1/roles/retire", post(role_retire))
             .route("/v1/roles/revive", post(role_revive))
             .route("/v1/state/create", post(state_api::create))
@@ -2085,6 +2096,35 @@ async fn launch_clear(
 #[serde(deny_unknown_fields)]
 struct RoleBody {
     role: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShutdownBody {}
+
+/// `POST /v1/daemon/shutdown {}`: stop serving cleanly, so the process exits 0 (a scheduled task
+/// that restarts on failure then leaves it stopped). Needs `daemon-admin`. In-flight requests,
+/// this reply included, finish first.
+async fn daemon_shutdown(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let session = authed(&state.0, &headers)?;
+    if !session
+        .permissions
+        .contains(&synapse::certificate::Permission::DaemonAdmin)
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "this role may not stop the daemon",
+        ));
+    }
+    let _: ShutdownBody = parse(&headers, &body)?;
+    eprintln!("synapsed: stopping on a daemon-admin request");
+    state.0.stop.notify_one();
+    Ok(axum::Json(json!({ "stopping": true })).into_response())
 }
 
 /// `POST /v1/roles/retire {role}`: retire a role now (hidden from `list`, kept). Needs
