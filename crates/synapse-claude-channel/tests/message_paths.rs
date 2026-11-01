@@ -45,13 +45,13 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
-/// The push's body text: what follows the first newline of `content` (the frame's own first line
-/// names the sender).
+/// The push's body text: what follows the first " (untrusted): " of `content` (the frame comes first, so
+/// the first occurrence is always its own).
 fn pushed_body(params: &Value) -> String {
     let content = params["content"].as_str().expect("content");
     content
-        .split_once('\n')
-        .expect("a frame line")
+        .split_once(" (untrusted): ")
+        .expect("a frame")
         .1
         .to_string()
 }

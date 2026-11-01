@@ -288,7 +288,7 @@ async fn a_hand_written_client_negotiates_receives_the_push_and_acks_it() {
         "{push}"
     );
     let content = params["content"].as_str().unwrap();
-    assert!(content.starts_with("UNTRUSTED message from"), "{content}");
+    assert!(content.contains(" (untrusted): "), "{content}");
     assert!(
         !content.contains("</channel>"),
         "a body must not close the tag: {content}"

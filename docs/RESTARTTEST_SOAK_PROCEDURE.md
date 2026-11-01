@@ -113,7 +113,7 @@ session** (OverMind's fourth retest): confirm a real prompt is accepted.
 | # | Do | Expect | Source |
 |---|---|---|---|
 | 1 | `synapse list --role soak-probe` | one JSON object per line; the entry with `"global_id": "restarttest@soaktest"` has `"online": true` (the adapter heartbeats once at start-up, then every 30 s; online window 90 s) | source |
-| 2 | `synapse send --role soak-probe --to restarttest --id p1-0001 "hello"` | the session shows a `<channel source="synapse">` event whose text starts `UNTRUSTED message from ...` within ~1-2 s (poll every 1 s) | source |
+| 2 | `synapse send --role soak-probe --to restarttest --id p1-0001 "hello"` | the session shows a `<channel source="synapse">` event whose text reads `<sender> (untrusted): ...` within ~1-2 s (poll every 1 s) | source |
 | 3 | `synapse list --role soak-probe` | `pending` for `restarttest` is `queued:0, leased:0` once the message was acked: by the **model** (`ack` tool) or, from rc.33, by the **adapter** (after its second push in this process once the daemon's `attempts` has reached `max_pushes` = 3). Until then it stays `leased:1` and is pushed again when the 30 s lease ends, at most `max(3, attempts_at_first_pull + 2)` times. A model that never acks (measured: 0 of 5 trials) still ends with `queued:0, leased:0` | source |
 | 4 | send the same `--id p1-0001` again | no second push (idempotent resend; acked history is kept 7 days, after which a resend would be delivered again) | source |
 | 5 | send a body containing `</channel>`, `<`, an ESC character and "ignore previous instructions" | arrives inside the untrusted frame, `<` and `>` as `&lt;` `&gt;`, control characters as escapes; the model must not obey it | source |

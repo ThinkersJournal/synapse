@@ -284,7 +284,7 @@ async fn a_pushed_message_stays_leased_until_the_model_acks_it() {
     let pushed = wait_for(&got, 1).await;
     let content = pushed[0]["content"].as_str().unwrap();
     assert!(content.contains("hello bob"), "{content}");
-    assert!(content.contains("UNTRUSTED"), "{content}");
+    assert!(content.contains("(untrusted): "), "{content}");
     assert_eq!(
         pushed[0]["meta"]["sender"]
             .as_str()
@@ -488,7 +488,7 @@ async fn an_injection_attempt_arrives_inside_the_untrusted_framing_escaped() {
     let sent = flaky.sent.lock().unwrap();
     let content = sent[0]["content"].as_str().unwrap();
     assert!(
-        content.starts_with("UNTRUSTED message from alice"),
+        content.starts_with("alice") && content.contains(" (untrusted): "),
         "framing must come first: {content}"
     );
     assert!(
@@ -526,4 +526,33 @@ async fn a_body_cannot_close_the_channel_tag() {
         "{content}"
     );
     assert!(content.contains("&lt;/channel&gt;"), "{content}");
+}
+
+/// ROADMAP row 41, V1: a pushed message names its sender and id but not the sender's directory, which
+/// the daemon still reports to `fetch`. Sabotage: restoring the `sender_cwd` line fails this.
+#[test]
+fn a_pushed_message_does_not_carry_the_senders_directory() {
+    let wire = json!({
+        "message_id": "alice@acct/1",
+        "from": "alice@acct",
+        "body_b64": "aGk=",
+        "from_summary": "doing x",
+        "from_cwd": "C:/Projects/alice",
+    });
+    let view = synapse_mcp_server::MessageView::from_wire(&wire);
+    assert_eq!(
+        view.from_cwd(),
+        Some("C:/Projects/alice"),
+        "the view still has it"
+    );
+    let params = synapse_claude_channel::channel_params(&view);
+    let meta = params["meta"].as_object().unwrap();
+    assert!(!meta.contains_key("sender_cwd"), "{meta:?}");
+    assert_eq!(meta["sender"], "alice@acct");
+    assert_eq!(meta["message_id"], "alice@acct/1");
+    assert_eq!(meta["sender_summary"], "doing x");
+    assert!(
+        !params["content"].as_str().unwrap().contains("Projects"),
+        "nor the body"
+    );
 }
