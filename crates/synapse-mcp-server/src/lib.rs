@@ -466,18 +466,10 @@ fn message_view(message: &Value) -> Value {
     out
 }
 
-/// A message id that is unique per call within this process and across processes.
+/// A message id that is unique per call within this process and across processes (see
+/// [`synapsed_client::short_message_id`] for why it is short and still unique).
 fn unique_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    format!(
-        "mcp-{}-{now}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    )
+    synapsed_client::short_message_id()
 }
 
 /// `/v1/send`. A bare `to` is a role in the sender's own account: its global id carries the account.

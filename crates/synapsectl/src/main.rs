@@ -789,7 +789,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 }
             };
             // Chosen here, not by the daemon, so resending with `--id` is a duplicate, not a copy.
-            let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let id = id.unwrap_or_else(synapsed_client::short_message_id);
             let daemon = connect(&home, &role)?;
             let reply = daemon.call(
                 &role.role,
