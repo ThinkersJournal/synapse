@@ -447,6 +447,52 @@ fn a_round_trip_between_two_roles() {
     );
 }
 
+/// Row 41 V2: the id the CLI makes for a send is short (`<start>-<pid>-<n>` in base 36), not a UUID.
+#[test]
+fn a_send_without_an_id_gets_a_short_one() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    home.ok(&["claim", "--role", "beta"]);
+    let sent = home.ok(&["send", "--role", "alpha", "--to", "beta", "hi"]);
+    let message_id = line(&sent, "message id");
+    let client_part = message_id
+        .strip_prefix("alpha@acct/")
+        .unwrap_or_else(|| panic!("{message_id}"));
+    assert!(client_part.len() < 20, "{client_part} is not short");
+    assert!(
+        client_part
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+        "{client_part}"
+    );
+    assert!(!client_part.contains("mcp-"), "{client_part}");
+    // A second send is a different id, not a duplicate.
+    let again = home.ok(&["send", "--role", "alpha", "--to", "beta", "hi"]);
+    assert_ne!(line(&again, "message id"), message_id);
+    assert_eq!(line(&again, "outcome"), "queued");
+}
+
+/// An id made by an older build (33 bytes of client id) is opaque to the daemon: it sends,
+/// dedupes and acks as before, so a transition leaves nothing stuck.
+#[test]
+fn an_older_long_id_still_sends_dedupes_and_acks() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    home.ok(&["claim", "--role", "beta"]);
+    let old = "mcp-25684-1793488356941680200-395";
+    let args = [
+        "send", "--role", "alpha", "--to", "beta", "--id", old, "hello",
+    ];
+    let first = home.ok(&args);
+    assert_eq!(line(&first, "outcome"), "queued");
+    assert_eq!(line(&first, "message id"), format!("alpha@acct/{old}"));
+    assert_eq!(line(&home.ok(&args), "outcome"), "duplicate");
+    let inbox = json_lines(&home.ok(&["inbox", "--role", "beta"]));
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+    let acked = home.ok(&["ack", "--role", "beta", &format!("alpha@acct/{old}")]);
+    assert_eq!(line(&acked, "outcome"), "removed");
+}
+
 #[test]
 fn a_message_can_come_from_stdin() {
     use std::io::Write;

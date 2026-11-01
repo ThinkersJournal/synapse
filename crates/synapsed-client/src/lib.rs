@@ -1046,6 +1046,50 @@ pub fn inbox_line(message: &Value) -> Value {
     out
 }
 
+/// A short message id for a send, e.g. `sbv3k0-7h-0`: `<start>-<pid>-<n>`, each in base 36.
+///
+/// Why it is unique where it has to be. The daemon scopes every id by the verified sender
+/// (`<role>@<account>/<id>`), so two senders can never collide; only one role's own ids must differ.
+/// Within a process `<n>` is a counter, so ids differ. Across processes of the same role, the pair
+/// `<pid>` and `<start>` (whole seconds when this process first asked for an id) differs unless two
+/// processes of one role get the same pid within the same second, and a pid is not reused while its
+/// process lives. A CLI call is one process per send, so it counts from 0 each time: two sends from
+/// one role in the same second need different pids, which concurrent processes always have, and which
+/// sequential ones almost always have. The residual case (pid reuse within a second) only turns a
+/// send into a duplicate of an earlier one, the same outcome as resending with `--id`. Ids from older
+/// builds (long, with nanoseconds, or UUIDs) are opaque to the daemon and still ack as before.
+pub fn short_message_id() -> String {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static START: OnceLock<u64> = OnceLock::new();
+    static N: AtomicU64 = AtomicU64::new(0);
+    let start = *START.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    });
+    format!(
+        "{}-{}-{}",
+        base36(start),
+        base36(u64::from(std::process::id())),
+        base36(N.fetch_add(1, Ordering::Relaxed))
+    )
+}
+
+fn base36(mut n: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if n == 0 {
+        return "0".into();
+    }
+    let mut out = Vec::new();
+    while n > 0 {
+        out.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
 /// Encode a message body for the wire.
 pub fn encode_body(body: &[u8]) -> String {
     B64.encode(body)
@@ -1068,6 +1112,31 @@ pub fn printable(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_ids_are_short_valid_and_never_repeat_within_a_process() {
+        let ids: Vec<String> = (0..10_000).map(|_| short_message_id()).collect();
+        let distinct: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(distinct.len(), ids.len(), "a repeated id");
+        for id in &ids {
+            // What the daemon accepts as a client id: 1..=100 bytes, no '/', no control character.
+            assert!(id.len() <= 24, "{id} is not short");
+            assert!(
+                !id.contains('/') && !id.chars().any(char::is_control),
+                "{id}"
+            );
+        }
+        // The old id was `mcp-<pid>-<nanoseconds>-<n>`, 30+ bytes before the counter.
+        assert!(ids[0].len() < 20, "{}", ids[0]);
+    }
+
+    #[test]
+    fn base36_is_the_usual_digits() {
+        assert_eq!(base36(0), "0");
+        assert_eq!(base36(35), "z");
+        assert_eq!(base36(36), "10");
+        assert_eq!(base36(1_793_488_356), "tnsoh0");
+    }
 
     fn announce_file(home: &Path, pid: u32) {
         let text = format!(
