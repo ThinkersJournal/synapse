@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.207"
+version = "6.0.0-rc.208"
 
 [package]
 name = "synapse"
@@ -101,12 +101,13 @@ futures-util = { version = "0.3", optional = true }
 # System monitoring - optional
 
 # Email protocols
-# Regular (non-optional) dependency, not gated behind the `email` feature: every other
-# `TransportType` in this crate is unconditionally compiled, and email should not be the one
-# exception requiring a non-default build flag to exist at all (task-3-brief.md, plan decision).
+# Optional, behind the `imap` feature, which is OFF by default (synapse#318): async-imap 0.12.0 (the
+# newest release) pulls pin-utils 0.1.1, flagged unmaintained (RUSTSEC-2026-0441), and cargo-deny
+# fails every dependent that carries it. The email transport still compiles without it; only the
+# RelayOut/External IMAP-polling receive needs it, and without the feature it answers a typed error.
 # `default-features = false` + `runtime-tokio`: this crate is built on tokio throughout, never
 # async-std (async-imap's own default runtime).
-async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"], optional = true }
 # `tokio1` with lettre's default `native-tls` is a compile_error unless `tokio1-native-tls` is on too.
 lettre = { version = "0.11", features = ["tokio1-native-tls"] }
 mail-parser = { version = "0.11", optional = true }
@@ -165,7 +166,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 # Turns the conformance feature on for this crate's own tests, so `cargo test` runs the suite
 # against MemoryStore and RedbStore without a flag. No version: dev-dependencies without one are
 # dropped on publish.
-synapse = { path = ".", package = "synapse", features = ["mailbox-conformance"] }
+synapse = { path = ".", package = "synapse", features = ["mailbox-conformance", "imap"] }
 tokio-test = "0.4"
 pretty_assertions = "1.0"
 
@@ -365,8 +366,12 @@ nat_traversal = [
     "core",
 ]
 
-# Email feature (adds email server capabilities). async-imap and lettre are regular, non-optional
-# dependencies now (see their Cargo.toml comments), so they are not listed with `dep:` here.
+# IMAP-polling receive for the email transport's RelayOut/External modes (synapse#318). Off by
+# default: it brings async-imap and, through it, the unmaintained pin-utils.
+imap = ["dep:async-imap"]
+
+# Email feature (adds email server capabilities). lettre is a regular, non-optional dependency (see
+# its Cargo.toml comment); async-imap is behind the separate `imap` feature.
 email = [
     "core",
     "dep:mail-parser",

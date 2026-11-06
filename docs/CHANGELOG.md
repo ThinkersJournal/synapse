@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Breaking (rc.208): IMAP receive moves behind the `imap` feature, off by default (synapse#318)
+
+`async-imap` 0.12.0, the newest release, depends on `pin-utils` 0.1.1, which RUSTSEC-2026-0441 flags unmaintained; no newer `pin-utils` exists, so every dependent that carried `synapse` failed `cargo deny`. `async-imap` is now optional behind a new `imap` feature that is NOT in `default`. Without it the email transport still builds and sends; the RelayOut/External IMAP-polling receive answers a `TransportError` ("IMAP receive needs the `imap` feature") instead of polling. Direct-mode SMTP receive is unchanged. A dependent that uses IMAP polling adds `features = ["imap"]` and carries the advisory ignore itself. Checked: `pin-utils` is absent from `cargo tree -e normal` of the default build; `cargo check` and `clippy` are clean with and without the feature. Not run: a test of the stub error (the crate's own dev-dependency turns `imap` on for every `cargo test`).
+
 ### Docs (rc.207): rooms design note and patent screen row (PM 2026-11-06)
 
 `docs/ROOMS_DESIGN.md` (design only, no code): rooms as fan-out to member mailboxes, with the checks, store change, slice plan R1 to R5 and the open calls. `docs/PATENT-SWEEP.md` gains the I20 rooms screen. No behaviour change.

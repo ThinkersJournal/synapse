@@ -160,6 +160,7 @@ use crate::{
     types::{EmailConfig, ImapConfig, SecureMessage, SmtpConfig},
 };
 use async_trait::async_trait;
+#[cfg(feature = "imap")]
 use futures::StreamExt;
 use lettre::{
     SmtpTransport, Transport as LettreTransport,
@@ -343,9 +344,11 @@ pub struct EmailTransportImpl {
     listener: StdMutex<Option<TcpListener>>,
     /// `message_id`s already delivered by a RelayOut/External poll (module docs) -- unused in
     /// Direct mode, which drains its own store instead.
+    #[cfg_attr(not(feature = "imap"), allow(dead_code))]
     imap_seen_ids: StdMutex<SeenIds>,
     /// Where the last IMAP poll stopped: the mailbox's UIDVALIDITY and the next UID to ask for, so
     /// a poll fetches only what arrived since and its cost does not grow with the mailbox.
+    #[cfg_attr(not(feature = "imap"), allow(dead_code))]
     imap_cursor: StdMutex<ImapCursor>,
     /// Real counter: incremented only where an IMAP-fetched body actually failed to parse as a
     /// `SecureMessage` (module docs).
@@ -859,6 +862,7 @@ impl EmailTransportImpl {
     /// `nat_traversal.rs`'s `receive_raw` handling of an unparseable UDP datagram). A message
     /// already delivered on an earlier poll (tracked by `imap_seen_ids`) is skipped silently, not
     /// counted as a failure.
+    #[cfg(feature = "imap")]
     async fn poll_imap_inbox(&self, inbox: &mut RawInbox) -> Result<()> {
         let imap = &self.config.imap;
         let addr = (imap.host.as_str(), imap.port);
@@ -1003,6 +1007,16 @@ impl EmailTransportImpl {
         }
         Ok(())
     }
+
+    /// Without the `imap` feature there is no IMAP client: RelayOut/External receive says so, once
+    /// per poll, as a typed error rather than polling nothing in silence (synapse#318).
+    #[cfg(not(feature = "imap"))]
+    async fn poll_imap_inbox(&self, _inbox: &mut RawInbox) -> Result<()> {
+        Err(SynapseError::TransportError(
+            "IMAP receive needs the `imap` feature of the synapse crate, which this build lacks"
+                .to_string(),
+        ))
+    }
 }
 
 /// How many delivered `message_id`s a transport remembers. Past it the oldest are forgotten, so a
@@ -1011,12 +1025,14 @@ impl EmailTransportImpl {
 const SEEN_IDS_CAP: usize = 10_000;
 
 /// A bounded set of ids, oldest evicted first.
+#[cfg_attr(not(feature = "imap"), allow(dead_code))]
 struct SeenIds {
     cap: usize,
     order: std::collections::VecDeque<uuid::Uuid>,
     set: HashSet<uuid::Uuid>,
 }
 
+#[cfg_attr(not(feature = "imap"), allow(dead_code))]
 impl SeenIds {
     fn new(cap: usize) -> Self {
         SeenIds {
@@ -1043,6 +1059,7 @@ impl SeenIds {
 
 /// Where the last IMAP poll stopped (see `EmailTransportImpl::imap_cursor`).
 #[derive(Default)]
+#[cfg_attr(not(feature = "imap"), allow(dead_code))]
 struct ImapCursor {
     validity: Option<u32>,
     /// The next UID to ask for; 0 until the first poll sets it.
