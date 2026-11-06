@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Tests (rc.210): an expired role certificate through the real client
+
+`crates/synapsed/tests/cert_reclaim.rs`: a full home renews a lapsed certificate when the client claims (the claim works and `cert.pem` is rewritten); a role-only home cannot, and the claim says `CertificateExpired` with the file untouched; a control shows the same role-only setup claims with a current certificate. Sabotage-checked both ways (renewal removed: the first fails; expiry check removed: the second fails). Explains why the four account-home roles read EXPIRED in the spec audit while online: the daemon checks a certificate only at claim, and the next claim renews it. No production code changed.
+
 ### Docs (rc.209): access-control design note (who may see and message whom), step 4 plan, patent row I21
 
 `docs/ACCESS_CONTROL_DESIGN.md` (v2, after CireSnave ruled board 384), docs only, no code. Says where the requirement was first written (2026-11-06; no earlier record of it being deferred), lists what the daemon enforces today with file:line, and designs one `Authorizer` call at the send and list routes with auth-framework as the engine for grants, delegation and decisions: existing lanes keep allow-all, new lanes deny-all, separate `see` and `send`, a 60 s decision cache with live checks for sensitive grants, certificates no longer authorising mail. Slices A0, A1, A2 and R1 with born-red test names. Also `docs/CUTOVER_STEP4_PLAN.md` (a plan for the last cutover step, not a run) and patent screen row I21.
