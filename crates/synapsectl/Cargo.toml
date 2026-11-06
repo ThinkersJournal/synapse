@@ -2,7 +2,7 @@
 name = "synapsectl"
 version.workspace = true
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.98"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "The `synapse` command line: a plain adapter for any agent or person (M2: identity; M5b: mail over synapsed, through `synapsed-client`)."
 license = "MIT OR Apache-2.0"
@@ -14,9 +14,9 @@ name = "synapse"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.210" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.210" }
-synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.210" }
+synapse = { path = "../..", version = "6.0.0-rc.211" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.211" }
+synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.211" }
 clap = { version = "4.5.41", features = ["derive", "env"] }
 chrono = "0.4"
 # The checker (`synapse state check`) talks HTTPS to crates.io and GitHub. The TLS stack (rustls with
@@ -25,7 +25,7 @@ chrono = "0.4"
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "rustls"] }
 serde_json = "1.0"
 uuid = { version = "1.6", features = ["v4"] }
-synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.210", optional = true }
+synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.211", optional = true }
 
 [features]
 # `synapse storage list` / `use`: the stores PersistAnt can offer for the mailbox, and recording the
