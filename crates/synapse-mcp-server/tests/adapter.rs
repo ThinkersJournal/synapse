@@ -85,6 +85,12 @@ impl Home {
         ensure_synapsed_built();
         let dir = tempfile::tempdir().unwrap();
         Keystore::init_account(dir.path(), "acct").expect("init account");
+        // Slice A1: new roles are deny-all, so seed an allow-all rule the way an upgraded home has one.
+        std::fs::write(
+            dir.path().join("access.json"),
+            r#"{"grants":[{"principal":"*","actions":["see","send"],"objects":["agent:*"]}]}"#,
+        )
+        .expect("seed access.json");
         let daemon = start_daemon(dir.path());
         // Owned by a `Home` first, so a failed wait still kills the daemon.
         let home = Home { dir, daemon };
@@ -487,6 +493,12 @@ async fn the_adapter_never_starts_a_daemon() {
     ensure_synapsed_built();
     let dir = tempfile::tempdir().unwrap();
     Keystore::init_account(dir.path(), "acct").expect("init account");
+    // Slice A1: new roles are deny-all, so seed an allow-all rule the way an upgraded home has one.
+    std::fs::write(
+        dir.path().join("access.json"),
+        r#"{"grants":[{"principal":"*","actions":["see","send"],"objects":["agent:*"]}]}"#,
+    )
+    .expect("seed access.json");
     let err = SynapseMcpServer::start(McpConfig {
         role: "alice".into(),
         home: dir.path().to_path_buf(),
