@@ -127,6 +127,8 @@ Coverage: 4 queries and 8 patents opened. Two (US12255895B2, US11483155B2) have 
 
 ## Needs review (to the PM)
 
+- **I21 v2 additions not screened (2026-11-06):** verified attenuation of delegated grants (intersection along a chain, a delegation dying with its source) and a per-grant "sensitive" mark that forces a live check from the source on every call. The I21 row above was written before these; a screen from the claims is owed before A2.
+
 - **I21 access control (above).** Build A1 and A2 (rules in the daemon) on the current reading. A human reads US12255895B2's full claim set and continuations before A3 (grants from a token naming allowed objects). Verbatim claim 1 only was read, and not the dependent claims past 4.
 
 - **I20 rooms (above).** No `unread` row remains; all verdicts are "read by us, not reviewed by counsel". The Microsoft IM-group family (US7865563B2, US8086686B2, US8341233B2) is the closest and sits outside claim 1 only because of its offline-message limb. Do not build R3 (fan-out) before a human reads the family's continuations.
