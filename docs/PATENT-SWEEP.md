@@ -86,7 +86,28 @@ Non-patent results (arXiv papers on Agora-style agent protocols, agent-communica
 injection and terminal-escape papers) were found for I17 and I13. They are prior art for novelty
 purposes, not infringement risks, and are not tabulated.
 
+## Addendum 2026-11-06: rooms (I20, design only, `docs/ROOMS_DESIGN.md`)
+
+**I20** (design only, not built) A named room is an address; a send to it is fanned out as one copy per member into each member's own mailbox, only to members who joined and are online (offline members get nothing queued); the creator sets join policy, who may send, new-joiner mute, and mute/remove/ban; a muted post is refused to the sender with a typed error; rate limits per sender and per room.
+
+Method: Google Patents via web search (5 queries: pub/sub fan-out to subscriber queues; chat-room moderator mute; presence-gated group delivery; allow-list/invite-only group membership for bots; per-sender/per-channel rate limit with moderator mute), claims read with `tools/patent-claims.py`. Run by a Sonnet subagent for the synapse lane; the lane did not re-read the claims. The tool's output was truncated at about 3.5k characters, so later independent claims of some patents were not seen. Legal status not confirmed against a register. Not legal advice.
+
+| Number | Title | Assignee | Status | Claims read | Overlap | Our difference | Verdict |
+|---|---|---|---|---|---|---|---|
+| US7865563B2 | Persisting a group in an IM application | Microsoft | active per Google; not confirmed | claim 1 (claim 7 onward truncated) | transmits a group message to each member who is online; named persistent group; invitations | claim 1 also requires retaining the message and an offline-message transmitter; rooms queue nothing for offline members | design-around (I20); a continuation claiming the online-only mode is possible, human check advised |
+| US8086686B2 | same family | Microsoft | active per Google; not confirmed | claim 1 (claim 11 truncated) | transmit to each member logged into the group | claim 1 requires sending an offline message to members not logged in | design-around (I20) |
+| US8341233B2 | same family | Microsoft | active per Google; not confirmed | claim 1 | group-directed message to members | requires storing the received message and sending on later start | design-around (I20) |
+| US8949348B2 | Controlling message delivery in publish/subscribe | IBM | expired per Google; not confirmed | claim 1 (claim 6 truncated) | delivers to each registered subscriber | core is storing when no subscribers and delivering to later ones | clear on claims read (I20) |
+| US20060235932A1 | Chat server mute capability | IBM | abandoned per Google; not confirmed | claim 1 | server-side mute between a designated participant and the indicating participant | ours is a creator-imposed room-wide mute with a typed refusal; application abandoned | clear (I20) |
+| US11843470B2 | Integrated and interactive chat suite | Princeton | active per Google; not confirmed | claim 1 (truncated; the moderator-mute claim was not seen) | chat rooms, participants assigned to rooms | claim 1 is templated research chat studies | **needs-review** (I20; later claims unseen) |
+| US8566412B2 | Group messaging | GoGroups / Microsoft | active per Google; not confirmed | claim 1 | server notifies a subset of members | markup file, XMPP notifications, stateless fetch; not our flow | clear (I20) |
+| US6212548B1, AU784512B2, US20040104933A1, US8145719B2 | chat conversations / persistent chat / dynamic roles / group-based messaging | various | not confirmed | **unread** | possible creator or moderator privileges, membership control | not assessed | **unread** (I20); not a clearance of creator-controlled join/mute/ban |
+
+Coverage is a first pass: 5 queries, 7 claim sets read. No query found software-agent or bot rooms, and none found a patent on a typed-error refusal of a muted post.
+
 ## Needs review (to the PM)
+
+- **I20 rooms (above).** US11843470B2 needs a later-claims read; the Microsoft IM-group family (US7865563B2, US8086686B2, US8341233B2) is the closest and sits outside claim 1 only because of its offline-message limb. Do not build R3 (fan-out) before a human reads the family's continuations.
 
 - **US12711207B1 (Intuit, filed 2026-02-12), idea I17 only.** Independent claims 1, 9 and 15 cover establishing a schema for two AI agents and a translation component that produces a secure version of one agent's prompt as input to the other. Nothing shipped in Synapse does this. The plan in `docs/AI_TO_AI_COMMUNICATION_PLAN_2026-10-25.md` (L1 compact schema with a deterministic decoder) sits near it. Sent to the PM as a [FINDING] on 2026-10-25. The element that makes it relevant (claims 9 and 15, verbatim from the full independent claims read with `tools/patent-claims.py`): "configuring a translation component to interface between the first AI agent and the second AI agent based on the schema; using the configured translation component to generate a secure version of a prompt generated by the first AI agent; and providing the secure version of the prompt as input to the second AI agent." A compact-schema mode with a decoder between two agents would sit in the same place. On board 296 item D, the PM holds I17 until CireSnave answers. Recommendation: do not build L1 or the decoder until CireSnave decides, which matches the PM's earlier ruling that the decoder is low value.
 
