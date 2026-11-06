@@ -40,23 +40,33 @@ Order rationale: 4a before 4c, because 4c removes the broker client from the PM'
 must already be on Synapse by then. 4d last, because a record removed early stops a lane that still names
 claude-peers at the dialog.
 
-## Records ("retire 3 old records" needs a ruling on which)
+## Records: the four that name `server:claude-peers` (PM ruling 2026-11-06: use the measured four)
 
-| record | `Channels` it answers | scope | expires |
-|---|---|---|---|
-| claude-peers-dev-channels | `server:claude-peers` | all roles | 2027-03-19 |
-| claude-peers-synapse-dev-channels-any-lane | `server:claude-peers, server:synapse` | all roles | 2027-04-25 |
-| claude-peers-synapse-dev-channels-pilot | both | synapse, agentlife, overmind | 2026-10-31 (already expired) |
-| claude-peers-synapse-dev-channels-restarttest | both | restarttest, restarttest2 | 2026-11-09 |
-| synapse-dev-channel-any-lane | `server:synapse` | all roles | none (keep: this is the one that answers a Synapse-only lane) |
-| synapse-dev-channel-pilot | `server:synapse` | three roles | 2026-10-31 (already expired) |
-| synapse-dev-channel-restarttest | `server:synapse` | restarttest | 2026-11-09 |
-| trust-folder-prefix | (not a channels record) | | not touched |
+Measured 2026-11-06 over `.lane-state/*.launch.json` (48 specs; Channels value from `launch_args`): 40 specs name
+`server:claude-peers,server:synapse`, 8 name `server:synapse` only, 0 name `server:claude-peers` only (8+40=48).
+"Last spec write" is `written_at` of the spec, the nearest record of a launch (`written_by` launch, restart,
+both-channels or stop); the dialog answers themselves are not logged anywhere I read.
 
-Four records name `server:claude-peers` (rows 1-4). The agentlife doc says "the first three are dead letters" once every
-spec is Synapse-only; by the table, that matches rows 1, 2 and 4 or rows 1-3 depending on what "first three" counted.
-**The PM should name the three**, and rule on row 4 and on the two expired synapse-only rows (retire as clutter or leave
-to expire). Do not retire row 2 before precondition 1 holds: it answers every lane that still lists both channels.
+| # | record | answers `Channels` | scope (roles) | specs that match it today | latest spec write among them | expires |
+|---|---|---|---|---|---|---|
+| 1 | claude-peers-dev-channels | `server:claude-peers` only | all (`*`) | **0** | none | 2027-03-19 |
+| 2 | claude-peers-synapse-dev-channels-any-lane | `server:claude-peers, server:synapse` | all (`*`) | **40** (lanes below) | 2026-11-06 (mlmf, restart); by date: 11-01 x11, 11-03 x2, 11-04 x23, 11-05 x3, 11-06 x1 | 2027-04-25 |
+| 3 | claude-peers-synapse-dev-channels-pilot | both | synapse, agentlife, overmind | **0** (all three are synapse-only now) | agentlife 2026-11-06, synapse 2026-11-06, overmind 2026-11-01 (their current specs no longer match) | 2026-10-31, expired |
+| 4 | claude-peers-synapse-dev-channels-restarttest | both | restarttest, restarttest2 | **0** (`restarttest` is synapse-only; `restarttest2` has no spec) | restarttest 2026-10-14 (import) | 2026-11-09 |
+
+Kept: `synapse-dev-channel-any-lane` (`server:synapse`, all roles, no expiry) answers every Synapse-only lane after
+cutover. Not touched: `trust-folder-prefix`. Left to expire or retire as clutter (PM's call): `synapse-dev-channel-pilot`
+(expired 2026-10-31) and `synapse-dev-channel-restarttest` (2026-11-09).
+
+Lanes that depend on row 2 today (40): alarmant antspawn auth-framework baracuda bitman bonefish capant coderipper
+commy-sdk-rust commy configurant cpufish dirty-ranges fmp-rs fuel httpant humboldt json-mcp-server kiss lightbulb
+ml-convertant mlmf openclownfish persistant pm-assist pm releaseant rockfish rust-analyzer-mcp-server safeimage sageant
+sortant surfaceant thinkersfoundation thinkersjournal-community unisql unpopped vulkane wasm-sandbox webhostant.
+By spec `state` at reading: 14 running, 26 suspended.
+
+Reading: rows 1, 3 and 4 answer no current spec and could be retired now with no lane stopping at a dialog (row 3 is
+already expired). **Row 2 is the one that matters: retire it only after precondition 1 holds** (no spec names
+claude-peers), or the 40 lanes above stop at the dialog on their next launch. Order within 4d: rows 1, 3, 4 first, row 2 last.
 
 ## Rollback and snapshot
 
