@@ -3,6 +3,8 @@
 //! redelivered on a growing schedule, set aside as dead when it runs out, and its sender gets one
 //! `[UNACKED]` notice; an ack stops all of it; a notice is never itself reported.
 
+mod common;
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -43,6 +45,7 @@ async fn start(grants: &[(&str, Permission)]) -> Running {
         addr: "127.0.0.1:0".parse().unwrap(),
         sweep_every: Duration::from_secs(3600),
     };
+    common::allow_all(&cfg.home);
     let daemon = Daemon::open(&cfg)
         .expect("open daemon")
         .with_redelivery_gaps(vec![chrono::Duration::milliseconds(300); 3])

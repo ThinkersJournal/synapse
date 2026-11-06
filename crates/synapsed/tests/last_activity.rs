@@ -2,6 +2,8 @@
 //! Delivery evidence per role (ROADMAP row 41, PM 2026-10-31): `list` and `stats` carry `last_fetch_at`
 //! (a fetch that handed the role a message) and `last_ack_at` (an ack that removed one).
 
+mod common;
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -42,6 +44,7 @@ async fn start(grants: &[(&str, Permission)]) -> Running {
         addr: "127.0.0.1:0".parse().unwrap(),
         sweep_every: Duration::from_secs(3600),
     };
+    common::allow_all(&cfg.home);
     let daemon = Daemon::open(&cfg).expect("open daemon");
     let started_at = daemon.started_at();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

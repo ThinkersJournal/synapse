@@ -3,6 +3,8 @@
 //! claims prove the role key, Host-header check, no CORS, Bearer on every authenticated route,
 //! constant-time token handling, and no token or key material in responses.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -52,6 +54,7 @@ fn config(home: &std::path::Path) -> DaemonConfig {
 /// `SYNAPSE_TEST_STORE=sqlite` (with `--features sqlite-store`) runs this whole suite against the
 /// PersistAnt SQLite store; unset, against redb.
 fn open_daemon(cfg: &DaemonConfig) -> Result<Daemon, DaemonError> {
+    common::allow_all(&cfg.home);
     #[cfg(feature = "sqlite-store")]
     if std::env::var("SYNAPSE_TEST_STORE").as_deref() == Ok("sqlite") {
         return Daemon::open_with(cfg, synapsed::StoreKind::Sqlite);

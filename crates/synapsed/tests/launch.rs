@@ -4,6 +4,8 @@
 //! `docs/superpowers/specs/2026-10-15-cutover-and-lane-launch.md` section C. The state machine's
 //! timing is unit-tested in `src/launch.rs`; these tests pin the wire and the authority.
 
+mod common;
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -60,6 +62,7 @@ async fn start_with(launcher_roles: &[&str], senders: &[&str]) -> Running {
         wait: chrono::Duration::seconds(60),
         backoff: vec![chrono::Duration::seconds(30)],
     };
+    common::allow_all(&config.home);
     let daemon = Daemon::open(&config)
         .expect("open daemon")
         .with_launcher(launcher)
