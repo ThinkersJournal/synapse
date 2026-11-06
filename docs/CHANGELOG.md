@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.209): access-control design note (who may see and message whom)
+
+`docs/ACCESS_CONTROL_DESIGN.md`, docs only, no code. Says where the requirement was first written (2026-11-06; no earlier record of it being deferred), lists what the daemon enforces today with file:line, and designs one policy check for agents and rooms fed by key-bound GNAP grants from auth-framework, with certificates kept as a bridge. Slices A1-A4 with born-red test names; five calls for the PM.
+
 ### Breaking (rc.208): IMAP receive moves behind the `imap` feature, off by default (synapse#318)
 
 `async-imap` 0.12.0, the newest release, depends on `pin-utils` 0.1.1, which RUSTSEC-2026-0441 flags unmaintained; no newer `pin-utils` exists, so every dependent that carried `synapse` failed `cargo deny`. `async-imap` is now optional behind a new `imap` feature that is NOT in `default`. Without it the email transport still builds and sends; the RelayOut/External IMAP-polling receive answers a `TransportError` ("IMAP receive needs the `imap` feature") instead of polling. Direct-mode SMTP receive is unchanged. A dependent that uses IMAP polling adds `features = ["imap"]` and carries the advisory ignore itself. Checked: `pin-utils` is absent from `cargo tree -e normal` of the default build; `cargo check` and `clippy` are clean with and without the feature. Not run: a test of the stub error (the crate's own dev-dependency turns `imap` on for every `cargo test`).
