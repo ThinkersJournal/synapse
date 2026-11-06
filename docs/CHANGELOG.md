@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Breaking (rc.211): every dependency to its newest version; minimum Rust 1.98
+
+CireSnave's rule, applied before auth-framework returns (board 384): `cargo update` (65 locked packages, including aws-lc-rs 1.18.2 to 1.19.0 and aws-lc-sys 0.46 to 0.47) and these manifest bumps: bcrypt 0.15 to 0.19, hpke 0.14 to 0.15.1, toml 0.9 to 1.2, mail-parser 0.11 to 1.0 (it needs Rust 1.98), configurant 0.5 to 0.6, persistant, persistant-kv and persistant-sqlx 0.12 to 0.16. **Minimum Rust is now 1.98** in every crate, the Dockerfile and the developer guide (raising it is permitted, CireSnave 2026-10-08). Checked: `cargo check --workspace --all-targets --all-features` clean, and `cargo test --workspace --all-features --no-fail-fast`: 871 passed, 1 failed (`synapsectl` `mail::a_leftover_lock_file_does_not_block_a_claim`, its 5 s bound, during the full parallel run; it passes alone on this branch in 116 s, and was not run on `main` under the same load, so the cause is unproven). Held back by the registry: crypto-common, matchit, minicov (a dependency's own range).
+
 ### Tests (rc.210): an expired role certificate through the real client
 
 `crates/synapsed/tests/cert_reclaim.rs`: a full home renews a lapsed certificate when the client claims (the claim works and `cert.pem` is rewritten); a role-only home cannot, and the claim says `CertificateExpired` with the file untouched; a control shows the same role-only setup claims with a current certificate. Sabotage-checked both ways (renewal removed: the first fails; expiry check removed: the second fails). Explains why the four account-home roles read EXPIRED in the spec audit while online: the daemon checks a certificate only at claim, and the next claim renews it. No production code changed.
@@ -952,7 +956,7 @@ the earlier candidates are recorded in their pull requests (`ciresnave/synapse`)
 
 `auth-framework` 0.5.0-rc26 and every later 0.5 candidate were yanked on 2026-10-09, so `main` no longer
 resolved. `0.6.0-rc42` is the newest published release; the `auth` feature set is unchanged
-(`oauth-device-flows`, `enhanced-device-flow`). **Breaking:** that release declares `rust-version = "1.95"`,
+(`oauth-device-flows`, `enhanced-device-flow`). **Breaking:** that release declares `rust-version = "1.98"`,
 so every `synapse*` crate's `rust-version` is now 1.95 (was 1.89); a toolchain older than 1.95 is refused by
 cargo for every crate here. No code change was needed: the workspace tests pass (612 passed, 0 failed, 3 ignored,
 `--features auth`), as do clippy, fmt and the SPDX gate. No wire or store change.

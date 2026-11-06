@@ -3,13 +3,13 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.210"
+version = "6.0.0-rc.211"
 
 [package]
 name = "synapse"
 version.workspace = true
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.98"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "Neural Communication Network with Federated Identity"
 license = "MIT OR Apache-2.0"
@@ -73,14 +73,14 @@ url = "2.0"
 # anyhow. It used to be switched on by another crate's graph, which auth-framework 0.5 no longer has.
 ring = { version = "0.17", optional = true, features = ["std"] }
 # Sealing (P2 slice d): HPKE base mode, X25519 + HKDF-SHA256 + ChaCha20-Poly1305.
-hpke = { version = "0.14.1", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"], optional = true }
+hpke = { version = "0.15.1", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"], optional = true }
 aes-gcm = { version = "0.11", optional = true }
 sha2 = { version = "0.11", optional = true }
 ed25519-dalek = { version = "3.0.0", optional = true, features = ["pkcs8", "pem"] }
 base64 = { version = "0.23", optional = true }
 
 # Configuration - optional
-toml = { version = "0.9.2", optional = true }
+toml = { version = "1.2", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
 clap = { version = "4.5.41", features = ["derive"], optional = true }
 
@@ -110,7 +110,7 @@ futures-util = { version = "0.3", optional = true }
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"], optional = true }
 # `tokio1` with lettre's default `native-tls` is a compile_error unless `tokio1-native-tls` is on too.
 lettre = { version = "0.11", features = ["tokio1-native-tls"] }
-mail-parser = { version = "0.11", optional = true }
+mail-parser = { version = "1.0", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 native-tls = { version = "0.2", optional = true }
 
@@ -125,7 +125,7 @@ regex = { version = "1.10", optional = true }
 # rust_crypto it does not pull `rsa` (RUSTSEC-2023-0071, no fix).
 jsonwebtoken = { version = "11.1.0", optional = true, default-features = false, features = ["use_pem", "aws_lc_rs"] }
 pem = { version = "4.0", optional = true }
-bcrypt = { version = "0.15", optional = true }
+bcrypt = { version = "0.19", optional = true }
 hex = { version = "0.4", optional = true }
 
 # Network discovery - uses auto-discovery crate

@@ -10,7 +10,7 @@
 # is reachable only from inside that container. The image is for running `synapse` or the adapter
 # against a daemon in the same container, not for publishing a port.
 
-FROM rust:1.95-slim-bookworm AS builder
+FROM rust:1.98-slim-bookworm AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
