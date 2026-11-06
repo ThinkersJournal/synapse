@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs (rc.209): access-control design note (who may see and message whom)
 
-`docs/ACCESS_CONTROL_DESIGN.md`, docs only, no code. Says where the requirement was first written (2026-11-06; no earlier record of it being deferred), lists what the daemon enforces today with file:line, and designs one policy check for agents and rooms fed by key-bound GNAP grants from auth-framework, with certificates kept as a bridge. Slices A1-A4 with born-red test names; five calls for the PM.
+`docs/ACCESS_CONTROL_DESIGN.md`, docs only, no code. Says where the requirement was first written (2026-11-06; no earlier record of it being deferred), lists what the daemon enforces today with file:line, and designs one policy check for agents and rooms fed by key-bound GNAP grants from auth-framework, with certificates kept as a bridge. Slices A1-A4 with born-red test names; five calls for the PM. Also `docs/CUTOVER_STEP4_PLAN.md` (a plan for the last cutover step, not a run) and patent screen row I21.
 
 ### Breaking (rc.208): IMAP receive moves behind the `imap` feature, off by default (synapse#318)
 
