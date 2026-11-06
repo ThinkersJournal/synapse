@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.207): rooms design note and patent screen row (PM 2026-11-06)
+
+`docs/ROOMS_DESIGN.md` (design only, no code): rooms as fan-out to member mailboxes, with the checks, store change, slice plan R1 to R5 and the open calls. `docs/PATENT-SWEEP.md` gains the I20 rooms screen. No behaviour change.
+
 ### Feature (rc.206): a soft MESSAGE-FORMATS lint on send (row 41; PM 2026-10-31)
 
 `/v1/send` replies with a `warning` (and `synapse send` prints `warning:`) when the message's first line is not a `MESSAGE-FORMATS` v1 header: no leading `[TYPE]`, an unknown type, a missing first field, a word without `key=`, an unknown key or an empty value. The message is **still queued**: nothing is rejected and no wire format changes. The warning names the reason and never echoes the message. `/v1/stats` gains `lint_warnings` per role (new messages only; a duplicate resend counts nothing), to read against `submitted` for a lane's rate; it persists in `stats.json`. Why: on the claude-peers history since the formats began (18,079 messages, `cl100k_base`) only 23.5% of header lines parsed as v1, and header lines with free words or spaces in values were 28% of all message tokens (measured 2026-10-31; the harness is `.github/ai2ai_header_encodings.py`). Tests: unit tests for every pass and fail reason, and `a_message_that_is_not_a_v1_header_is_warned_counted_and_still_queued` (sabotage: not linting fails it). Binary bodies are not linted.
