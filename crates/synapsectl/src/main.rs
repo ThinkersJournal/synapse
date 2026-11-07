@@ -47,6 +47,12 @@ enum Command {
     /// `send --to <room>`; sending never joins.
     #[command(subcommand)]
     Room(RoomCommand),
+    /// Who may see, message, join and post: give a role rights over an agent or a room, take a
+    /// grant back, list the grants you issued or hold. The account holder may give anything; a
+    /// room's creator gives rights about its own room; anyone may pass on a subset of what it
+    /// holds (and a grant lasts only while its issuer still holds what it gave).
+    #[command(subcommand)]
+    Access(AccessCommand),
     /// Claim a role on the daemon (taking it over if another holder has it).
     ///
     /// The session is cached per role in this home, so every `synapse` command for the role here
@@ -515,6 +521,109 @@ enum RoomCommand {
         /// `role@account`.
         member: String,
     },
+}
+
+/// `synapse access ...`: thin calls on the daemon's `/v1/access/*` routes, each printing the
+/// daemon's reply as one JSON line. An object is `agent:role@account` or `room:name@account`.
+#[derive(Subcommand)]
+enum AccessCommand {
+    /// Give --to rights over one or more objects.
+    Grant {
+        #[command(flatten)]
+        role: RoleArg,
+        /// Who receives the rights: `role@account`.
+        #[arg(long)]
+        to: String,
+        /// What it may do: see, send, join, post, manage-room, edit-rule or grant. Repeat.
+        #[arg(long = "action", required = true)]
+        actions: Vec<String>,
+        /// What it is about: `agent:role@account` or `room:name@account`. Repeat.
+        #[arg(long = "object", required = true)]
+        objects: Vec<String>,
+        /// The grant lapses after this many seconds.
+        #[arg(long)]
+        expires_secs: Option<i64>,
+        /// Ask that decisions resting on this grant be checked live.
+        #[arg(long)]
+        sensitive: bool,
+    },
+    /// Take a grant back (what was passed on from it stops with it).
+    Revoke {
+        #[command(flatten)]
+        role: RoleArg,
+        /// The grant's id, from `grant` or `list`.
+        id: String,
+    },
+    /// The grants this role issued or holds (the account holder sees all).
+    List {
+        #[command(flatten)]
+        role: RoleArg,
+    },
+}
+
+/// The actions a grant can name; the daemon checks which fit which object.
+const GRANT_ACTIONS: [&str; 7] = [
+    "see",
+    "send",
+    "join",
+    "post",
+    "manage-room",
+    "edit-rule",
+    "grant",
+];
+
+fn valid_grant_object(object: &str) -> bool {
+    object
+        .strip_prefix("agent:")
+        .or_else(|| object.strip_prefix("room:"))
+        .is_some_and(synapse::rooms::valid_room_id)
+}
+
+fn access_command(home: &std::path::Path, command: AccessCommand) -> Result<(), MailError> {
+    let (role, path, body): (RoleArg, &str, Option<serde_json::Value>) = match command {
+        AccessCommand::Grant {
+            role,
+            to,
+            actions,
+            objects,
+            expires_secs,
+            sensitive,
+        } => {
+            if !synapse::rooms::valid_room_id(&to) {
+                return Err(MailError::Usage(format!("--to `{to}` is not role@account")));
+            }
+            if let Some(bad) = actions
+                .iter()
+                .find(|a| !GRANT_ACTIONS.contains(&a.as_str()))
+            {
+                return Err(MailError::Usage(format!(
+                    "--action `{bad}` is not one of {}",
+                    GRANT_ACTIONS.join(", ")
+                )));
+            }
+            if let Some(bad) = objects.iter().find(|o| !valid_grant_object(o)) {
+                return Err(MailError::Usage(format!(
+                    "--object `{bad}` is not agent:role@account or room:name@account"
+                )));
+            }
+            let mut body = json!({
+                "principal": to,
+                "actions": actions,
+                "objects": objects,
+                "sensitive": sensitive,
+            });
+            if let Some(secs) = expires_secs {
+                body["expires_secs"] = json!(secs);
+            }
+            (role, "/v1/access/grant", Some(body))
+        }
+        AccessCommand::Revoke { role, id } => (role, "/v1/access/revoke", Some(json!({"id": id}))),
+        AccessCommand::List { role } => (role, "/v1/access/grants", None),
+    };
+    let daemon = connect(home, &role)?;
+    let reply = daemon.call(&role.role, path, body.as_ref())?;
+    println!("{reply}");
+    Ok(())
 }
 
 /// The bare room name the daemon's routes take, from `name` or `name@account`.
@@ -1045,6 +1154,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
             );
         }
         Command::Room(command) => room_command(&home, command)?,
+        Command::Access(command) => access_command(&home, command)?,
         Command::Retire { role, target } => {
             let daemon = connect(&home, &role)?;
             let reply = daemon.call(

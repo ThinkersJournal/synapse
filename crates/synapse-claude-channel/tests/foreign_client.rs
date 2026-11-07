@@ -259,13 +259,16 @@ async fn a_hand_written_client_negotiates_receives_the_push_and_acks_it() {
         [
             "ack",
             "fetch",
+            "grants",
             "join",
             "leave",
             "list",
             "members",
+            "revoke_share",
             "rooms",
             "send",
             "set_summary",
+            "share",
             "whoami"
         ],
         "{tools}"

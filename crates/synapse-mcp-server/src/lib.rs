@@ -368,6 +368,74 @@ pub struct JoinArgs {
     pub mention_only: Option<bool>,
 }
 
+/// Arguments of the `share` tool.
+#[derive(Deserialize, JsonSchema)]
+pub struct ShareArgs {
+    /// Who receives the rights: `role@account`.
+    pub to: String,
+    /// What it may do: see, send, join, post, manage-room, edit-rule or grant. A room you created
+    /// lets others see it only once you share `see`.
+    pub actions: Vec<String>,
+    /// What it is about: `agent:role@account` or `room:name@account`.
+    pub objects: Vec<String>,
+    /// The share lapses after this many seconds; leave out for none.
+    #[serde(default)]
+    pub expires_secs: Option<i64>,
+}
+
+/// Arguments of the `revoke_share` tool.
+#[derive(Deserialize, JsonSchema)]
+pub struct RevokeArgs {
+    /// The grant's id, from `share` or `grants`.
+    pub id: String,
+}
+
+const SHARE_ACTIONS: [&str; 7] = [
+    "see",
+    "send",
+    "join",
+    "post",
+    "manage-room",
+    "edit-rule",
+    "grant",
+];
+
+/// Checked here first so a malformed share is a clear tool error, not a daemon 400.
+fn check_share(args: &ShareArgs) -> Result<(), String> {
+    if !synapse::rooms::valid_room_id(&args.to) {
+        return Err("to must be role@account".to_string());
+    }
+    if args.actions.is_empty() || args.actions.len() > 8 {
+        return Err("give one to eight actions".to_string());
+    }
+    if let Some(bad) = args
+        .actions
+        .iter()
+        .find(|a| !SHARE_ACTIONS.contains(&a.as_str()))
+    {
+        return Err(format!(
+            "`{}` is not an action: use {}",
+            safe_text(bad),
+            SHARE_ACTIONS.join(", ")
+        ));
+    }
+    if args.objects.is_empty() || args.objects.len() > 16 {
+        return Err("give one to sixteen objects".to_string());
+    }
+    let object_ok = |o: &str| {
+        o.strip_prefix("agent:")
+            .or_else(|| o.strip_prefix("room:"))
+            .is_some_and(synapse::rooms::valid_room_id)
+    };
+    if let Some(bad) = args.objects.iter().find(|o| !object_ok(o)) {
+        return Err(format!(
+            "`{}` is not agent:role@account or room:name@account",
+            safe_text(bad)
+        ));
+    }
+    Ok(())
+}
+
 /// The bare room name the daemon's room routes take, from `name` or `name@account`. Checked here
 /// first so a stray character never reaches a URL, and the refusal is clear.
 fn room_name(room: &str) -> Result<String, String> {
@@ -605,6 +673,47 @@ impl SynapseMcpServer {
             Ok(reply)
         })
         .await
+    }
+
+    #[tool(
+        description = "Give a role rights over an agent or a room, for example let it see a room you created (a new room is visible only to its creator and the account holder until you share it). You may give rights about what you own (a room or sub-agent you created) or pass on a subset of what you hold; a grant can only narrow, and it lasts only while your own right does. Returns the grant's id."
+    )]
+    pub async fn share(
+        &self,
+        Parameters(args): Parameters<ShareArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if let Err(why) = check_share(&args) {
+            return refuse(why);
+        }
+        let mut body = json!({
+            "principal": args.to,
+            "actions": args.actions,
+            "objects": args.objects,
+        });
+        if let Some(secs) = args.expires_secs {
+            body["expires_secs"] = json!(secs);
+        }
+        self.daemon(move |daemon, role| daemon.call(role, "/v1/access/grant", Some(&body)))
+            .await
+    }
+
+    #[tool(
+        description = "Take back a share you made, or one about something you own, by the id `share` or `grants` returned. What was passed on from it stops with it."
+    )]
+    pub async fn revoke_share(
+        &self,
+        Parameters(args): Parameters<RevokeArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.daemon(move |daemon, role| {
+            daemon.call(role, "/v1/access/revoke", Some(&json!({"id": args.id})))
+        })
+        .await
+    }
+
+    #[tool(description = "The shares you made and the ones that name you, with their ids.")]
+    pub async fn grants(&self) -> Result<CallToolResult, ErrorData> {
+        self.daemon(|daemon, role| daemon.call(role, "/v1/access/grants", None))
+            .await
     }
 
     #[tool(
