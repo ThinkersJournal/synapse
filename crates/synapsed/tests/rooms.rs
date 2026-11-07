@@ -50,15 +50,23 @@ fn new_home(grants: &[(&str, Permission)]) -> tempfile::TempDir {
 }
 
 async fn start(home: tempfile::TempDir) -> Running {
+    start_with_window(home, None).await
+}
+
+/// `window`: how recent a call makes a role online (the daemon's is 90 s; tests shorten it).
+async fn start_with_window(home: tempfile::TempDir, window: Option<chrono::Duration>) -> Running {
     let cfg = DaemonConfig {
         home: home.path().to_path_buf(),
         addr: "127.0.0.1:0".parse().unwrap(),
         sweep_every: Duration::from_secs(3600),
     };
-    let daemon = Daemon::open(&cfg)
+    let mut daemon = Daemon::open(&cfg)
         .expect("open daemon")
         .with_redelivery_gaps(vec![chrono::Duration::milliseconds(300); 3])
         .with_redelivery_check(Duration::from_millis(50));
+    if let Some(window) = window {
+        daemon = daemon.with_online_window(window);
+    }
     let started_at = daemon.started_at();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -489,6 +497,255 @@ async fn retired_member_not_in_delivery_set() {
         (row["retired"].as_bool(), row["deliverable"].as_bool()),
         (Some(true), Some(false)),
         "{row}"
+    );
+    d.stop().await;
+}
+
+async fn post(d: &Running, token: &str, room: &str, text: &str, id: Option<&str>) -> (u16, Value) {
+    let mut body = json!({"to": format!("{room}@acct"), "body_b64": B64.encode(text.as_bytes())});
+    if let Some(id) = id {
+        body["message_id"] = json!(id);
+    }
+    call(d, token, "/v1/send", Some(body)).await
+}
+
+async fn inbox(d: &Running, token: &str) -> Vec<Value> {
+    let (status, reply) = call(d, token, "/v1/fetch", Some(json!({"lease_secs": 5}))).await;
+    assert_eq!(status, 200, "{reply}");
+    reply["messages"].as_array().cloned().unwrap_or_default()
+}
+
+/// A home where `ann` holds the `post` grant on `room:lounge@acct` and nothing else.
+fn home_with_a_poster() -> tempfile::TempDir {
+    let home = homes();
+    let grants = json!({"grants": [
+        {"principal": "ann@acct", "actions": ["post"], "objects": ["room:lounge@acct"]}
+    ]});
+    std::fs::write(home.path().join("access.json"), grants.to_string()).unwrap();
+    home
+}
+
+#[tokio::test]
+async fn a_non_member_post_is_refused_with_the_typed_reason() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    let ops = claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    invite_only(&d, &pm).await;
+    let (status, _) = call(
+        &d,
+        &pm,
+        "/v1/rooms/invite",
+        Some(json!({"room": "lounge", "invitee": "dev@acct"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    // dev can see the room (invited) but is not in it and holds no post grant: a typed refusal.
+    let (status, reply) = post(&d, &dev, "lounge", "hello", None).await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (403, Some("not_a_member")),
+        "{reply}"
+    );
+    // ops cannot see the room: it hears what it hears for an absent recipient.
+    let (status, reply) = post(&d, &ops, "lounge", "hello", None).await;
+    let (absent_status, absent) = post(&d, &ops, "nowhere", "hello", None).await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (absent_status, absent["error"].as_str())
+    );
+    assert_eq!(status, 404);
+    // Nothing was delivered to anyone.
+    assert!(inbox(&d, &pm).await.is_empty());
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn a_non_member_holding_the_post_grant_posts_and_receives_nothing() {
+    let d = start(home_with_a_poster()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    let ann = claim(&d, "ann").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    let (status, reply) = post(&d, &ann, "lounge", "[STATUS] lane=ann doing=x", None).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["room"]["joined"], 1);
+    assert_eq!(reply["room"]["delivered"], 1);
+    let got = inbox(&d, &dev).await;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0]["from"], "ann@acct");
+    assert!(
+        inbox(&d, &ann).await.is_empty(),
+        "the poster receives nothing back"
+    );
+    let (_, reply) = members(&d, &pm, "lounge").await;
+    assert_eq!(
+        member_ids(&reply),
+        ["dev@acct"],
+        "posting did not make ann a member"
+    );
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn the_post_grant_does_not_imply_join() {
+    let d = start(home_with_a_poster()).await;
+    let pm = claim(&d, "pm").await;
+    let ann = claim(&d, "ann").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    invite_only(&d, &pm).await;
+    assert_ne!(
+        join(&d, &ann, "lounge").await.0,
+        200,
+        "a post grant is not a join"
+    );
+    let (_, reply) = members(&d, &pm, "lounge").await;
+    assert!(member_ids(&reply).is_empty());
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn join_then_send_honours_an_invite_only_room() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let ops = claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    invite_only(&d, &pm).await;
+    // The two steps a "join then send" convenience would take: each is refused on its own terms.
+    assert_ne!(join(&d, &ops, "lounge").await.0, 200);
+    assert_ne!(post(&d, &ops, "lounge", "hello", None).await.0, 200);
+    let (_, reply) = members(&d, &pm, "lounge").await;
+    assert!(member_ids(&reply).is_empty(), "the send did not join ops");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn muted_post_refused_with_typed_error_and_a_muted_member_still_receives() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    let (status, _) = call(
+        &d,
+        &pm,
+        "/v1/rooms/policy",
+        Some(json!({"room": "lounge", "join_policy": "open", "default_send": "muted"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    let (status, reply) = post(&d, &dev, "lounge", "hello", None).await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (403, Some("muted")),
+        "{reply}"
+    );
+    // The creator posts; the muted member still receives.
+    let (status, reply) = post(&d, &pm, "lounge", "hello dev", None).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(
+        inbox(&d, &dev).await.len(),
+        1,
+        "muted governs sending, not reading"
+    );
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn copy_keeps_original_sender_and_room_and_a_forged_sender_is_refused() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    let (status, reply) = post(&d, &pm, "lounge", "hello", Some("p1")).await;
+    assert_eq!(status, 200, "{reply}");
+    let got = inbox(&d, &dev).await;
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        got[0]["from"], "pm@acct",
+        "the copy names the original sender"
+    );
+    assert_eq!(
+        got[0]["message_id"], "pm@acct/p1#lounge@acct",
+        "and carries the room"
+    );
+    assert_eq!(got[0]["body_b64"], B64.encode(b"hello"));
+    // A request cannot name its sender: the field does not exist, so it is refused.
+    let (status, _) = call(
+        &d,
+        &dev,
+        "/v1/send",
+        Some(json!({"to": "lounge@acct", "from": "pm@acct", "body_b64": B64.encode(b"x")})),
+    )
+    .await;
+    assert_eq!(status, 400);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn offline_member_receives_nothing_and_nothing_queued() {
+    let d = start_with_window(homes(), Some(chrono::Duration::milliseconds(400))).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    tokio::time::sleep(Duration::from_millis(700)).await; // dev makes no call: it goes offline
+    let (status, reply) = post(&d, &pm, "lounge", "hello", None).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["room"]["delivered"], 0);
+    assert_eq!(reply["room"]["refused"]["offline"], 1);
+    assert_eq!(
+        inbox(&d, &dev).await.len(),
+        0,
+        "nothing was queued for the offline member"
+    );
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn resend_dedupes_per_member() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    let (_, first) = post(&d, &pm, "lounge", "hello", Some("same")).await;
+    let (_, again) = post(&d, &pm, "lounge", "hello", Some("same")).await;
+    assert_eq!(first["room"]["delivered"], 1);
+    assert_eq!(
+        again["room"]["delivered"], 0,
+        "a retry writes no second copy"
+    );
+    assert_eq!(inbox(&d, &dev).await.len(), 1);
+    d.stop().await;
+}
+
+/// Membership is the consent (the join/post ruling, PM option A): a post reaches a member
+/// although the poster holds no `synapse:send` on it. The control: a direct send is refused.
+#[tokio::test]
+async fn membership_is_the_consent_no_per_pair_send_check() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    let (status, _) = call(
+        &d,
+        &pm,
+        "/v1/send",
+        Some(json!({"to": "dev@acct", "body_b64": B64.encode(b"direct")})),
+    )
+    .await;
+    assert_ne!(status, 200, "the control: pm may not message dev directly");
+    let (status, reply) = post(&d, &pm, "lounge", "to the room", None).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(
+        inbox(&d, &dev).await.len(),
+        1,
+        "the room post reached the member"
     );
     d.stop().await;
 }

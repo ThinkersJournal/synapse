@@ -18,8 +18,8 @@
 //! ```
 
 use super::{
-    Acked, Depth, DurabilityClass, Enqueued, Envelope, MailConfig, MailError, MailStore, Mailbox,
-    REQUIRED_DURABILITY, Stored,
+    Acked, Depth, DurabilityClass, Enqueued, Envelope, Fanout, MailConfig, MailError, MailStore,
+    Mailbox, REQUIRED_DURABILITY, Stored,
 };
 use crate::certificate::RevocationLookup;
 use crate::keystore::Keystore;
@@ -652,6 +652,44 @@ pub fn a_failed_write_changes_nothing<S: MailStore>(make: impl Fn() -> S) {
         .unwrap();
 }
 
+/// A fan-out (docs/ROOMS_DESIGN.md section 9): `enqueue_many` writes one copy per recipient in one
+/// transaction, a recipient at its bound is skipped and reported (not an error for the others), and
+/// a resend of the same ids is all duplicates.
+pub fn enqueue_many_queues_each_copy_skips_a_full_queue_and_dedupes<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let config = MailConfig {
+        max_messages: 1,
+        ..MailConfig::default()
+    };
+    let mut mb = Mailbox::open_volatile(make(), config, t0() - Duration::seconds(1)).expect("open");
+    mb.enqueue(env("filler", "b@acct", b"x"), t0()).unwrap();
+    let copies = [
+        env("room-post", "a@acct", b"hello"),
+        env("room-post", "b@acct", b"hello"),
+    ];
+    assert_eq!(
+        mb.enqueue_many(&copies, t0()).unwrap(),
+        [Fanout::Queued, Fanout::Full],
+        "b is full: skipped, a is written"
+    );
+    assert_eq!(
+        mb.enqueue_many(&copies, t0()).unwrap(),
+        [Fanout::Duplicate, Fanout::Full],
+        "a resend does not write a second copy for a"
+    );
+    let bad = [env("ok", "c@acct", b"x"), env("bad", "no-at-sign", b"x")];
+    assert_eq!(
+        mb.enqueue_many(&bad, t0()).unwrap_err(),
+        MailError::Malformed
+    );
+    assert_eq!(
+        mb.enqueue_many(&[env("ok", "c@acct", b"x")], t0()).unwrap(),
+        [Fanout::Queued],
+        "the malformed batch wrote nothing, not even its good copy"
+    );
+}
+
 /// A message leased `max_deliveries` times and never acked is set aside in the role's dead set, body
 /// and all: not redelivered again, not dropped, counted in `Depth::dead`, a resend of its id is a
 /// duplicate, and the receiver's ack discards it.
@@ -1024,6 +1062,10 @@ pub fn run_all<S: MailStore>(make: impl Fn() -> S) {
     case("rooms_are_written_through_the_store", || {
         rooms_are_written_through_the_store(&make)
     });
+    case(
+        "enqueue_many_queues_each_copy_skips_a_full_queue_and_dedupes",
+        || enqueue_many_queues_each_copy_skips_a_full_queue_and_dedupes(&make),
+    );
     case("enqueue_then_fetch_leases_and_hides", || {
         enqueue_then_fetch_leases_and_hides(&make)
     });

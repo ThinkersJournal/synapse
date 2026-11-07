@@ -154,6 +154,55 @@ fn well_formed(env: &Envelope) -> bool {
     role_id && printable(&env.message_id) && printable(&env.from)
 }
 
+/// What one envelope of [`Mailbox::enqueue_many`] came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fanout {
+    Queued,
+    /// Already queued, acked or dead under this id for this recipient: nothing written.
+    Duplicate,
+    /// The recipient's queue is at its bound: nothing written for it.
+    Full,
+}
+
+/// One envelope's write inside a transaction: the checks and the put that `enqueue` always made.
+fn enqueue_in(
+    txn: &mut dyn MailTxn,
+    env: &Envelope,
+    now: DateTime<Utc>,
+    config: &MailConfig,
+) -> Result<Fanout, MailError> {
+    let role = env.to.as_str();
+    let id = env.message_id.as_str();
+    if txn.queued(role, id).map_err(MailError::Store)?.is_some()
+        || txn.acked_at(role, id).map_err(MailError::Store)?.is_some()
+        || txn
+            .queued(&dead_role(role), id)
+            .map_err(MailError::Store)?
+            .is_some()
+    {
+        return Ok(Fanout::Duplicate);
+    }
+    let (count, bytes) = txn.stats(role).map_err(MailError::Store)?;
+    if count + 1 > config.max_messages
+        || bytes.saturating_add(env.body.len() as u64) > config.max_bytes
+    {
+        return Ok(Fanout::Full);
+    }
+    let seq = txn.next_seq().map_err(MailError::Store)?;
+    txn.put(
+        role,
+        Stored {
+            envelope: env.clone(),
+            seq,
+            enqueued_at: now,
+            lease: None,
+            attempts: 0,
+        },
+    )
+    .map_err(MailError::Store)?;
+    Ok(Fanout::Queued)
+}
+
 /// The pseudo-role under which a role's dead set is stored: the ordinary queue tables, so no store
 /// and no on-disk format changes. A real role name never contains `:` (see
 /// `keystore::valid_name`), so no sender can address it and it cannot collide with one.
@@ -956,40 +1005,42 @@ impl<S: MailStore> Mailbox<S> {
         let config = self.config.clone();
         let mut outcome = Enqueued::Queued;
         self.store.write(&mut |txn| {
-            let role = env.to.as_str();
-            let id = env.message_id.as_str();
-            if txn.queued(role, id).map_err(MailError::Store)?.is_some()
-                || txn.acked_at(role, id).map_err(MailError::Store)?.is_some()
-                || txn
-                    .queued(&dead_role(role), id)
-                    .map_err(MailError::Store)?
-                    .is_some()
-            {
-                outcome = Enqueued::Duplicate;
-                return Ok(());
-            }
-            let (count, bytes) = txn.stats(role).map_err(MailError::Store)?;
-            if count + 1 > config.max_messages
-                || bytes.saturating_add(env.body.len() as u64) > config.max_bytes
-            {
-                return Err(MailError::MailboxFull);
-            }
-            let seq = txn.next_seq().map_err(MailError::Store)?;
-            txn.put(
-                role,
-                Stored {
-                    envelope: env.clone(),
-                    seq,
-                    enqueued_at: now,
-                    lease: None,
-                    attempts: 0,
-                },
-            )
-            .map_err(MailError::Store)?;
-            outcome = Enqueued::Queued;
+            outcome = match enqueue_in(txn, &env, now, &config)? {
+                Fanout::Queued => Enqueued::Queued,
+                Fanout::Duplicate => Enqueued::Duplicate,
+                Fanout::Full => return Err(MailError::MailboxFull),
+            };
             Ok(())
         })?;
         Ok(outcome)
+    }
+
+    /// Queue every envelope in `envs` in one store transaction (a room's fan-out, one copy per
+    /// member): all of them are written or none is. A recipient whose queue is full is skipped and
+    /// reported as [`Fanout::Full`], not an error for the whole call; a store error aborts all.
+    /// Each envelope's `to` should differ (the batch is not checked against itself).
+    ///
+    /// # Errors
+    /// [`MailError::Malformed`] if any envelope is, before anything is written; a store error.
+    pub fn enqueue_many(
+        &mut self,
+        envs: &[Envelope],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Fanout>, MailError> {
+        self.live()?;
+        if !envs.iter().all(well_formed) {
+            return Err(MailError::Malformed);
+        }
+        let config = self.config.clone();
+        let mut out = Vec::new();
+        self.store.write(&mut |txn| {
+            out.clear();
+            for env in envs {
+                out.push(enqueue_in(txn, env, now, &config)?);
+            }
+            Ok(())
+        })?;
+        Ok(out)
     }
 
     /// Take a role (M3) and persist the new epoch in the same call. If the store write fails the

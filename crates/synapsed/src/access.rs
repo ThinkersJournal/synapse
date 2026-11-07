@@ -154,10 +154,12 @@ impl AccessState {
         }
         if is_room {
             // Board 388: a new room is visible to its creator and the account holder only, until a
-            // grant says otherwise. Every other room action is allowed until A2 (PM, 2026-11-06:
-            // R1 starts against an Authorizer that allows all room actions); the room's own
-            // creator and moderator rules still apply in the registry.
-            if action != Action::See {
+            // grant says otherwise. So is posting without being a member: a member posts by
+            // being one (the registry decides), anyone else needs a `post` grant, which is what
+            // lets an announcer post without joining. Every other room action is allowed until A2
+            // (PM, 2026-11-06); the room's creator and moderator rules still apply in the
+            // registry.
+            if !matches!(action, Action::See | Action::Post) {
                 return Decision::Allow;
             }
             let creator = self
