@@ -24,6 +24,7 @@
 //!   a legitimate caller is not slowed by anyone else's failures; there is no lockout anywhere.
 
 #[cfg(feature = "sqlite-store")]
+pub mod access;
 mod migration;
 
 pub mod format_lint;
@@ -38,6 +39,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use access::Authorizer;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Request, State};
@@ -162,6 +164,8 @@ pub enum DaemonError {
     Security(String),
     /// The redb mailbox could not be moved to the SQLite store, or it is not known which holds the mail.
     Migration(String),
+    /// `access.json` could not be read or written.
+    Access(String),
 }
 
 impl fmt::Display for DaemonError {
@@ -177,6 +181,7 @@ impl fmt::Display for DaemonError {
             DaemonError::Mail(e) => write!(f, "{e}"),
             DaemonError::Security(e) => write!(f, "security event file: {e}"),
             DaemonError::Migration(e) => write!(f, "mailbox migration: {e}"),
+            DaemonError::Access(e) => write!(f, "access control: {e}"),
         }
     }
 }
@@ -273,6 +278,8 @@ struct Shared {
     launch_senders: LaunchSenders,
     /// Per-role launch state; in memory.
     launches: Mutex<launch::Table>,
+    /// Who may see and message whom; `<home>/access.json`.
+    access: access::Access,
     /// How recently a role must have been heard from to count as online.
     online_window: chrono::Duration,
     /// A role idle longer than this is retired by the sweep.
@@ -689,6 +696,11 @@ impl Daemon {
         let instance_id = hex(&instance);
         let summary = keystore.account();
         let loaded = load_stats(&cfg.home, started_at);
+        // Slice A1: the roles in the table at the first start with this file are the ones that get
+        // the one-time `legacy` grants; every role first claimed later starts with none.
+        let existing: Vec<String> = mailbox.roles_snapshot().roles.keys().cloned().collect();
+        let access =
+            access::Access::open(&cfg.home, &existing, started_at).map_err(DaemonError::Access)?;
         Ok(Daemon {
             alerts: None,
             shared: Shared {
@@ -718,6 +730,7 @@ impl Daemon {
                 launcher: LauncherConfig::default(),
                 launch_senders: LaunchSenders::default(),
                 launches: Mutex::new(launch::Table::new(started_at)),
+                access,
                 online_window: ONLINE_WINDOW,
                 role_ttl: chrono::Duration::days(DEFAULT_ROLE_TTL_DAYS),
                 session_ttl: chrono::Duration::hours(DEFAULT_SESSION_TTL_HOURS),
@@ -1214,6 +1227,18 @@ fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
 
 /// The caller's session: Bearer token, looked up by its hash, then checked against the role's
 /// current epoch. Every authenticated call also counts as presence.
+/// The caller as the access rules see it. TEMPORARY: a session holding `role-admin` counts as the
+/// account holder, because nothing else marks one yet. Remove when grants carry that authority
+/// (docs/ACCESS_CONTROL_DESIGN.md 3.3, slice A2).
+fn principal_of(session: &Session) -> access::Principal<'_> {
+    access::Principal {
+        id: &session.global_id,
+        account_holder: session
+            .permissions
+            .contains(&synapse::certificate::Permission::RoleAdmin),
+    }
+}
+
 fn authed(shared: &Shared, headers: &HeaderMap) -> Result<Session, ApiError> {
     // Row 1: every 401 is counted and recorded before it is sent. A 409 `superseded` is not.
     let unauthorized = || {
@@ -1399,6 +1424,19 @@ fn claim_inner(
     let lookup = move |kid: &str| (kid == key_id).then_some(key);
     let grant = locked(&shared.mailbox)?.claim(&req, &lookup, &NoRevocations, Utc::now())?;
 
+    // Board 388: a sub-agent first claimed with a parent in its chain is visible to that parent and
+    // the account holder only. The leaf's direct issuer is chain[1]; a chain of one was issued by
+    // the account key itself (provisioned directly) and has no creator. Not recorded on a failed
+    // write: no creator means no extra visibility, so this fails closed.
+    if grant.superseded.is_none()
+        && req.chain.len() >= 2
+        && let Err(e) = shared
+            .access
+            .record_creator(&grant.global_id, &req.chain[1].subject_global_id)
+    {
+        eprintln!("synapsed: creator of {} not recorded: {e}", grant.global_id);
+    }
+
     let token = random_bytes::<32>().ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1487,7 +1525,25 @@ async fn send(
             .to
             .split_once('@')
             .is_some_and(|(_, account)| account == shared.account);
-        let record = roles.roles.get(&envelope.to).filter(|_| in_account);
+        // A role the sender may not see is answered exactly as an absent one (no existence oracle),
+        // so this runs before the retired check below and before the unknown-recipient budget.
+        let principal = principal_of(&session);
+        let target = access::agent_object(&envelope.to);
+        let sees = |shared: &Shared| {
+            shared
+                .access
+                .decide(
+                    principal,
+                    access::Action::See,
+                    &target,
+                    access::Freshness::Cached,
+                )
+                .allowed()
+        };
+        let record = roles
+            .roles
+            .get(&envelope.to)
+            .filter(|_| in_account && sees(&shared));
         // A retired role is known, not abused: refuse with its own error and no budget charge.
         // Mail already queued for it is kept (docs/ROLE_LIVENESS_DESIGN.md).
         if record.is_some_and(|r| r.retired_at.is_some()) {
@@ -1518,6 +1574,28 @@ async fn send(
                 ),
             )
             .after(delay));
+        }
+        // Seen but not sendable: the sender already knows the role exists, so say what is missing.
+        if !shared
+            .access
+            .decide(
+                principal,
+                access::Action::Send,
+                &target,
+                access::Freshness::Cached,
+            )
+            .allowed()
+        {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                format!(
+                    "{} may not message {}: it lacks {}",
+                    shown_role(&session.global_id),
+                    shown_role(&envelope.to),
+                    access::Action::Send.name()
+                ),
+            ));
         }
         let to = envelope.to.clone();
         let outcome = mailbox.enqueue(envelope, Utc::now())?;
@@ -1798,7 +1876,7 @@ async fn list(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authed(&shared, &headers)?;
+    let session = authed(&shared, &headers)?;
     let cwd = query_param(&uri, "cwd");
     let repo = query_param(&uri, "repo");
     let include_retired =
@@ -1820,6 +1898,21 @@ async fn list(
         now,
         include_retired,
     );
+    // Only the roles the caller may see; `include_retired` follows the same filter.
+    let principal = principal_of(&session);
+    out.retain(|entry| {
+        entry["global_id"].as_str().is_some_and(|id| {
+            shared
+                .access
+                .decide(
+                    principal,
+                    access::Action::See,
+                    &access::agent_object(id),
+                    access::Freshness::Cached,
+                )
+                .allowed()
+        })
+    });
     for (key, want) in [("cwd", &cwd), ("repo", &repo)] {
         if let Some(want) = want {
             out.retain(|entry| entry[key].as_str() == Some(want.as_str()));
@@ -2005,12 +2098,24 @@ async fn stats(
     State(shared): State<Arc<Shared>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    authed(&shared, &headers)?;
+    let session = authed(&shared, &headers)?;
+    let principal = principal_of(&session);
     let roles = locked(&shared.mailbox)?.roles_snapshot();
     let counters = locked(&shared.stats)?;
     let out: Vec<Value> = roles
         .roles
         .keys()
+        .filter(|id| {
+            shared
+                .access
+                .decide(
+                    principal,
+                    access::Action::See,
+                    &access::agent_object(id),
+                    access::Freshness::Cached,
+                )
+                .allowed()
+        })
         .map(|global_id| {
             let c = counters.get(global_id).copied().unwrap_or_default();
             json!({

@@ -4021,7 +4021,7 @@ dependencies = [
 
 [[package]]
 name = "synapse"
-version = "6.0.0-rc.211"
+version = "6.0.0-rc.212"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4092,7 +4092,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-agent"
-version = "6.0.0-rc.211"
+version = "6.0.0-rc.212"
 dependencies = [
  "genai",
  "serde_json",
@@ -4107,7 +4107,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-claude-channel"
-version = "6.0.0-rc.211"
+version = "6.0.0-rc.212"
 dependencies = [
  "base64 0.23.1",
  "rmcp",
@@ -4122,7 +4122,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mailbox-persistant"
-version = "6.0.0-rc.211"
+version = "6.0.0-rc.212"
 dependencies = [
  "chrono",
  "persistant",
@@ -4138,7 +4138,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mcp-server"
-version = "6.0.0-rc.211"
+version = "6.0.0-rc.212"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4158,7 +4158,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-security"
-version = "6.0.0-rc.211"
+version = "6.0.0-rc.212"
 dependencies = [
  "chrono",
  "serde_json",
@@ -4168,7 +4168,7 @@ dependencies = [
 
 [[package]]
 name = "synapsectl"
-version = "6.0.0-rc.211"
+version = "6.0.0-rc.212"
 dependencies = [
  "chrono",
  "clap",
@@ -4184,12 +4184,13 @@ dependencies = [
 
 [[package]]
 name = "synapsed"
-version = "6.0.0-rc.211"
+version = "6.0.0-rc.212"
 dependencies = [
  "axum",
  "base64 0.23.1",
  "chrono",
  "configurant",
+ "ed25519-dalek",
  "reqwest",
  "ring",
  "serde",
@@ -4205,7 +4206,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed-client"
-version = "6.0.0-rc.211"
+version = "6.0.0-rc.212"
 dependencies = [
  "base64 0.23.1",
  "chrono",

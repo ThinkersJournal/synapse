@@ -41,6 +41,12 @@ impl Home {
         };
         let init = home.run(&["id", "init", "--account", "acct"]);
         assert_eq!(init.status.code(), Some(0), "{init:?}");
+        // Slice A1: new roles are deny-all, so seed an allow-all rule the way an upgraded home has one.
+        std::fs::write(
+            home.path().join("access.json"),
+            r#"{"grants":[{"principal":"*","actions":["see","send"],"objects":["agent:*"]}]}"#,
+        )
+        .expect("seed access.json");
         home
     }
 

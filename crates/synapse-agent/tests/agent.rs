@@ -68,6 +68,12 @@ impl Home {
         ensure_synapsed_built();
         let dir = tempfile::tempdir().unwrap();
         Keystore::init_account(dir.path(), "acct").expect("init account");
+        // Slice A1: new roles are deny-all, so seed an allow-all rule the way an upgraded home has one.
+        std::fs::write(
+            dir.path().join("access.json"),
+            r#"{"grants":[{"principal":"*","actions":["see","send"],"objects":["agent:*"]}]}"#,
+        )
+        .expect("seed access.json");
         let exe = exe_dir().join(format!("synapsed{}", std::env::consts::EXE_SUFFIX));
         let daemon = Command::new(exe)
             .current_dir(dir.path())
