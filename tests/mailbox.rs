@@ -173,7 +173,7 @@ fn malformed_envelopes_are_refused() {
         ("", "m1", "peer@acct"),
         ("nobody", "m1", "peer@acct"),
         ("a@b@c", "m1", "peer@acct"),
-        ("bad.label@acct", "m1", "peer@acct"),
+        ("bad..label@acct", "m1", "peer@acct"), // an empty level (a single dot is a sub-agent, A3)
         ("lane@acct", "", "peer@acct"),
         ("lane@acct", long.as_str(), "peer@acct"),
         ("lane@acct", "m1", long.as_str()),

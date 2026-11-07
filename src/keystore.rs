@@ -180,6 +180,26 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The deepest a dotted role id goes: `worker.lead.pm` is three levels (a sub-agent of a sub-agent
+/// of `pm`), a fourth is refused.
+pub const MAX_ROLE_DEPTH: usize = 3;
+
+/// A role as a mail recipient: one [`valid_name`] or up to [`MAX_ROLE_DEPTH`] of them joined by
+/// single dots, so `worker.pm` (a sub-agent of `pm`) is addressable. An empty level (`.pm`, `a..b`,
+/// `pm.`) is not. Only addressing uses this: a role still claims under a plain [`valid_name`], and
+/// no dot ever reaches a path component.
+#[must_use]
+pub fn valid_role_id(role: &str) -> bool {
+    let mut levels = 0;
+    for level in role.split('.') {
+        levels += 1;
+        if levels > MAX_ROLE_DEPTH || !valid_name(level) {
+            return false;
+        }
+    }
+    true
+}
+
 /// `$SYNAPSE_HOME`, else `%LOCALAPPDATA%\synapse` (Windows), else `$XDG_DATA_HOME/synapse`, else
 /// `~/.local/share/synapse`. Reads the environment only.
 pub fn default_home() -> Result<PathBuf> {

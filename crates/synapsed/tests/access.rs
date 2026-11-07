@@ -463,9 +463,8 @@ async fn a_new_sub_agent_is_invisible_to_a_third_agent_and_visible_to_its_creato
     let _b = claim(&d, "b").await;
     let worker = claim_sub_agent_of_pm(&d).await;
 
-    // Its creator and the account holder see it, and a send from them passes the access rules.
-    // (A dotted id such as worker.pm@acct is refused later, by the mailbox, as malformed: that
-    // is the existing addressing rule, `keystore::valid_name`, not an access refusal.)
+    // Its creator and the account holder see it, and a send from them is queued (A3: a dotted id
+    // such as worker.pm@acct is a well-formed address, `keystore::valid_role_id`).
     assert!(
         visible(&d, &pm)
             .await
@@ -478,10 +477,7 @@ async fn a_new_sub_agent_is_invisible_to_a_third_agent_and_visible_to_its_creato
     );
     for token in [&pm, &root] {
         let (status, reply) = send(&d, token, "worker.pm@acct", "task").await;
-        assert!(
-            ![403, 404].contains(&status),
-            "not an access refusal: {status} {reply}"
-        );
+        assert_eq!(status, 200, "the send is queued: {reply}");
     }
     let _ = &worker;
 
