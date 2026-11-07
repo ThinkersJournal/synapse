@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.225): agent smoke test, tool-use modes and A2a visibility
+
+`crates/synapse-agent/smoke/smoke.sh` gains `mock-tools` and `gemini-tools`: the agent gets `--allow-send ops`, is asked to send TOOLOK to `ops` and then reply DONE, and PASS needs TOOLOK in ops's inbox from gem and a reply to the asker. The mock endpoint calls `send_message` once when tools are offered. The script also works again under A2a: the asker holds `role-admin` so it can see `gem`, and `gem` is granted see and send on the roles it answers (`synapse access grant`). No daemon or library change.
+
 ### Added (rc.224): `synapse access` and the MCP `share` tools (A2a, callers)
 
 The grant API of rc.222 gets its callers. `synapse access grant --to role@account --action see --object room:name@account [--expires-secs N] [--sensitive]`, `synapse access revoke <id>` and `synapse access list`: thin calls on `/v1/access/*`, each printing the daemon's reply as one JSON line; a bad principal, action or object, or no action, is a usage error before any daemon call. The MCP adapter gains `share`, `revoke_share` and `grants` (the tool set grows from ten to thirteen; `synapse-claude-channel` serves the same tools, so a client that pins the list must be updated). A room's creator can now let others see it without raw HTTP: a new room is visible only to its creator and the account holder until shared. Nothing about who may do what changes: the daemon still decides (owner or subset, attenuation, dies with its source). Tests: `crates/synapsectl/tests/rooms.rs` (`the_access_commands_share_list_and_revoke`, `a_bad_grant_is_a_usage_error_before_any_daemon_call`), `crates/synapse-mcp-server/tests/adapter.rs` (`share_grants_lists_and_revokes_what_a_creator_owns`, `a_malformed_share_is_refused_before_the_daemon_hears_it`), and the tool-set tests.
