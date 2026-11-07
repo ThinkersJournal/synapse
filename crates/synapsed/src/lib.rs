@@ -1030,6 +1030,9 @@ impl Daemon {
             .route("/v1/rooms/remove", post(room_remove))
             .route("/v1/rooms/ban", post(room_ban))
             .route("/v1/rooms/members", get(room_members))
+            .route("/v1/access/grant", post(grant_create))
+            .route("/v1/access/revoke", post(grant_revoke))
+            .route("/v1/access/grants", get(grants_list))
             .route("/v1/state/create", post(state_api::create))
             .route("/v1/state/get", get(state_api::get))
             .route("/v1/state/list", get(state_api::list))
@@ -2875,22 +2878,11 @@ fn room_admin(session: &Session) -> bool {
 
 /// A refused room operation. A caller that may not see a room hears the same `404` as for a room
 /// that does not exist (board 388), never a `403` that confirms it.
-fn room_refusal(shared: &Shared, global_id: &str, actor: &str, e: MailError) -> ApiError {
-    if matches!(e, MailError::Room(synapse::rooms::RoomError::NotModerator)) {
-        let visible = shared.mailbox.lock().is_ok_and(|m| {
-            m.rooms_snapshot().rooms.get(global_id).is_some_and(|r| {
-                r.join_policy == synapse::rooms::JoinPolicy::Open
-                    || r.members.contains_key(actor)
-                    || r.invites.contains(actor)
-            })
-        });
-        if !visible {
-            return ApiError::new(
-                StatusCode::NOT_FOUND,
-                "unknown_room",
-                synapse::rooms::RoomError::Unknown,
-            );
-        }
+fn room_refusal(shared: &Shared, global_id: &str, session: &Session, e: MailError) -> ApiError {
+    if matches!(e, MailError::Room(synapse::rooms::RoomError::NotModerator))
+        && !room_visible_to(shared, session, global_id)
+    {
+        return unknown_room();
     }
     e.into()
 }
@@ -2975,7 +2967,7 @@ async fn room_delete(
     room_allowed(&shared, &session, access::Action::ManageRoom, &object)?;
     let result =
         locked(&shared.mailbox)?.delete_room(&global_id, &session.global_id, room_admin(&session));
-    result.map_err(|e| room_refusal(&shared, &global_id, &session.global_id, e))?;
+    result.map_err(|e| room_refusal(&shared, &global_id, &session, e))?;
     shared.access.forget_object(&object);
     Ok(axum::Json(json!({ "room": global_id, "deleted": true })).into_response())
 }
@@ -2998,7 +2990,7 @@ async fn room_policy(
         body.join_policy,
         body.default_send,
     );
-    result.map_err(|e| room_refusal(&shared, &global_id, &session.global_id, e))?;
+    result.map_err(|e| room_refusal(&shared, &global_id, &session, e))?;
     Ok(axum::Json(json!({ "room": global_id, "updated": true })).into_response())
 }
 
@@ -3022,7 +3014,7 @@ async fn room_invite(
         room_admin(&session),
         &body.invitee,
     );
-    result.map_err(|e| room_refusal(&shared, &global_id, &session.global_id, e))?;
+    result.map_err(|e| room_refusal(&shared, &global_id, &session, e))?;
     Ok(axum::Json(json!({ "room": global_id, "invited": body.invitee })).into_response())
 }
 
@@ -3095,6 +3087,12 @@ async fn room_join(
     let body: RoomJoinBody = parse(&headers, &body)?;
     let (global_id, object) = room_ids(&shared, &body.room)?;
     room_allowed(&shared, &session, access::Action::Join, &object)?;
+    // Board 388 A: a room is visible to its creator and the account holder until a rule says
+    // otherwise, so even an Open room is joined only by what may see it; anyone else is told what
+    // it is told for a room that is not there.
+    if !room_visible_to(&shared, &session, &global_id) {
+        return Err(unknown_room());
+    }
     let result = {
         let mut mailbox = locked(&shared.mailbox)?;
         mailbox
@@ -3176,7 +3174,7 @@ fn room_moderate(
             mailbox.remove_from_room(&global_id, &session.global_id, admin, &body.member)
         }
     };
-    result.map_err(|e| room_refusal(&shared, &global_id, &session.global_id, e))?;
+    result.map_err(|e| room_refusal(&shared, &global_id, &session, e))?;
     Ok(
         axum::Json(json!({ "room": global_id, "member": body.member, "banned": ban }))
             .into_response(),
@@ -3222,6 +3220,250 @@ async fn room_members(
         })
         .collect();
     Ok(axum::Json(json!({ "room": global_id, "members": members })).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantBody {
+    /// `role@account`, or `*` (the account holder only).
+    principal: String,
+    actions: Vec<access::Action>,
+    /// `agent:<role>@<account>` or `room:<name>@<account>` (`agent:*` for the account holder).
+    objects: Vec<String>,
+    /// The grant lapses after this many seconds; leave out for none.
+    #[serde(default)]
+    expires_secs: Option<i64>,
+    /// Ask that decisions resting on this grant be checked live.
+    #[serde(default)]
+    sensitive: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantIdBody {
+    id: String,
+}
+
+/// `agent:<id>` or `room:<id>` with a well-formed id (`agent:*` only when `wildcard`).
+fn valid_object(object: &str, wildcard: bool) -> bool {
+    if wildcard && object == "agent:*" {
+        return true;
+    }
+    object
+        .strip_prefix("agent:")
+        .or_else(|| object.strip_prefix("room:"))
+        .is_some_and(synapse::rooms::valid_room_id)
+}
+
+/// Which actions mean something for an object: agents are seen, messaged and administered; rooms
+/// are seen, joined, posted to, managed and administered.
+fn action_fits(action: access::Action, object: &str) -> bool {
+    use access::Action::{EditRule, Grant, Join, ManageRoom, Post, See, Send};
+    if object.starts_with("room:") {
+        matches!(action, See | Join | Post | ManageRoom | EditRule | Grant)
+    } else {
+        matches!(action, See | Send | EditRule | Grant)
+    }
+}
+
+fn asks(shared: &Shared, session: &Session, action: access::Action, object: &str) -> bool {
+    shared
+        .access
+        .decide(
+            principal_of(session),
+            action,
+            object,
+            access::Freshness::Live,
+        )
+        .allowed()
+}
+
+fn access_event(shared: &Shared, session: &Session, what: &str, detail: String) {
+    eprintln!(
+        "synapsed: access {what} by {}: {detail}",
+        shown_role(&session.global_id)
+    );
+    shared.security.emit(
+        SecurityEventKind::Config,
+        "synapsed/access",
+        &session.global_id,
+        &format!("{what} {detail}"),
+    );
+}
+
+/// `POST /v1/access/grant`: give a role rights over agents or rooms. The account holder may give
+/// anything. Anyone else may give rights about an object only as its owner (it holds `edit-rule`
+/// there: the creator of a room or sub-agent does) or by sharing a subset of what it holds
+/// (it holds `grant` there and each action it gives); a grant can only narrow, and it lasts only
+/// as long as its issuer's own right (docs/ACCESS_CONTROL_DESIGN.md 3.4). An object the issuer
+/// cannot see is answered as absent.
+async fn grant_create(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: GrantBody = parse(&headers, &body)?;
+    let holder = principal_of(&session).account_holder;
+    if body.actions.is_empty()
+        || body.actions.len() > 8
+        || body.objects.is_empty()
+        || body.objects.len() > 16
+    {
+        return Err(malformed(
+            "actions and objects: one to eight, one to sixteen",
+        ));
+    }
+    let principal_ok =
+        synapse::rooms::valid_room_id(&body.principal) || (holder && body.principal == "*");
+    if !principal_ok {
+        return Err(malformed("principal"));
+    }
+    if body.objects.iter().any(|o| !valid_object(o, holder)) {
+        return Err(malformed("objects"));
+    }
+    for object in &body.objects {
+        if body.actions.iter().any(|a| !action_fits(*a, object)) {
+            return Err(malformed("an action that does not fit its object"));
+        }
+    }
+    let expires_at = match body.expires_secs {
+        None => None,
+        Some(secs) if (1..=315_360_000).contains(&secs) => {
+            Some(Utc::now() + chrono::Duration::seconds(secs))
+        }
+        Some(_) => return Err(malformed("expires_secs")),
+    };
+    let mut owner_edit = false;
+    if !holder {
+        // What the issuer cannot see is answered as absent: no oracle through the grant API.
+        if body
+            .objects
+            .iter()
+            .any(|o| !asks(&shared, &session, access::Action::See, o))
+        {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "unknown_object",
+                "no such agent or room",
+            ));
+        }
+        owner_edit = body
+            .objects
+            .iter()
+            .all(|o| asks(&shared, &session, access::Action::EditRule, o));
+        let shares = || {
+            body.objects.iter().all(|o| {
+                asks(&shared, &session, access::Action::Grant, o)
+                    && body.actions.iter().all(|a| asks(&shared, &session, *a, o))
+            })
+        };
+        if !owner_edit && !shares() {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                format!(
+                    "{} may give rights over these only with {} (as their owner), or {} and each action it gives (sharing a subset)",
+                    shown_role(&session.global_id),
+                    access::Action::EditRule.name(),
+                    access::Action::Grant.name()
+                ),
+            ));
+        }
+    }
+    let now = Utc::now();
+    let grant = access::Grant {
+        principal: body.principal.clone(),
+        actions: body.actions.clone(),
+        objects: body.objects.clone(),
+        legacy: false,
+        id: String::new(),
+        issued_by: (!holder).then(|| session.global_id.clone()),
+        owner_edit,
+        issued_at: Some(now),
+        expires_at,
+        sensitive: body.sensitive,
+    };
+    let id = shared
+        .access
+        .add_grant(grant)
+        .map_err(|e| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "store_unavailable", e))?;
+    access_event(
+        &shared,
+        &session,
+        "grant",
+        format!(
+            "{id} to {} over {:?}",
+            shown_role(&body.principal),
+            body.objects
+        ),
+    );
+    Ok(
+        axum::Json(json!({ "id": id, "issued_by": (!holder).then(|| session.global_id.clone()) }))
+            .into_response(),
+    )
+}
+
+/// `POST /v1/access/revoke {id}`: the account holder, the role that issued the grant, or a role
+/// that owns every object it covers. What was delegated from the grant stops with it. A grant the
+/// caller has no hand in is answered as absent.
+async fn grant_revoke(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: GrantIdBody = parse(&headers, &body)?;
+    let unknown = || ApiError::new(StatusCode::NOT_FOUND, "unknown_grant", "no such grant");
+    let grant = shared.access.grant(&body.id).ok_or_else(unknown)?;
+    let mine = principal_of(&session).account_holder
+        || grant.issued_by.as_deref() == Some(session.global_id.as_str())
+        || grant
+            .objects
+            .iter()
+            .all(|o| asks(&shared, &session, access::Action::EditRule, o));
+    if !mine {
+        return Err(unknown());
+    }
+    shared
+        .access
+        .remove_grant(&body.id)
+        .map_err(|e| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "store_unavailable", e))?;
+    access_event(&shared, &session, "revoke", body.id.clone());
+    Ok(axum::Json(json!({ "id": body.id, "revoked": true })).into_response())
+}
+
+/// `GET /v1/access/grants`: the grants the caller issued or holds; the account holder sees all.
+async fn grants_list(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let holder = principal_of(&session).account_holder;
+    let me = session.global_id.as_str();
+    let grants: Vec<Value> = shared
+        .access
+        .snapshot()
+        .grants
+        .into_iter()
+        .filter(|g| holder || g.issued_by.as_deref() == Some(me) || g.principal == me)
+        .map(|g| {
+            json!({
+                "id": g.id,
+                "principal": g.principal,
+                "actions": g.actions.iter().map(|a| a.name()).collect::<Vec<_>>(),
+                "objects": g.objects,
+                "issued_by": g.issued_by,
+                "owner_edit": g.owner_edit,
+                "legacy": g.legacy,
+                "sensitive": g.sensitive,
+                "expires_at": g.expires_at.map(|at| at.to_rfc3339()),
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({ "grants": grants })).into_response())
 }
 
 /// `GET /v1/rooms`: the rooms the caller may see (`synapse:see` on the room).

@@ -643,6 +643,28 @@ async fn create_room(home: &Home, role: &str, room: &str) {
     .unwrap();
 }
 
+/// `by` lets `who` (`role@account`) see `room`: a `see` grant on the room, over the daemon's API.
+async fn share_room(home: &Home, by: &str, room: &str, who: &str) {
+    let path = home.path().to_path_buf();
+    let (by, room, who) = (by.to_string(), room.to_string(), who.to_string());
+    tokio::task::spawn_blocking(move || {
+        let daemon = Daemon::connect_existing(&path).expect("connect");
+        daemon
+            .call(
+                &by,
+                "/v1/access/grant",
+                Some(&json!({
+                    "principal": who,
+                    "actions": ["see"],
+                    "objects": [format!("room:{room}@acct")],
+                })),
+            )
+            .expect("share the room");
+    })
+    .await
+    .unwrap();
+}
+
 /// A home where `alice` may create rooms.
 fn home_where_alice_makes_rooms() -> Home {
     let home = Home::new();
@@ -662,6 +684,8 @@ async fn the_room_tools_join_list_members_post_and_leave() {
     // A new room is visible to its creator only: bob's list is empty, and a join by name answers
     // as the room being absent would be, for a closed room; this one is open, so bob can join.
     assert_eq!(bob.ok("rooms", json!({})).await["rooms"], json!([]));
+    // A new room is its creator's: bob joins once alice lets him see it.
+    share_room(&home, "alice", "lounge", "bob@acct").await;
     let joined = bob.ok("join", json!({"room": "lounge"})).await;
     assert_eq!(joined["joined"], true, "{joined}");
     let members = bob.ok("members", json!({"room": "lounge@acct"})).await;
@@ -708,6 +732,7 @@ async fn join_can_ask_for_mentions_only() {
     let alice = agent(&home, "alice").await;
     let bob = agent(&home, "bob").await;
     create_room(&home, "alice", "lounge").await;
+    share_room(&home, "alice", "lounge", "bob@acct").await;
     let joined = bob
         .ok("join", json!({"room": "lounge", "mention_only": true}))
         .await;

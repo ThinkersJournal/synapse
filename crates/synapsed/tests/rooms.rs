@@ -152,6 +152,24 @@ async fn create(d: &Running, token: &str, room: &str) -> (u16, Value) {
     call(d, token, "/v1/rooms/create", Some(json!({"room": room}))).await
 }
 
+/// `owner` (a room's creator) lets each of `who` see `room`: a `see` grant on the room object.
+async fn share(d: &Running, owner: &str, room: &str, who: &[&str]) {
+    for w in who {
+        let (status, reply) = call(
+            d,
+            owner,
+            "/v1/access/grant",
+            Some(json!({
+                "principal": format!("{w}@acct"),
+                "actions": ["see"],
+                "objects": [format!("room:{room}@acct")],
+            })),
+        )
+        .await;
+        assert_eq!(status, 200, "{reply}");
+    }
+}
+
 async fn rooms_seen(d: &Running, token: &str) -> Vec<String> {
     let (status, reply) = call(d, token, "/v1/rooms", None).await;
     assert_eq!(status, 200, "{reply}");
@@ -244,23 +262,19 @@ async fn a_stranger_cannot_manage_a_room_and_a_hidden_room_answers_as_unknown() 
     let d = start(homes()).await;
     let pm = claim(&d, "pm").await;
     let dev = claim(&d, "dev").await;
+    let ops = claim(&d, "ops").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     let policy = |room: &str| json!({"room": room, "join_policy": "invite-only"});
-    // An open room is joinable by anyone, so it is not hidden: the refusal names the reason.
+    // dev can see the room (a grant) but does not run it: the refusal names the reason.
     let (status, reply) = call(&d, &dev, "/v1/rooms/policy", Some(policy("lounge"))).await;
     assert_eq!(
         (status, reply["error"].as_str()),
         (403, Some("not_moderator"))
     );
-    // The creator closes it; now the stranger hears what it hears for a room that is not there.
-    assert_eq!(
-        call(&d, &pm, "/v1/rooms/policy", Some(policy("lounge")))
-            .await
-            .0,
-        200
-    );
-    let hidden = call(&d, &dev, "/v1/rooms/policy", Some(policy("lounge"))).await;
-    let absent = call(&d, &dev, "/v1/rooms/policy", Some(policy("nowhere"))).await;
+    // ops cannot see it at all: it hears what it hears for a room that is not there.
+    let hidden = call(&d, &ops, "/v1/rooms/policy", Some(policy("lounge"))).await;
+    let absent = call(&d, &ops, "/v1/rooms/policy", Some(policy("nowhere"))).await;
     assert_eq!(hidden.0, 404);
     assert_eq!(
         hidden, absent,
@@ -348,6 +362,7 @@ async fn nobody_can_be_joined_by_another() {
     let dev = claim(&d, "dev").await;
     claim(&d, "ops").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     // A request that names another role is refused: the joiner is the session, never a field.
     let (status, _) = call(
         &d,
@@ -398,6 +413,7 @@ async fn banned_cannot_rejoin() {
     let pm = claim(&d, "pm").await;
     let dev = claim(&d, "dev").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev", "ops"]).await;
     assert_eq!(join(&d, &dev, "lounge").await.0, 200);
     let (status, reply) = call(
         &d,
@@ -466,6 +482,7 @@ async fn a_muted_room_says_so_to_the_joiner_and_leaving_removes_the_member() {
     let pm = claim(&d, "pm").await;
     let dev = claim(&d, "dev").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     let (status, _) = call(
         &d,
         &pm,
@@ -492,6 +509,7 @@ async fn retired_member_not_in_delivery_set() {
     let boss = claim(&d, "boss").await;
     let dev = claim(&d, "dev").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     assert_eq!(join(&d, &dev, "lounge").await.0, 200);
     let (_, reply) = members(&d, &pm, "lounge").await;
     let row = &reply["members"][0];
@@ -579,6 +597,7 @@ async fn a_non_member_holding_the_post_grant_posts_and_receives_nothing() {
     let dev = claim(&d, "dev").await;
     let ann = claim(&d, "ann").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     assert_eq!(join(&d, &dev, "lounge").await.0, 200);
     let (status, reply) = post(&d, &ann, "lounge", "[STATUS] lane=ann doing=x", None).await;
     assert_eq!(status, 200, "{reply}");
@@ -638,6 +657,7 @@ async fn muted_post_refused_with_typed_error_and_a_muted_member_still_receives()
     let pm = claim(&d, "pm").await;
     let dev = claim(&d, "dev").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     let (status, _) = call(
         &d,
         &pm,
@@ -670,6 +690,7 @@ async fn copy_keeps_original_sender_and_room_and_a_forged_sender_is_refused() {
     let pm = claim(&d, "pm").await;
     let dev = claim(&d, "dev").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     assert_eq!(join(&d, &dev, "lounge").await.0, 200);
     let (status, reply) = post(&d, &pm, "lounge", "hello", Some("p1")).await;
     assert_eq!(status, 200, "{reply}");
@@ -702,6 +723,7 @@ async fn offline_member_receives_nothing_and_nothing_queued() {
     let pm = claim(&d, "pm").await;
     let dev = claim(&d, "dev").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     assert_eq!(join(&d, &dev, "lounge").await.0, 200);
     tokio::time::sleep(Duration::from_millis(700)).await; // dev makes no call: it goes offline
     let (status, reply) = post(&d, &pm, "lounge", "hello", None).await;
@@ -722,6 +744,7 @@ async fn resend_dedupes_per_member() {
     let pm = claim(&d, "pm").await;
     let dev = claim(&d, "dev").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     assert_eq!(join(&d, &dev, "lounge").await.0, 200);
     let (_, first) = post(&d, &pm, "lounge", "hello", Some("same")).await;
     let (_, again) = post(&d, &pm, "lounge", "hello", Some("same")).await;
@@ -742,6 +765,7 @@ async fn membership_is_the_consent_no_per_pair_send_check() {
     let pm = claim(&d, "pm").await;
     let dev = claim(&d, "dev").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     assert_eq!(join(&d, &dev, "lounge").await.0, 200);
     let (status, _) = call(
         &d,
@@ -808,6 +832,7 @@ async fn oversize_room_post_refused() {
     let pm = claim(&d, "pm").await;
     let dev = claim(&d, "dev").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     assert_eq!(join(&d, &dev, "lounge").await.0, 200);
     let (status, reply) = post(&d, &pm, "lounge", &"x".repeat(21), None).await;
     assert_eq!(
@@ -837,6 +862,7 @@ async fn rate_limit_per_sender_and_per_room() {
     let ann = claim(&d, "ann").await;
     let dev = claim(&d, "dev").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     assert_eq!(join(&d, &dev, "lounge").await.0, 200);
     assert_eq!(post(&d, &pm, "lounge", "one", Some("a1")).await.0, 200);
     assert_eq!(post(&d, &pm, "lounge", "two", Some("a2")).await.0, 200);
@@ -874,6 +900,7 @@ async fn mention_only_skips_unmentioned() {
     let dev = claim(&d, "dev").await;
     claim(&d, "devops").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev"]).await;
     let (status, reply) = call(
         &d,
         &dev,
@@ -920,6 +947,7 @@ async fn room_dead_letter_sends_one_notice() {
     let dev = claim(&d, "dev").await;
     let ops = claim(&d, "ops").await;
     assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev", "ops"]).await;
     assert_eq!(join(&d, &dev, "lounge").await.0, 200);
     assert_eq!(join(&d, &ops, "lounge").await.0, 200);
     let (status, reply) = post(&d, &pm, "lounge", "[STATUS] lane=pm doing=x", Some("u1")).await;
@@ -956,5 +984,292 @@ async fn room_dead_letter_sends_one_notice() {
             "a per-copy notice arrived: {body}"
         );
     }
+    d.stop().await;
+}
+
+async fn grant_see(d: &Running, by: &str, to: &str, object: &str) -> (u16, Value) {
+    call(
+        d,
+        by,
+        "/v1/access/grant",
+        Some(json!({"principal": to, "actions": ["see"], "objects": [object]})),
+    )
+    .await
+}
+
+async fn grant_with(d: &Running, by: &str, to: &str, actions: Value) -> (u16, Value) {
+    call(
+        d,
+        by,
+        "/v1/access/grant",
+        Some(json!({"principal": to, "actions": actions, "objects": ["room:lounge@acct"]})),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_join_to_an_open_room_the_caller_may_not_see_answers_as_unknown() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let boss = claim(&d, "boss").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200); // Open by default
+    // Board 388 A: a new room is the creator's and the account holder's. dev is told what it is
+    // told for a room that is not there, though the policy is Open.
+    let hidden = join(&d, &dev, "lounge").await;
+    let absent = join(&d, &dev, "nowhere").await;
+    assert_eq!(hidden.0, 404);
+    assert_eq!(hidden, absent);
+    // The controls: the account holder joins, and so does dev once it is allowed to see the room.
+    assert_eq!(join(&d, &boss, "lounge").await.0, 200);
+    assert_eq!(
+        grant_see(&d, &pm, "dev@acct", "room:lounge@acct").await.0,
+        200
+    );
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn the_creator_shares_a_room_and_revokes_it() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    let (status, reply) = grant_see(&d, &pm, "dev@acct", "room:lounge@acct").await;
+    assert_eq!(status, 200, "{reply}");
+    let id = reply["id"].as_str().unwrap().to_string();
+    assert_eq!(rooms_seen(&d, &dev).await, ["lounge@acct"]);
+    let (_, mine) = call(&d, &pm, "/v1/access/grants", None).await;
+    assert_eq!(mine["grants"][0]["id"], id.as_str(), "{mine}");
+    // dev may not revoke what pm gave it: it is told there is no such grant.
+    let (status, _) = call(&d, &dev, "/v1/access/revoke", Some(json!({"id": id}))).await;
+    assert_eq!(status, 404);
+    assert_eq!(rooms_seen(&d, &dev).await, ["lounge@acct"]);
+    let (status, reply) = call(&d, &pm, "/v1/access/revoke", Some(json!({"id": id}))).await;
+    assert_eq!(status, 200, "{reply}");
+    assert!(rooms_seen(&d, &dev).await.is_empty(), "the grant is gone");
+    assert_eq!(join(&d, &dev, "lounge").await.0, 404);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn a_delegation_cannot_widen() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    // pm gives dev see and the right to share, nothing else.
+    let (status, reply) = call(
+        &d,
+        &pm,
+        "/v1/access/grant",
+        Some(json!({"principal": "dev@acct", "actions": ["see", "grant"], "objects": ["room:lounge@acct"]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    // dev may pass on what it holds...
+    assert_eq!(
+        grant_see(&d, &dev, "ops@acct", "room:lounge@acct").await.0,
+        200
+    );
+    // ...and nothing it does not: it holds no post right, so it cannot give one.
+    let (status, reply) = call(
+        &d,
+        &dev,
+        "/v1/access/grant",
+        Some(
+            json!({"principal": "ops@acct", "actions": ["post"], "objects": ["room:lounge@acct"]}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (403, Some("forbidden")),
+        "{reply}"
+    );
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn a_delegatee_cannot_redelegate_more_than_it_got() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    let ops = claim(&d, "ops").await;
+    claim(&d, "ann").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    // pm -> dev: see and grant. dev -> ops: see and grant (it holds both, so it may).
+    assert_eq!(
+        grant_with(&d, &pm, "dev@acct", json!(["see", "grant"]))
+            .await
+            .0,
+        200
+    );
+    assert_eq!(
+        grant_with(&d, &dev, "ops@acct", json!(["see", "grant"]))
+            .await
+            .0,
+        200
+    );
+    // ops got see and grant only: it can pass those on and nothing more.
+    assert_eq!(
+        grant_with(&d, &ops, "ann@acct", json!(["see"])).await.0,
+        200
+    );
+    assert_eq!(
+        grant_with(&d, &ops, "ann@acct", json!(["post"])).await.0,
+        403
+    );
+    let (status, _) = grant_with(&d, &ops, "ann@acct", json!(["edit-rule"])).await;
+    assert_eq!(status, 403, "ops never got the right to edit rules");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn a_delegation_dies_with_its_sources_grant() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    let ops = claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    let (_, reply) = call(
+        &d,
+        &pm,
+        "/v1/access/grant",
+        Some(json!({"principal": "dev@acct", "actions": ["see", "grant"], "objects": ["room:lounge@acct"]})),
+    )
+    .await;
+    let source = reply["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        grant_see(&d, &dev, "ops@acct", "room:lounge@acct").await.0,
+        200
+    );
+    assert_eq!(
+        rooms_seen(&d, &ops).await,
+        ["lounge@acct"],
+        "the control: ops sees it through dev"
+    );
+    // pm takes back dev's grant: what dev passed on stops with it.
+    assert_eq!(
+        call(&d, &pm, "/v1/access/revoke", Some(json!({"id": source})))
+            .await
+            .0,
+        200
+    );
+    assert!(
+        rooms_seen(&d, &ops).await.is_empty(),
+        "a delegation outlived its source"
+    );
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn an_agent_without_edit_rule_cannot_edit() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    // dev cannot see the room: the grant API answers as for a room that is not there.
+    let (status, reply) = grant_see(&d, &dev, "ops@acct", "room:lounge@acct").await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (404, Some("unknown_object")),
+        "{reply}"
+    );
+    // With see but nothing else, dev still cannot edit the room's rules: it is told what is missing.
+    assert_eq!(
+        grant_see(&d, &pm, "dev@acct", "room:lounge@acct").await.0,
+        200
+    );
+    let (status, reply) = grant_see(&d, &dev, "ops@acct", "room:lounge@acct").await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (403, Some("forbidden")),
+        "{reply}"
+    );
+    // Nobody but the account holder may name every principal or every agent.
+    let (status, _) = grant_see(&d, &pm, "*", "room:lounge@acct").await;
+    assert_eq!(status, 400);
+    let (status, _) = grant_see(&d, &pm, "dev@acct", "agent:*").await;
+    assert_eq!(status, 400);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn the_account_holder_can_edit_any_rule_about_its_own_agents() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let boss = claim(&d, "boss").await;
+    let dev = claim(&d, "dev").await;
+    let ops = claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    // New lanes see and message nobody. The account holder lets ops message dev...
+    let (status, reply) = call(
+        &d,
+        &boss,
+        "/v1/access/grant",
+        Some(json!({"principal": "ops@acct", "actions": ["see", "send"], "objects": ["agent:dev@acct"]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    let id = reply["id"].as_str().unwrap().to_string();
+    let send = |text: &str| json!({"to": "dev@acct", "body_b64": B64.encode(text.as_bytes())});
+    assert_eq!(call(&d, &ops, "/v1/send", Some(send("hi"))).await.0, 200);
+    // ...and a rule pm made about its own room can be taken back by the account holder too.
+    let (_, reply) = grant_see(&d, &pm, "dev@acct", "room:lounge@acct").await;
+    let pms = reply["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        call(&d, &boss, "/v1/access/revoke", Some(json!({"id": pms})))
+            .await
+            .0,
+        200
+    );
+    assert!(rooms_seen(&d, &dev).await.is_empty());
+    assert_eq!(
+        call(&d, &boss, "/v1/access/revoke", Some(json!({"id": id})))
+            .await
+            .0,
+        200
+    );
+    assert_ne!(
+        call(&d, &ops, "/v1/send", Some(send("again"))).await.0,
+        200,
+        "the revoke took effect"
+    );
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn an_expired_grant_stops_granting_and_grants_survive_a_restart() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    let (status, reply) = call(
+        &d,
+        &pm,
+        "/v1/access/grant",
+        Some(json!({"principal": "dev@acct", "actions": ["see"], "objects": ["room:lounge@acct"], "expires_secs": 1})),
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(rooms_seen(&d, &dev).await, ["lounge@acct"]);
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert!(
+        rooms_seen(&d, &dev).await.is_empty(),
+        "an expired grant still granted"
+    );
+    // A grant with no expiry is kept by the file across a restart.
+    assert_eq!(
+        grant_see(&d, &pm, "dev@acct", "room:lounge@acct").await.0,
+        200
+    );
+    let home = d.stop().await;
+    let d = start(home).await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(rooms_seen(&d, &dev).await, ["lounge@acct"]);
     d.stop().await;
 }
