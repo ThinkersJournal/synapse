@@ -130,6 +130,48 @@ Mail already queued is kept when a grant is revoked; only new sends are refused 
 ### 3.7 Certificates
 Certificates remain the proof of identity (the claim path) and still carry `role-admin` and `daemon-admin` until those move to grants. They no longer authorise mail: every existing lane receives a legacy grant at upgrade (3.3) and every new lane is deny-all, so certificate `Send` has nothing left to do on the daemon path. There is no bridge switch and no sunset date to run. The library gate (`sender_auth.rs:568`) is untouched.
 
+### 3.9 The A2a / A2b seam (what the engine must answer)
+
+A2 is split (PM, 2026-11-07). **A2a** (built, rc.222) is everything on Synapse's side of the `Authorizer` trait, with the
+minimal in-memory engine behind it: the grant, revoke and list API, attenuation at issue and "dies with its source" at
+use, the creator's ownership of what it created, `join` and `see` for rooms behind `synapse:see`, and the `Cached` wrapper.
+**A2b** swaps the engine for auth-framework once a release that carries it is published to crates.io (AC1, the deny-wins
+core, is on its `main`; the attenuation and live-check rows follow; Synapse does not depend on `main`). The swap is meant
+to be one file: `crates/synapsed/src/access.rs`.
+
+The seam is this signature (`Authorizer`, `Principal`, `Decision`, `Freshness`, `Unreachable` in `access.rs`):
+
+```text
+decide(principal { id, account_holder }, action, object, freshness) -> Allow | Deny
+try_decide(...)                                                      -> Ok(Allow | Deny) | Err(Unreachable)
+```
+
+and these cases, each pinned by a test in `crates/synapsed/src/access.rs` or `crates/synapsed/tests/rooms.rs` and each
+one the engine must answer the same way (the tests are the acceptance suite for A2b):
+
+| case | answer | test |
+|---|---|---|
+| the account holder (a daemon fact, never the engine's) | Allow on any agent or room | `the_account_holder_can_edit_any_rule_about_its_own_agents` |
+| an object kind other than `agent:` or `room:` | Deny | `access.rs` `decide_at` |
+| a role on itself (`see`, `send`) | Allow | A1 tests |
+| the creator of a room | Allow every action on it | `a_new_room_is_invisible_to_a_third_agent_and_visible_to_its_creator_and_the_account_holder` |
+| the creator of a sub-agent | Allow `see`, `send`, `edit-rule`, `grant` on it | A1 tests |
+| a room, `see` / `post` / `edit-rule` / `grant`, anyone else | Deny unless a live grant covers it | `a_join_to_an_open_room_the_caller_may_not_see_answers_as_unknown` |
+| an agent, anything else | Deny unless a live grant covers it | A1 tests |
+| a grant past its `expires_at` | covers nothing | `an_expired_grant_grants_nothing`, `an_expired_grant_stops_granting_and_grants_survive_a_restart` |
+| a grant issued by a role | covers only while the issuer still holds what it gave (the action, or `edit-rule` if it acted as owner); chain at most 4; a cycle covers nothing | `a_delegation_dies_with_its_sources_grant`, `a_delegation_that_the_issuer_never_could_give_grants_nothing` |
+| `Cached` freshness | reusable for at most 60 s | `a_revoke_applies_within_60_seconds` |
+| a sensitive action (`create-room`, `manage-room`, `grant`, `edit-rule`), or `Live` | always asks the source | `a_sensitive_decision_is_checked_live_on_every_call` |
+| the source cannot be asked | `Live` Deny; `Cached` served until its minute ends, then Deny; a cached Deny stays Deny; never widens | `an_unreachable_source_denies_a_live_decision_and_never_widens_a_cached_one` |
+
+What stays Synapse's after A2b: the action registry and object names, who the principal is, the account-holder fact, the
+`created_by` records, the HTTP API and its issue-time checks (a grant can only narrow: `a_delegation_cannot_widen`,
+`a_delegatee_cannot_redelegate_more_than_it_got`, `an_agent_without_edit_rule_cannot_edit`), the security event for every
+grant and revoke, and fail-closed handling. What moves into the engine: where grants live and persist, the chain and
+expiry arithmetic, the deny effect, the live source, and `sensitive` on a grant (the in-memory engine stores the flag and
+is always live). Known gap, not a regression: a `join` to an Open room is allowed by the Authorizer for any principal; the
+room's visibility and join policy decide it, so a role that cannot see an Open room cannot join it (board 388 A).
+
 ### 3.8 The dependency
 Reintroduce `auth-framework` from crates.io (no path or git), at the newest published version at the time (`0.6.0-rc209` per the index today), `default-features = false` and only the features the permissions and GNAP modules need. Not yet measured, and measured first in A0: which features those are, whether the minimal build compiles on this toolchain, and the lockfile cost (rc.83 removed 136 packages when it left, `docs/CHANGELOG.md`, rc.83 entry). The non-Rust dependency rule applies to whatever it pulls (aws-lc-rs is the recorded exception). The PM's write-up reports a recent GNAP defect fix; the key-bound path is the part Synapse would lean on and is read in A0.
 
@@ -141,7 +183,7 @@ The enforced `Send` check (`sender_auth.rs:568`), the state permissions (`state_
 |---|---|---|
 | A0 | no Synapse code: in a scratch crate, build auth-framework `0.6.0-rc209` with `default-features = false` and the minimal feature set; file the gaps of 3.2 as issues for the auth-framework lane; measure the lockfile delta | one scratch test per claim in 3.2, kept with the measurement |
 | A1 | the registry, `Authorizer` trait, enforcement at `send` and `list`, default deny for new roles, `legacy` grants written once at upgrade; the engine behind the trait is a minimal in-memory one | `a_new_role_can_neither_see_nor_message_anyone`; `an_upgraded_role_keeps_seeing_and_messaging_every_existing_role`; `see_does_not_imply_send_and_send_does_not_imply_see`; `send_to_an_unseen_role_is_indistinguishable_from_absent`; `list_hides_roles_the_caller_may_not_see`; `queued_mail_survives_a_revoke`; `daemon_notices_ignore_the_rules`; `the_upgrade_migration_runs_once`; board 388: `a_new_sub_agent_is_invisible_to_a_third_agent_and_visible_to_its_creator_and_the_account_holder`, `a_sub_agent_provisioned_directly_has_no_creator` (all in `crates/synapsed/tests/access.rs`) |
-| A2 | auth-framework as the engine; grant, edit and share API; attenuation; 60 s cache; sensitive live checks; fail closed | `a_delegation_cannot_widen`; `a_delegation_dies_with_its_sources_grant`; `a_delegatee_cannot_redelegate_more_than_it_got`; `an_agent_without_edit_rule_cannot_edit`; `the_account_holder_can_edit_any_rule_about_its_own_agents`; `a_join_to_an_open_room_the_caller_may_not_see_answers_as_unknown` (board 388 A: until A2, joining an Open room reveals it exists; A2 enforces the creator-and-account-holder default, PM 2026-11-07); `a_revoke_applies_within_60_seconds`; `a_sensitive_decision_is_checked_live_on_every_call`; `an_unreachable_source_denies_a_live_decision_and_never_widens_a_cached_one` |
+| A2 | **split (PM, 2026-11-07): A2a built (rc.222, section 3.9)**: the grant, edit and share API, attenuation, dies-with-source, the creator's ownership, join behind see, the 60 s cache, sensitive live and fail closed, against the in-memory engine; **A2b** (waits for a published auth-framework): auth-framework as the engine, a one-file swap. Original scope: auth-framework as the engine; grant, edit and share API; attenuation; 60 s cache; sensitive live checks; fail closed | `a_delegation_cannot_widen`; `a_delegation_dies_with_its_sources_grant`; `a_delegatee_cannot_redelegate_more_than_it_got`; `an_agent_without_edit_rule_cannot_edit`; `the_account_holder_can_edit_any_rule_about_its_own_agents`; `a_join_to_an_open_room_the_caller_may_not_see_answers_as_unknown` (board 388 A: until A2, joining an Open room reveals it exists; A2 enforces the creator-and-account-holder default, PM 2026-11-07); `a_revoke_applies_within_60_seconds`; `a_sensitive_decision_is_checked_live_on_every_call`; `an_unreachable_source_denies_a_live_decision_and_never_widens_a_cached_one` |
 | A3 | sub-agents that can be created and mailed: delegating certificates (the keystore issues `may_delegate: 0` today, so no lane can issue one), and recipient addressing that accepts a dotted id such as `worker.pm@acct` (`mailbox::well_formed` uses `keystore::valid_name`, which refuses `.`; found in A1, mail to such a sub-agent is `400 malformed`) | `a_chain_issued_sub_agent_can_be_mailed_by_its_creator`; `a_delegated_certificate_cannot_widen_its_parent` |
 | R1 | rooms on the same call (`ROOMS_DESIGN.md`), after A1 | `a_room_uses_the_same_rules_as_an_agent`; board 388: `a_new_room_is_invisible_to_a_third_agent_and_visible_to_its_creator_and_the_account_holder`; join and post apart (CireSnave 2026-11-06): `a_non_member_post_is_refused_with_the_typed_reason`, `a_non_member_holding_the_post_grant_posts_and_receives_nothing`, `the_post_grant_does_not_imply_join`, `join_then_send_honours_an_invite_only_room` |
 

@@ -155,6 +155,8 @@ fn the_room_commands_create_join_post_list_ban_and_delete() {
     let theirs = json_of(&home.ok(&["room", "list", "--role", "dev"]));
     assert_eq!(theirs["rooms"], serde_json::json!([]), "{theirs}");
     // dev joins (the name may carry the account), pm sees the member and posts to the room.
+    // The room is pm's until it says otherwise: invite dev, who then sees it and joins.
+    home.ok(&["room", "invite", "--role", "pm", "lounge", "dev@acct"]);
     let joined = json_of(&home.ok(&["room", "join", "--role", "dev", "lounge@acct"]));
     assert_eq!(joined["joined"], true, "{joined}");
     let members = json_of(&home.ok(&["room", "members", "--role", "pm", "lounge"]));
