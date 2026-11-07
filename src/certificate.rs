@@ -46,6 +46,10 @@ pub enum Permission {
     RoleAdmin,
     /// Daemon control: stop the daemon cleanly (`/v1/daemon/shutdown`). Held only by the PM role.
     DaemonAdmin,
+    /// Rooms: create rooms under the account (`docs/ROOMS_DESIGN.md` section 6).
+    RoomCreate,
+    /// Rooms: moderate any room of the account. Held rarely.
+    RoomAdmin,
     /// A consumer-defined grant. Always begins `x-`; Synapse carries it and never interprets it.
     Extension(String),
 }
@@ -63,6 +67,8 @@ impl Permission {
             Permission::StateDerive => "state-derive".to_string(),
             Permission::RoleAdmin => "role-admin".to_string(),
             Permission::DaemonAdmin => "daemon-admin".to_string(),
+            Permission::RoomCreate => "room-create".to_string(),
+            Permission::RoomAdmin => "room-admin".to_string(),
             Permission::Extension(text) => text.clone(),
         }
     }
@@ -81,6 +87,8 @@ impl Permission {
             "state-derive" => Some(Permission::StateDerive),
             "role-admin" => Some(Permission::RoleAdmin),
             "daemon-admin" => Some(Permission::DaemonAdmin),
+            "room-create" => Some(Permission::RoomCreate),
+            "room-admin" => Some(Permission::RoomAdmin),
             other if other.starts_with("x-") => Some(Permission::Extension(other.to_string())),
             _ => None,
         }

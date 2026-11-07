@@ -144,13 +144,38 @@ pub struct AccessState {
 
 impl AccessState {
     fn decide(&self, principal: Principal<'_>, action: Action, object: &str) -> Decision {
-        // Fail closed on anything but an agent object (rooms arrive with R1).
-        let Some(target) = object.strip_prefix("agent:") else {
+        // Fail closed on any object kind but an agent or a room.
+        let is_room = object.starts_with("room:");
+        if !is_room && !object.starts_with("agent:") {
             return Decision::Deny;
-        };
+        }
         if principal.account_holder {
             return Decision::Allow;
         }
+        if is_room {
+            // Board 388: a new room is visible to its creator and the account holder only, until a
+            // grant says otherwise. Every other room action is allowed until A2 (PM, 2026-11-06:
+            // R1 starts against an Authorizer that allows all room actions); the room's own
+            // creator and moderator rules still apply in the registry.
+            if action != Action::See {
+                return Decision::Allow;
+            }
+            let creator = self
+                .created_by
+                .get(object)
+                .is_some_and(|c| c == principal.id);
+            return if creator
+                || self
+                    .grants
+                    .iter()
+                    .any(|g| g.covers(principal.id, action, object))
+            {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            };
+        }
+        let target = &object["agent:".len()..];
         // A role always sees itself and may message itself: its own row, its own self-notes.
         if target == principal.id && matches!(action, Action::See | Action::Send) {
             return Decision::Allow;
@@ -229,10 +254,15 @@ impl Access {
 
     /// Record who created `global_id`, once: a later claim never rewrites it.
     pub fn record_creator(&self, global_id: &str, creator: &str) -> Result<(), String> {
+        self.record_object_creator(&agent_object(global_id), creator)
+    }
+
+    /// The same for a room: `object` is `room:<name>@<account>`.
+    pub fn record_object_creator(&self, object: &str, creator: &str) -> Result<(), String> {
         let Ok(mut state) = self.state.lock() else {
             return Err("access state poisoned".into());
         };
-        let object = agent_object(global_id);
+        let object = object.to_string();
         if state.created_by.contains_key(&object) {
             return Ok(());
         }
@@ -242,6 +272,16 @@ impl Access {
             return Err(format!("{ACCESS_FILE} not written: {e}"));
         }
         Ok(())
+    }
+
+    /// Forget who created `object` (a deleted room), so a new room of that name starts clean.
+    pub fn forget_object(&self, object: &str) {
+        if let Ok(mut state) = self.state.lock()
+            && state.created_by.remove(object).is_some()
+            && let Err(e) = write_file(&self.path, &state)
+        {
+            eprintln!("synapsed: {ACCESS_FILE} not written: {e}");
+        }
     }
 
     #[must_use]

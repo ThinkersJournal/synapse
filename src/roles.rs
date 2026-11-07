@@ -146,6 +146,8 @@ pub enum ClaimError {
     ChainTooLong,
     /// The role is at the last representable epoch; no newer one can be granted.
     EpochExhausted,
+    /// A room already has this name (roles and rooms share one namespace per account).
+    RoomNameTaken,
 }
 
 impl fmt::Display for ClaimError {
@@ -158,6 +160,7 @@ impl fmt::Display for ClaimError {
             ClaimError::NoSigningKey => write!(f, "no signing key is loaded for the role"),
             ClaimError::ChainTooLong => write!(f, "the certificate chain is too long"),
             ClaimError::EpochExhausted => write!(f, "the role has no epochs left"),
+            ClaimError::RoomNameTaken => write!(f, "a room already has this name"),
         }
     }
 }

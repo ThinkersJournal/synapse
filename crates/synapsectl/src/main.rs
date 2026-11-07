@@ -597,7 +597,7 @@ fn parse_grant(text: &str) -> Result<Permission, MailError> {
             | Permission::DaemonAdmin),
         ) => Ok(p),
         _ => Err(MailError::Usage(
-            "a grant is state-read-all, state-admin, state-derive, role-admin or daemon-admin"
+            "a grant is state-read-all, state-admin, state-derive, role-admin, daemon-admin, room-create or room-admin"
                 .to_string(),
         )),
     }

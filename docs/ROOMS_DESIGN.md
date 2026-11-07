@@ -292,6 +292,8 @@ slice, and would be a ring buffer in the room blob or a per-room queue; not desi
 | R4 adapter and CLI | MCP tools `join/leave/rooms/members`, `send` to a room unchanged, `synapse room …`, push frame names the room | `adapter_send_to_room_same_call`; `push_frame_marks_room_untrusted`; `busy_lane_stays_online_through_a_blocked_tool_call` |
 | R5 limits | rate, size, caps, `mention_only`, one summarising unacked notice | `rate_limit_per_sender_and_per_room`; `oversize_room_post_refused`; `mention_only_skips_unmentioned`; `room_dead_letter_sends_one_notice` |
 
+R1 as built (rc.214): the registry, store persistence (redb, PersistAnt, `migrate`), the shared role and room namespace, `room-create` and `room-admin`, and the daemon routes `/v1/rooms` (list, filtered by `synapse:see`), `create`, `delete`, `policy`, `invite`; the Authorizer allows room actions other than `see` until A2. Tests: `tests/rooms_registry.rs`, `crates/synapsed/tests/rooms.rs`, `migrate_copies_rooms`.
+
 Each slice is its own PR; the PM allocates the version at gate time. Order is R1 to R5; R3 is the first that can deliver a message.
 
 ## 14. Evidence not gathered

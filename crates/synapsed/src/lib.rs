@@ -969,6 +969,11 @@ impl Daemon {
             .route("/v1/daemon/shutdown", post(daemon_shutdown))
             .route("/v1/roles/retire", post(role_retire))
             .route("/v1/roles/revive", post(role_revive))
+            .route("/v1/rooms", get(rooms_list))
+            .route("/v1/rooms/create", post(room_create))
+            .route("/v1/rooms/delete", post(room_delete))
+            .route("/v1/rooms/policy", post(room_policy))
+            .route("/v1/rooms/invite", post(room_invite))
             .route("/v1/state/create", post(state_api::create))
             .route("/v1/state/get", get(state_api::get))
             .route("/v1/state/list", get(state_api::list))
@@ -1089,6 +1094,23 @@ impl From<MailError> for ApiError {
             MailError::NotFound => ApiError::new(StatusCode::NOT_FOUND, "not_found", e),
             MailError::NotYourLease => ApiError::new(StatusCode::FORBIDDEN, "not_your_lease", e),
             MailError::Claim(c) => ApiError::new(StatusCode::FORBIDDEN, "claim_refused", c),
+            MailError::Room(r) => match r {
+                synapse::rooms::RoomError::BadName => {
+                    ApiError::new(StatusCode::BAD_REQUEST, "malformed", e)
+                }
+                synapse::rooms::RoomError::NameTaken => {
+                    ApiError::new(StatusCode::CONFLICT, "name_taken", e)
+                }
+                synapse::rooms::RoomError::RoomCap => {
+                    ApiError::new(StatusCode::TOO_MANY_REQUESTS, "room_cap", e)
+                }
+                synapse::rooms::RoomError::Unknown => {
+                    ApiError::new(StatusCode::NOT_FOUND, "unknown_room", e)
+                }
+                synapse::rooms::RoomError::NotModerator => {
+                    ApiError::new(StatusCode::FORBIDDEN, "not_moderator", e)
+                }
+            },
             MailError::InvalidState(_)
             | MailError::Store(_)
             | MailError::Poisoned
@@ -2429,6 +2451,235 @@ fn set_role_retired(
         if retire { "retired" } else { "revived" },
     );
     Ok(axum::Json(json!({ "role": global_id, "retired": retire })).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomBody {
+    room: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomPolicyBody {
+    room: String,
+    join_policy: synapse::rooms::JoinPolicy,
+    #[serde(default)]
+    default_send: synapse::rooms::DefaultSend,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomInviteBody {
+    room: String,
+    /// `role@account`; a foreign account's role is allowed (it joins through the room's policy).
+    invitee: String,
+}
+
+/// `(room global id, access object)` for the bare room name in a request.
+fn room_ids(shared: &Shared, room: &str) -> Result<(String, String), ApiError> {
+    if !synapse::keystore::valid_name(room) {
+        return Err(malformed("room"));
+    }
+    let global_id = format!("{room}@{}", shared.account);
+    let object = format!("room:{global_id}");
+    Ok((global_id, object))
+}
+
+/// May this session moderate any room? The account holder, or a `room-admin` certificate.
+fn room_admin(session: &Session) -> bool {
+    principal_of(session).account_holder
+        || session
+            .permissions
+            .contains(&synapse::certificate::Permission::RoomAdmin)
+}
+
+/// A refused room operation. A caller that may not see a room hears the same `404` as for a room
+/// that does not exist (board 388), never a `403` that confirms it.
+fn room_refusal(shared: &Shared, global_id: &str, actor: &str, e: MailError) -> ApiError {
+    if matches!(e, MailError::Room(synapse::rooms::RoomError::NotModerator)) {
+        let visible = shared.mailbox.lock().is_ok_and(|m| {
+            m.rooms_snapshot().rooms.get(global_id).is_some_and(|r| {
+                r.join_policy == synapse::rooms::JoinPolicy::Open
+                    || r.members.contains_key(actor)
+                    || r.invites.contains(actor)
+            })
+        });
+        if !visible {
+            return ApiError::new(
+                StatusCode::NOT_FOUND,
+                "unknown_room",
+                synapse::rooms::RoomError::Unknown,
+            );
+        }
+    }
+    e.into()
+}
+
+fn room_allowed(
+    shared: &Shared,
+    session: &Session,
+    action: access::Action,
+    object: &str,
+) -> Result<(), ApiError> {
+    if shared
+        .access
+        .decide(
+            principal_of(session),
+            action,
+            object,
+            access::Freshness::Live,
+        )
+        .allowed()
+    {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            format!("this role lacks {}", action.name()),
+        ))
+    }
+}
+
+/// `POST /v1/rooms/create {room}`: create `room@account`. Needs `room-create` or `room-admin` on
+/// the certificate, or the account holder. The creator alone (and the account holder) sees it.
+async fn room_create(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    let may = room_admin(&session)
+        || session
+            .permissions
+            .contains(&synapse::certificate::Permission::RoomCreate);
+    if !may {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "this role may not create rooms",
+        ));
+    }
+    room_allowed(&shared, &session, access::Action::CreateRoom, &object)?;
+    let mut mailbox = locked(&shared.mailbox)?;
+    mailbox.create_room(&global_id, &session.global_id, Utc::now())?;
+    if let Err(e) = shared
+        .access
+        .record_object_creator(&object, &session.global_id)
+    {
+        // Fail closed: a room nobody could see is not left behind.
+        eprintln!("synapsed: room creator not recorded: {e}");
+        let _ = mailbox.delete_room(&global_id, &session.global_id, true);
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "store_unavailable",
+            "the room's creator could not be recorded",
+        ));
+    }
+    Ok(axum::Json(json!({ "room": global_id, "created": true })).into_response())
+}
+
+/// `POST /v1/rooms/delete {room}`: the creator, a moderator or an admin.
+async fn room_delete(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    room_allowed(&shared, &session, access::Action::ManageRoom, &object)?;
+    let result =
+        locked(&shared.mailbox)?.delete_room(&global_id, &session.global_id, room_admin(&session));
+    result.map_err(|e| room_refusal(&shared, &global_id, &session.global_id, e))?;
+    shared.access.forget_object(&object);
+    Ok(axum::Json(json!({ "room": global_id, "deleted": true })).into_response())
+}
+
+/// `POST /v1/rooms/policy {room, join_policy, default_send?}`.
+async fn room_policy(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomPolicyBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    room_allowed(&shared, &session, access::Action::ManageRoom, &object)?;
+    let result = locked(&shared.mailbox)?.set_room_policy(
+        &global_id,
+        &session.global_id,
+        room_admin(&session),
+        body.join_policy,
+        body.default_send,
+    );
+    result.map_err(|e| room_refusal(&shared, &global_id, &session.global_id, e))?;
+    Ok(axum::Json(json!({ "room": global_id, "updated": true })).into_response())
+}
+
+/// `POST /v1/rooms/invite {room, invitee}`.
+async fn room_invite(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomInviteBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    if !synapse::rooms::valid_room_id(&body.invitee) {
+        return Err(malformed("invitee"));
+    }
+    room_allowed(&shared, &session, access::Action::ManageRoom, &object)?;
+    let result = locked(&shared.mailbox)?.invite_to_room(
+        &global_id,
+        &session.global_id,
+        room_admin(&session),
+        &body.invitee,
+    );
+    result.map_err(|e| room_refusal(&shared, &global_id, &session.global_id, e))?;
+    Ok(axum::Json(json!({ "room": global_id, "invited": body.invitee })).into_response())
+}
+
+/// `GET /v1/rooms`: the rooms the caller may see (`synapse:see` on the room).
+async fn rooms_list(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let rooms = locked(&shared.mailbox)?.rooms_snapshot();
+    let principal = principal_of(&session);
+    let out: Vec<serde_json::Value> = rooms
+        .rooms
+        .iter()
+        .filter(|(id, _)| {
+            shared
+                .access
+                .decide(
+                    principal,
+                    access::Action::See,
+                    &format!("room:{id}"),
+                    access::Freshness::Cached,
+                )
+                .allowed()
+        })
+        .map(|(id, r)| {
+            json!({
+                "room": id,
+                "creator": r.creator,
+                "join_policy": r.join_policy,
+                "default_send": r.default_send,
+                "members": r.members.len(),
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({ "rooms": out })).into_response())
 }
 
 /// `list`'s entries. When the depths could not be read (a poisoned mailbox or a failed store),
