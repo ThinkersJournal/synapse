@@ -64,6 +64,9 @@ pub enum KeystoreError {
     CertificateExpired,
     /// A certificate's validity must be between 1 and 30 days.
     InvalidValidity,
+    /// A role asked to issue a sub-agent certificate it may not (it has no delegation budget, the
+    /// sub-agent would be too deep, or it would hold a permission its creator lacks).
+    DelegationRefused(&'static str),
     /// The item is accessible to more than its owner (read, or on Windows also write or re-ACL).
     PermissionsTooOpen(&'static str),
     /// The item exists but does not parse.
@@ -120,6 +123,7 @@ impl KeystoreError {
             KeystoreError::NoRoleCertificate => KeystoreError::NoRoleCertificate,
             KeystoreError::CertificateExpired => KeystoreError::CertificateExpired,
             KeystoreError::InvalidValidity => KeystoreError::InvalidValidity,
+            KeystoreError::DelegationRefused(why) => KeystoreError::DelegationRefused(why),
             KeystoreError::PermissionsTooOpen(item) => {
                 KeystoreError::PermissionsTooOpen(known_item(item))
             }
@@ -156,6 +160,7 @@ impl fmt::Display for KeystoreError {
             KeystoreError::InvalidValidity => {
                 write!(f, "certificate validity must be 1 to 30 days")
             }
+            KeystoreError::DelegationRefused(why) => write!(f, "delegation refused: {why}"),
             KeystoreError::PermissionsTooOpen(item) => {
                 write!(f, "the {item} is accessible to more than its owner")
             }
@@ -275,6 +280,20 @@ const GRANTABLE: [Permission; 7] = [
 const GRANTS: &str = "grants";
 
 /// The defaults plus `grants`, in the order a parsed certificate holds them (sorted by name).
+/// The levels of sub-agent a role holding `role-admin` may have below it (A3): its certificate says
+/// `may_delegate: 2`, the sub-agent's says 1, and a sub-agent of that one says 0 and so issues
+/// nothing. Every other role's certificate says 0.
+pub const ROLE_DELEGATION: u8 = 2;
+
+/// What a role with these extra grants may delegate: [`ROLE_DELEGATION`] for `role-admin`, else 0.
+fn delegation_budget(grants: &[Permission]) -> u8 {
+    if grants.contains(&Permission::RoleAdmin) {
+        ROLE_DELEGATION
+    } else {
+        0
+    }
+}
+
 fn with_grants(grants: &[Permission]) -> Vec<Permission> {
     let mut permissions = default_permissions();
     permissions.extend(grants.iter().cloned());
@@ -460,7 +479,7 @@ impl Keystore {
                     && chain[0].subject_signing_key == signing_public
                     && chain[0].subject_sealing_key == sealing_public
                     && chain[0].issuer_key_id == self.account().key_id
-                    && chain[0].may_delegate == 0
+                    && chain[0].may_delegate == delegation_budget(&grants)
                     && chain[0].permissions == with_grants(&grants)
                     && chain[0].verify_signature(&self.account_public_key())
                     && chain[0].not_before <= now
@@ -480,7 +499,7 @@ impl Keystore {
                     not_before: now,
                     not_after: now + CERT_VALIDITY,
                     permissions: with_grants(&grants),
-                    may_delegate: 0,
+                    may_delegate: delegation_budget(&grants),
                     signature: [0; 64],
                 };
                 let chain = vec![AgentCertificate::sign(unsigned, &self.account_key)];
@@ -583,7 +602,7 @@ fn leaf_for(pem: &[u8], global_id: &str, keys: &RolePublicKeys) -> Result<Vec<Ag
                 && chain[0].subject_global_id == global_id
                 && chain[0].subject_signing_key == keys.signing
                 && chain[0].subject_sealing_key == keys.sealing
-                && chain[0].may_delegate == 0
+                && chain[0].may_delegate <= ROLE_DELEGATION
         });
     chain.ok_or(KeystoreError::Corrupt("role certificate"))
 }
@@ -600,7 +619,7 @@ fn leaf_for_role(pem: &[u8], role: &str, keys: &RolePublicKeys) -> Result<Vec<Ag
                 && chain[0].subject_global_id.starts_with(&prefix)
                 && chain[0].subject_signing_key == keys.signing
                 && chain[0].subject_sealing_key == keys.sealing
-                && chain[0].may_delegate == 0
+                && chain[0].may_delegate <= ROLE_DELEGATION
         });
     chain.ok_or(KeystoreError::Corrupt("role certificate"))
 }
@@ -651,6 +670,7 @@ impl Keystore {
         if valid_for < Duration::days(1) || valid_for > Duration::days(30) {
             return Err(KeystoreError::InvalidValidity);
         }
+        let grants = read_grants(&self.home, role)?;
         let unsigned = AgentCertificate {
             version: 1,
             serial: random_bytes::<16>()?,
@@ -661,14 +681,80 @@ impl Keystore {
             subject_sealing_key: keys.sealing,
             not_before: now,
             not_after: now + valid_for,
-            permissions: with_grants(&read_grants(&self.home, role)?),
-            may_delegate: 0,
+            permissions: with_grants(&grants),
+            may_delegate: delegation_budget(&grants),
             signature: [0; 64],
         };
         Ok(chain_to_pem(&[AgentCertificate::sign(
             unsigned,
             &self.account_key,
         )]))
+    }
+
+    /// A sub-agent's certificate chain, issued by `role` with its own key (A3): `label` under
+    /// `role`, so `worker` under `pm` is `worker.pm@<account>`, certifying `keys` for at most
+    /// `permissions`. Leaf first, then `role`'s own chain, as a claim presents it. Refused
+    /// ([`KeystoreError::DelegationRefused`]) when `role` holds no delegation budget (only a role
+    /// with `role-admin` does) or when `permissions` is not a subset of `role`'s own: a delegated
+    /// certificate cannot widen its parent. The sub-agent's window is `valid_for` at most (1 second to 30 days) and never
+    /// outlasts its creator's certificate.
+    pub fn delegate(
+        &self,
+        role: &str,
+        label: &str,
+        keys: RolePublicKeys,
+        permissions: &[Permission],
+        now: DateTime<Utc>,
+        valid_for: Duration,
+    ) -> Result<String> {
+        if !valid_name(role) || !valid_name(label) {
+            return Err(KeystoreError::InvalidName);
+        }
+        if valid_for < Duration::seconds(1) || valid_for > Duration::days(30) {
+            return Err(KeystoreError::InvalidValidity);
+        }
+        let parent = self.role(role, now)?;
+        let parent_leaf = &parent.chain[0];
+        if parent_leaf.may_delegate == 0 {
+            return Err(KeystoreError::DelegationRefused(
+                "this role holds no delegation budget",
+            ));
+        }
+        let global_id = format!("{label}.{}", parent_leaf.subject_global_id);
+        if !permissions
+            .iter()
+            .all(|permission| parent_leaf.permissions.contains(permission))
+        {
+            return Err(KeystoreError::DelegationRefused(
+                "a sub-agent cannot hold a permission its creator lacks",
+            ));
+        }
+        let key_path = self.home.join(ROLES_DIR).join(role).join(SIGNING_KEY);
+        let pem = read_checked(&key_path, "role signing key")?;
+        let pem =
+            std::str::from_utf8(&pem).map_err(|_| KeystoreError::Corrupt("role signing key"))?;
+        let signing_key = SigningKey::from_pkcs8_pem(pem)
+            .map_err(|_| KeystoreError::Corrupt("role signing key"))?;
+        let mut sorted = permissions.to_vec();
+        sorted.sort_by_key(Permission::as_str);
+        sorted.dedup();
+        let unsigned = AgentCertificate {
+            version: 1,
+            serial: random_bytes::<16>()?,
+            issuer_key_id: crate::sender_auth::key_id(&parent_leaf.subject_signing_key),
+            subject_label: label.to_string(),
+            subject_global_id: global_id,
+            subject_signing_key: keys.signing,
+            subject_sealing_key: keys.sealing,
+            not_before: now,
+            not_after: (now + valid_for).min(parent_leaf.not_after),
+            permissions: sorted,
+            may_delegate: parent_leaf.may_delegate - 1,
+            signature: [0; 64],
+        };
+        let mut chain = vec![AgentCertificate::sign(unsigned, &signing_key)];
+        chain.extend(parent.chain.iter().cloned());
+        Ok(chain_to_pem(&chain))
     }
 
     /// Bring `role`'s own home (`role_home`, which must NOT hold an account key) to a current

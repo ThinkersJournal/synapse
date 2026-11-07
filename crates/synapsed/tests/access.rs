@@ -508,3 +508,64 @@ async fn a_sub_agent_provisioned_directly_has_no_creator() {
         "a one-link chain records no creator"
     );
 }
+
+/// A3: the whole path with real keys and no hand-built certificate. pm holds `role-admin`, so its
+/// own certificate carries a delegation budget; it issues a certificate for `worker` with
+/// `Keystore::delegate`; the sub-agent claims `worker.pm@acct` with that chain; pm mails it and the
+/// mail is queued (the dotted address is well formed); a third agent neither sees nor reaches it.
+#[tokio::test]
+async fn a_chain_issued_sub_agent_can_be_mailed_by_its_creator() {
+    let d = start(new_home(&[("pm", Permission::RoleAdmin)])).await;
+    let pm = claim(&d, "pm").await;
+    let c = claim(&d, "c").await;
+
+    let store = Keystore::open(d.home.path()).unwrap();
+    let worker_key = SigningKey::from_bytes(
+        uuid::Uuid::new_v4()
+            .as_bytes()
+            .repeat(2)
+            .as_slice()
+            .try_into()
+            .unwrap(),
+    );
+    let keys = synapse::keystore::RolePublicKeys {
+        signing: worker_key.verifying_key().to_bytes(),
+        sealing: [7; 32],
+    };
+    let pem = store
+        .delegate(
+            "pm",
+            "worker",
+            keys,
+            &[Permission::Send, Permission::Ack],
+            Utc::now(),
+            chrono::Duration::hours(1),
+        )
+        .expect("pm holds role-admin, so it may delegate");
+    let chain = synapse::certificate::chain_from_pem(&pem).unwrap();
+    let signed_at = (Utc::now().max(d.started_at + chrono::Duration::seconds(1))).trunc_subsecs(0);
+    let nonce = *uuid::Uuid::new_v4().as_bytes();
+    let text = claim_signing_input_v2("worker.pm@acct", &instance_id(&d), &nonce, signed_at);
+    let req = synapse::roles::ClaimRequest {
+        chain,
+        nonce,
+        signed_at,
+        signature: worker_key.sign(text.as_bytes()).to_bytes().to_vec(),
+        audience: Some(instance_id(&d)),
+    };
+    let _worker = post_claim(&d, &req).await;
+
+    let (status, reply) = send(&d, &pm, "worker.pm@acct", "task").await;
+    assert_eq!(status, 200, "its creator mails it: {reply}");
+    assert!(
+        !visible(&d, &c)
+            .await
+            .contains(&"worker.pm@acct".to_string()),
+        "a third agent does not see it"
+    );
+    let (status, reply) = send(&d, &c, "worker.pm@acct", "hi").await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (404, Some("unknown_recipient"))
+    );
+}
