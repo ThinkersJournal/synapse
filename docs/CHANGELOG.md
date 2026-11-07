@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.213): rooms design follows slice A1
+
+`docs/ROOMS_DESIGN.md`: join and post are separate actions and sending never joins (CireSnave, 2026-11-06), a scope section (account-level registry, daemon-local presence and delivery, per-account `announce`, federation needs), and the board-388 and join/post tests in the slice plan. No code.
+
 ### Breaking (rc.212): who may see and message whom; new lanes see and message nobody (slice A1)
 
 `crates/synapsed/src/access.rs`: an `Authorizer` trait, the action registry (`synapse:see`, `send`, `join`, `post`, `create-room`, `manage-room`, `grant`, `edit-rule`) and a minimal in-memory engine kept in `<home>/access.json`. Enforced at `send`, `list` and `stats` (design: `docs/ACCESS_CONTROL_DESIGN.md`, boards 384, 385, 388). The first start with no `access.json` writes, once, a `legacy` grant for each role then in the table (see and message exactly those roles); a role first claimed later can see and message nobody, itself apart, until a rule says otherwise. A send to a role the caller cannot see is `404 unknown_recipient`, the same answer as for an absent role; to a role it sees but may not message, `403 forbidden` naming `synapse:send`. Mail already queued is kept. Daemon notices (`[UNACKED]`, dead letters) are outside the rules. A sub-agent whose first claim carries a certificate chain of two or more links is visible to the role that issued it and to the account holder only (`created_by` in `access.json`); one provisioned directly has no creator. TEMPORARY: a session holding `role-admin` counts as the account holder, until A2 replaces it with a grant. Upgrading a running daemon: every existing role keeps working; a lane first claimed afterwards is deny-all and nothing edits rules yet (A2). Tests: `crates/synapsed/tests/access.rs`; the other daemon tests seed an allow-all `access.json` through `tests/common`.
