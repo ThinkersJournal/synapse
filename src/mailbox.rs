@@ -851,6 +851,19 @@ impl<S: MailStore> Mailbox<S> {
         Ok(can_send)
     }
 
+    /// A member's choice to receive only the posts that name it.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn set_room_mention_only(
+        &mut self,
+        global_id: &str,
+        who: &str,
+        mention_only: bool,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.set_mention_only(global_id, who, mention_only))
+    }
+
     /// `who` leaves a room.
     ///
     /// # Errors

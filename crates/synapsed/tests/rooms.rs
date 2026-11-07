@@ -55,6 +55,14 @@ async fn start(home: tempfile::TempDir) -> Running {
 
 /// `window`: how recent a call makes a role online (the daemon's is 90 s; tests shorten it).
 async fn start_with_window(home: tempfile::TempDir, window: Option<chrono::Duration>) -> Running {
+    start_opts(home, window, None).await
+}
+
+async fn start_opts(
+    home: tempfile::TempDir,
+    window: Option<chrono::Duration>,
+    limits: Option<synapsed::RoomLimits>,
+) -> Running {
     let cfg = DaemonConfig {
         home: home.path().to_path_buf(),
         addr: "127.0.0.1:0".parse().unwrap(),
@@ -66,6 +74,9 @@ async fn start_with_window(home: tempfile::TempDir, window: Option<chrono::Durat
         .with_redelivery_check(Duration::from_millis(50));
     if let Some(window) = window {
         daemon = daemon.with_online_window(window);
+    }
+    if let Some(limits) = limits {
+        daemon = daemon.with_room_limits(limits);
     }
     let started_at = daemon.started_at();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -784,5 +795,166 @@ async fn a_client_id_cannot_carry_a_room_suffix() {
         Some("malformed"),
         "{status} {reply}"
     );
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn oversize_room_post_refused() {
+    let limits = synapsed::RoomLimits {
+        max_body_bytes: 20,
+        ..synapsed::RoomLimits::default()
+    };
+    let d = start_opts(homes(), None, Some(limits)).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    let (status, reply) = post(&d, &pm, "lounge", &"x".repeat(21), None).await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (413, Some("room_body_too_large")),
+        "{reply}"
+    );
+    // The control: exactly the limit is accepted, and the refused post queued nothing.
+    assert!(
+        inbox(&d, &dev).await.is_empty(),
+        "the refused post reached a member"
+    );
+    let (status, _) = post(&d, &pm, "lounge", &"x".repeat(20), None).await;
+    assert_eq!(status, 200);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn rate_limit_per_sender_and_per_room() {
+    let limits = synapsed::RoomLimits {
+        per_sender_per_min: 2,
+        per_room_per_min: 3,
+        ..synapsed::RoomLimits::default()
+    };
+    let d = start_opts(home_with_a_poster(), None, Some(limits)).await;
+    let pm = claim(&d, "pm").await;
+    let ann = claim(&d, "ann").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    assert_eq!(post(&d, &pm, "lounge", "one", Some("a1")).await.0, 200);
+    assert_eq!(post(&d, &pm, "lounge", "two", Some("a2")).await.0, 200);
+    // The sender's own minute is used up.
+    let (status, reply) = post(&d, &pm, "lounge", "three", Some("a3")).await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (429, Some("room_rate")),
+        "{reply}"
+    );
+    assert!(
+        reply["retry_after_secs"]
+            .as_u64()
+            .is_some_and(|s| (1..=60).contains(&s)),
+        "{reply}"
+    );
+    // Another sender is under its own limit and gets the room's third post...
+    assert_eq!(post(&d, &ann, "lounge", "four", Some("b1")).await.0, 200);
+    // ...and then the room's minute is used up though ann is under her own.
+    let (status, reply) = post(&d, &ann, "lounge", "five", Some("b2")).await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (429, Some("room_rate")),
+        "{reply}"
+    );
+    // A refused post is not counted and queued nothing: dev has exactly the three accepted.
+    assert_eq!(inbox(&d, &dev).await.len(), 3);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn mention_only_skips_unmentioned() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    claim(&d, "devops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    let (status, reply) = call(
+        &d,
+        &dev,
+        "/v1/rooms/join",
+        Some(json!({"room": "lounge", "mention_only": true})),
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    let (_, reply) = post(&d, &pm, "lounge", "hello everyone", Some("m1")).await;
+    assert_eq!(reply["room"]["delivered"], 0, "{reply}");
+    assert_eq!(reply["room"]["refused"]["mention_only"], 1, "{reply}");
+    // `@devops` does not name `dev`; a longer word that merely starts with it does not either.
+    let (_, reply) = post(
+        &d,
+        &pm,
+        "lounge",
+        "ping @devops and mail@dev.example",
+        Some("m2"),
+    )
+    .await;
+    assert_eq!(reply["room"]["delivered"], 0, "{reply}");
+    assert!(inbox(&d, &dev).await.is_empty());
+    let (_, reply) = post(&d, &pm, "lounge", "can you look, @dev?", Some("m3")).await;
+    assert_eq!(reply["room"]["delivered"], 1, "{reply}");
+    assert_eq!(inbox(&d, &dev).await.len(), 1);
+    // Joining again without the flag leaves the choice alone; with false it turns it off.
+    let (_, reply) = call(
+        &d,
+        &dev,
+        "/v1/rooms/join",
+        Some(json!({"room": "lounge", "mention_only": false})),
+    )
+    .await;
+    assert_eq!(reply["joined"], true);
+    let (_, reply) = post(&d, &pm, "lounge", "hello again", Some("m4")).await;
+    assert_eq!(reply["room"]["delivered"], 1, "{reply}");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn room_dead_letter_sends_one_notice() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    let ops = claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    assert_eq!(join(&d, &ops, "lounge").await.0, 200);
+    let (status, reply) = post(&d, &pm, "lounge", "[STATUS] lane=pm doing=x", Some("u1")).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["room"]["delivered"], 2);
+    // Neither member ever acks: each copy is leased until its deliveries run out (3 here).
+    for _ in 0..3 {
+        assert_eq!(inbox(&d, &dev).await.len(), 1);
+        assert_eq!(inbox(&d, &ops).await.len(), 1);
+        tokio::time::sleep(Duration::from_millis(350)).await;
+    }
+    // The sender hears once for the post, not once per member, and no per-copy notice comes.
+    let mut notices = Vec::new();
+    for _ in 0..80 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        notices.extend(inbox(&d, &pm).await);
+        if !notices.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    let body = String::from_utf8(
+        B64.decode(notices[0]["body_b64"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body, "[ROOM-UNACKED] room=lounge@acct id=u1 unacked=2");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    for message in inbox(&d, &pm).await {
+        let body =
+            String::from_utf8(B64.decode(message["body_b64"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(
+            !body.starts_with("[UNACKED]"),
+            "a per-copy notice arrived: {body}"
+        );
+    }
     d.stop().await;
 }

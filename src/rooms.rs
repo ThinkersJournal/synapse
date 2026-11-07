@@ -94,6 +94,8 @@ pub enum RoomError {
     JoinRefused,
     /// The room is at [`MAX_MEMBERS`].
     RoomFull,
+    /// The caller is not a member of the room.
+    NotMember,
 }
 
 impl fmt::Display for RoomError {
@@ -106,6 +108,7 @@ impl fmt::Display for RoomError {
             RoomError::NotModerator => "only the room's creator or a moderator may do that",
             RoomError::JoinRefused => "the room does not admit this role",
             RoomError::RoomFull => "the room has reached its member limit",
+            RoomError::NotMember => "not a member of this room",
         })
     }
 }
@@ -237,6 +240,24 @@ impl RoomsState {
             },
         );
         Ok(can_send)
+    }
+
+    /// A member chooses to receive only the posts that name it (`@role`): the main token lever.
+    ///
+    /// # Errors
+    /// [`RoomError::Unknown`], [`RoomError::NotMember`].
+    pub fn set_mention_only(
+        &mut self,
+        global_id: &str,
+        who: &str,
+        mention_only: bool,
+    ) -> Result<(), RoomError> {
+        let room = self.rooms.get_mut(global_id).ok_or(RoomError::Unknown)?;
+        room.members
+            .get_mut(who)
+            .ok_or(RoomError::NotMember)?
+            .mention_only = mention_only;
+        Ok(())
     }
 
     /// `who` leaves; leaving a room one is not in is a no-op. Returns whether it was a member.
