@@ -291,3 +291,204 @@ async fn a_restart_keeps_the_rooms_and_who_created_them() {
     assert!(rooms_seen(&d, &dev).await.is_empty());
     d.stop().await;
 }
+
+async fn join(d: &Running, token: &str, room: &str) -> (u16, Value) {
+    call(d, token, "/v1/rooms/join", Some(json!({"room": room}))).await
+}
+
+async fn members(d: &Running, token: &str, room: &str) -> (u16, Value) {
+    call(d, token, &format!("/v1/rooms/members?room={room}"), None).await
+}
+
+fn member_ids(reply: &Value) -> Vec<String> {
+    let mut ids: Vec<String> = reply["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["member"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+async fn invite_only(d: &Running, pm: &str) {
+    let (status, reply) = call(
+        d,
+        pm,
+        "/v1/rooms/policy",
+        Some(json!({"room": "lounge", "join_policy": "invite-only"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+}
+
+#[tokio::test]
+async fn nobody_can_be_joined_by_another() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    // A request that names another role is refused: the joiner is the session, never a field.
+    let (status, _) = call(
+        &d,
+        &dev,
+        "/v1/rooms/join",
+        Some(json!({"room": "lounge", "member": "ops@acct"})),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    let (status, reply) = members(&d, &pm, "lounge").await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(member_ids(&reply), ["dev@acct"], "only the caller joined");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn invite_only_refuses_uninvited() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    let ops = claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    invite_only(&d, &pm).await;
+    let (status, _) = call(
+        &d,
+        &pm,
+        "/v1/rooms/invite",
+        Some(json!({"room": "lounge", "invitee": "dev@acct"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, reply) = join(&d, &dev, "lounge").await;
+    assert_eq!(status, 200, "the invited role joins: {reply}");
+    assert_ne!(
+        join(&d, &ops, "lounge").await.0,
+        200,
+        "an uninvited role is refused"
+    );
+    let (_, reply) = members(&d, &pm, "lounge").await;
+    assert_eq!(member_ids(&reply), ["dev@acct"]);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn banned_cannot_rejoin() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    let (status, reply) = call(
+        &d,
+        &pm,
+        "/v1/rooms/ban",
+        Some(json!({"room": "lounge", "member": "dev@acct"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    let (status, reply) = join(&d, &dev, "lounge").await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (403, Some("join_refused"))
+    );
+    let (_, reply) = members(&d, &pm, "lounge").await;
+    assert!(member_ids(&reply).is_empty(), "the ban removed the member");
+    // A removed (not banned) member may come back when the policy allows.
+    let ops = claim(&d, "ops").await;
+    assert_eq!(join(&d, &ops, "lounge").await.0, 200);
+    let (status, _) = call(
+        &d,
+        &pm,
+        "/v1/rooms/remove",
+        Some(json!({"room": "lounge", "member": "ops@acct"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(join(&d, &ops, "lounge").await.0, 200, "removed, not banned");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn hidden_room_answers_404_same_as_unknown() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    invite_only(&d, &pm).await;
+    // Members, leave and an uninvited join: the stranger hears what it hears for an absent room.
+    let hidden = members(&d, &dev, "lounge").await;
+    let absent = members(&d, &dev, "nowhere").await;
+    assert_eq!(hidden.0, 404);
+    assert_eq!(
+        hidden, absent,
+        "a hidden room is told apart from an absent one"
+    );
+    let hidden = join(&d, &dev, "lounge").await;
+    let absent = join(&d, &dev, "nowhere").await;
+    assert_eq!(hidden.0, 404);
+    assert_eq!(hidden, absent);
+    let hidden = call(&d, &dev, "/v1/rooms/leave", Some(json!({"room": "lounge"}))).await;
+    let absent = call(
+        &d,
+        &dev,
+        "/v1/rooms/leave",
+        Some(json!({"room": "nowhere"})),
+    )
+    .await;
+    assert_eq!(hidden, absent);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn a_muted_room_says_so_to_the_joiner_and_leaving_removes_the_member() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    let (status, _) = call(
+        &d,
+        &pm,
+        "/v1/rooms/policy",
+        Some(json!({"room": "lounge", "join_policy": "open", "default_send": "muted"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, reply) = join(&d, &dev, "lounge").await;
+    assert_eq!((status, &reply["muted"]), (200, &json!(true)), "{reply}");
+    // A member reads the member list; leaving takes it out.
+    assert_eq!(members(&d, &dev, "lounge").await.0, 200);
+    let (status, _) = call(&d, &dev, "/v1/rooms/leave", Some(json!({"room": "lounge"}))).await;
+    assert_eq!(status, 200);
+    let (_, reply) = members(&d, &pm, "lounge").await;
+    assert!(member_ids(&reply).is_empty());
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn retired_member_not_in_delivery_set() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let boss = claim(&d, "boss").await;
+    let dev = claim(&d, "dev").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    let (_, reply) = members(&d, &pm, "lounge").await;
+    let row = &reply["members"][0];
+    assert_eq!(
+        (row["online"].as_bool(), row["deliverable"].as_bool()),
+        (Some(true), Some(true)),
+        "the control: a live member is deliverable: {row}"
+    );
+    let (status, reply) = call(&d, &boss, "/v1/roles/retire", Some(json!({"role": "dev"}))).await;
+    assert_eq!(status, 200, "{reply}");
+    let (_, reply) = members(&d, &pm, "lounge").await;
+    let row = &reply["members"][0];
+    assert_eq!(
+        (row["retired"].as_bool(), row["deliverable"].as_bool()),
+        (Some(true), Some(false)),
+        "{row}"
+    );
+    d.stop().await;
+}

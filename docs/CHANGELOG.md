@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.217): rooms join, leave, members, remove and ban (slice R2)
+
+`RoomsState::join`, `leave`, `remove`, `ban` and the daemon routes `POST /v1/rooms/join|leave|remove|ban` and `GET /v1/rooms/members?room=`. The joiner is always the session (a request naming another role is refused with 400); the room's join policy decides (Open, AllowList, InviteOnly; an invitation is used up by the join), a ban refuses with `403 join_refused`, a room holds at most 32 members (`429 room_full`), and a muted-by-default room tells the joiner `muted: true`. A caller that may not see a room hears the same `404 unknown_room` as for an absent one on join, leave and members. `members` reports for each member whether it is online, retired and `deliverable` (claimed, not retired, online: the set R3 will fan out to). An Open room is joinable by name by any claimed role of the account. Sending to a room still does not join it (R3). Tests: `crates/synapsed/tests/rooms.rs` (`nobody_can_be_joined_by_another`, `invite_only_refuses_uninvited`, `banned_cannot_rejoin`, `hidden_room_answers_404_same_as_unknown`, `retired_member_not_in_delivery_set`, and a muted-room and leave case); `join_follows_the_policy_a_ban_and_the_cap` in `src/rooms.rs`.
+
 ### Fixed (rc.216): an [UNACKED] notice is delivered once
 
 The daemon's `[UNACKED]` notice was an ordinary message, so an unacked one was redelivered at about 2, 4, 8 and 16 minutes with the age and attempts it had when it was made, and one for a message that was acked later kept arriving. It is now leased once and set aside quietly when that lease runs out (`MailConfig::single_delivery_from`, set by the daemon to its own notice sender), and a claim does not bring a dead notice back. The notice is still counted as dead-lettered for the sender. Tests: `crates/synapsed/tests/delivery_backoff.rs` (`a_notice_for_an_already_acked_original_is_not_redelivered`, and the existing back-off test now asserts no redelivery).
