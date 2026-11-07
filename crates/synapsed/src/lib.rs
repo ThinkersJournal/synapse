@@ -1550,6 +1550,27 @@ async fn send(
         from: session.global_id.clone(),
         body: body_bytes,
     };
+    // A post to a room fans out to its members (docs/ROOMS_DESIGN.md section 9). Presence is read
+    // before the mailbox lock is taken, so the two locks are never held in the other order.
+    let is_room = locked(&shared.mailbox)?
+        .rooms_snapshot()
+        .rooms
+        .contains_key(&envelope.to);
+    if is_room {
+        let seen: HashMap<String, DateTime<Utc>> = locked(&shared.presence)?
+            .iter()
+            .map(|(id, p)| (id.clone(), p.last_seen))
+            .collect();
+        let mut mailbox = locked(&shared.mailbox)?;
+        mailbox.check(&session.global_id, session.epoch)?;
+        if let Some(mut reply) = post_to_room(&shared, &session, &mut mailbox, &envelope, &seen)? {
+            drop(mailbox);
+            if let Some(warning) = lint {
+                reply["warning"] = Value::String(warning);
+            }
+            return Ok(axum::Json(reply).into_response());
+        }
+    }
     let (to, outcome) = {
         let mut mailbox = locked(&shared.mailbox)?;
         // Review M5: re-check the sender's epoch under the same lock as the enqueue.
@@ -1652,6 +1673,150 @@ async fn send(
         reply["warning"] = Value::String(warning);
     }
     Ok(axum::Json(reply).into_response())
+}
+
+/// One post to a room, under the mailbox lock: who may post, who receives, one copy each.
+/// `Ok(None)` when `envelope.to` is not a room after all. A member posts unless muted; anyone
+/// else needs the `synapse:post` grant and is not made a member by it. The copy goes to every
+/// other member that is claimed, not retired and online now; the reply says how many were
+/// reached and how many were not, by reason, never which (docs/ROOMS_DESIGN.md sections 6a, 9).
+fn post_to_room(
+    shared: &Shared,
+    session: &Session,
+    mailbox: &mut Mailbox<DaemonStore>,
+    envelope: &Envelope,
+    seen: &HashMap<String, DateTime<Utc>>,
+) -> Result<Option<Value>, ApiError> {
+    let rooms = mailbox.rooms_snapshot();
+    let Some(room) = rooms.rooms.get(&envelope.to) else {
+        return Ok(None);
+    };
+    let me = session.global_id.as_str();
+    let object = format!("room:{}", envelope.to);
+    match room.members.get(me) {
+        Some(member) if !member.can_send => {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "muted",
+                format!(
+                    "{} is muted in {}",
+                    shown_role(me),
+                    shown_role(&envelope.to)
+                ),
+            ));
+        }
+        Some(_) => {}
+        None => {
+            let may_post = shared
+                .access
+                .decide(
+                    principal_of(session),
+                    access::Action::Post,
+                    &object,
+                    access::Freshness::Cached,
+                )
+                .allowed();
+            if !may_post {
+                if see_room(shared, session, &envelope.to, room) {
+                    return Err(ApiError::new(
+                        StatusCode::FORBIDDEN,
+                        "not_a_member",
+                        format!(
+                            "{} is not a member of {} and lacks {}",
+                            shown_role(me),
+                            shown_role(&envelope.to),
+                            access::Action::Post.name()
+                        ),
+                    ));
+                }
+                // A room the sender may not see is answered as an absent role, same budget.
+                let delay = shared.security.over_budget(
+                    &shared.security.misuse,
+                    me,
+                    "synapsed/recipient",
+                    me,
+                    "unknown_recipient",
+                );
+                return Err(ApiError::new(
+                    StatusCode::NOT_FOUND,
+                    "unknown_recipient",
+                    format!(
+                        "no such role on this daemon: {} (give role@account)",
+                        shown_role(&envelope.to)
+                    ),
+                )
+                .after(delay));
+            }
+        }
+    }
+    // One id per post and room, so a resend of the same client id dedupes per member.
+    let copy_id = format!("{}#{}", envelope.message_id, envelope.to);
+    if copy_id.len() > synapse::mailbox::MAX_ADDRESS_LEN {
+        return Err(malformed("message_id"));
+    }
+    let roles = mailbox.roles_snapshot();
+    let now = Utc::now();
+    let (mut offline, mut retired) = (0u32, 0u32);
+    let mut copies = Vec::new();
+    for member in room.members.keys().filter(|m| m.as_str() != me) {
+        // Membership is the consent (PM, option A): no per-pair `send` check on the agent.
+        if !deliverable_to(member) {
+            continue;
+        }
+        match roles.roles.get(member) {
+            Some(record) if record.retired_at.is_none() => {}
+            _ => {
+                retired += 1;
+                continue;
+            }
+        }
+        if !seen
+            .get(member)
+            .is_some_and(|at| now - *at <= shared.online_window)
+        {
+            offline += 1;
+            continue;
+        }
+        copies.push(Envelope {
+            message_id: copy_id.clone(),
+            to: member.clone(),
+            from: me.to_string(),
+            body: envelope.body.clone(),
+        });
+    }
+    let outcomes = mailbox.enqueue_many(&copies, now)?;
+    let delivered = outcomes
+        .iter()
+        .filter(|o| **o == synapse::mailbox::Fanout::Queued)
+        .count();
+    let full = outcomes
+        .iter()
+        .filter(|o| **o == synapse::mailbox::Fanout::Full)
+        .count();
+    for (copy, outcome) in copies.iter().zip(&outcomes) {
+        if *outcome == synapse::mailbox::Fanout::Queued {
+            count(shared, &copy.to, |c| c.sent += 1);
+        }
+    }
+    count(shared, me, |c| c.submitted += 1);
+    Ok(Some(json!({
+        "message_id": envelope.message_id,
+        "outcome": "queued",
+        "room": {
+            "room": envelope.to,
+            "joined": room.members.len(),
+            "delivered": delivered,
+            "refused": { "offline": offline, "full": full, "retired": retired },
+        },
+    })))
+}
+
+/// The hook for per-recipient consent on a fan-out copy. Membership is the consent: the member
+/// joined by its own act (CireSnave's join/post ruling, 2026-11-06), so no agent-level
+/// `synapse:send` is re-checked per (sender, member) (PM ruling, 2026-11-07, option A).
+/// A later rule that must veto a copy goes here, and counts the member as refused.
+fn deliverable_to(_member: &str) -> bool {
+    true
 }
 
 /// A recipient as an error message shows it: at most a global id's length, control characters
@@ -2669,9 +2834,15 @@ struct RoomMemberBody {
     member: String,
 }
 
-/// May `session` see `global_id`: `synapse:see` on it, or it is a member, moderator, creator,
-/// invited or on its allow-list? What it may not see answers as unknown.
-fn room_visible_to(shared: &Shared, session: &Session, global_id: &str) -> bool {
+/// May `session` see room `global_id` (held as `room`): `synapse:see` on it, or it is a member,
+/// banned, moderator, creator, invited or on its allow-list? What it may not see answers as
+/// unknown. Does not lock the mailbox.
+fn see_room(
+    shared: &Shared,
+    session: &Session,
+    global_id: &str,
+    room: &synapse::rooms::Room,
+) -> bool {
     let object = format!("room:{global_id}");
     if shared
         .access
@@ -2686,15 +2857,20 @@ fn room_visible_to(shared: &Shared, session: &Session, global_id: &str) -> bool 
         return true;
     }
     let me = session.global_id.as_str();
+    room.members.contains_key(me)
+        || room.banned.contains(me)
+        || room.moderators.contains(me)
+        || room.creator == me
+        || room.invites.contains(me)
+        || matches!(&room.join_policy, synapse::rooms::JoinPolicy::AllowList(l) if l.contains(me))
+}
+
+fn room_visible_to(shared: &Shared, session: &Session, global_id: &str) -> bool {
     shared.mailbox.lock().is_ok_and(|m| {
-        m.rooms_snapshot().rooms.get(global_id).is_some_and(|r| {
-            r.members.contains_key(me)
-                || r.banned.contains(me)
-                || r.moderators.contains(me)
-                || r.creator == me
-                || r.invites.contains(me)
-                || matches!(&r.join_policy, synapse::rooms::JoinPolicy::AllowList(l) if l.contains(me))
-        })
+        m.rooms_snapshot()
+            .rooms
+            .get(global_id)
+            .is_some_and(|r| see_room(shared, session, global_id, r))
     })
 }
 

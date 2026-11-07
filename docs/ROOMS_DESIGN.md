@@ -133,7 +133,22 @@ moderators, and, for a non-`Open` room, to nobody else; an `Open` room is visibl
 as an unknown role), so a hidden room is not confirmed by a different error. `list` for roles stays as it is; making
 role visibility configurable is a separate decision (section 12, call 5), and this note does not smuggle it in.
 
-**Consent and the confused deputy.** Fan-out writes into a mailbox the sender could already write to directly, because
+**Consent, updated 2026-11-07 (the paragraph below predates A1).** A1 now has direct-mail consent
+(`synapse:send` on `agent:<role>`, new lanes deny-all), and the PM ruled (option A, after CireSnave's join/post
+ruling) that **membership is the consent**: fan-out does not re-run `synapse:send` per (sender, member). Otherwise a
+lane first claimed after A1 could never receive a room post from another new lane, and an announcer holding
+`synapse:post` could not reach its members. The code keeps one function, `deliverable_to`, which returns `true` and
+names this ruling, so a later rule that must veto a copy has one place to go; the test
+`membership_is_the_consent_no_per_pair_send_check` pins the choice (a post reaches a member though a direct send is
+refused).
+
+**Posting under the interim Authorizer.** `synapse:post` on a room is grant-based, like `synapse:see`: the creator, the
+account holder, and a role holding a grant for that room object. Every other room action stays allowed until A2. A
+member posts by being a member (the registry decides: not muted, `can_send`); anyone else needs the grant, or the post is
+refused `403 not_a_member` (if the sender can see the room) or `404 unknown_recipient` (if not). Without this the
+non-member-refused rule could not exist while the Authorizer allows all.
+
+**Consent and the confused deputy (as first written).** Fan-out writes into a mailbox the sender could already write to directly, because
 today any claimed in-account role can be mailed by any session (F1). So at v1 the fan-out cannot reach anyone the
 sender could not reach by hand, and the explicit consent is stronger than the parity: a member is in the room only by
 its own `join` (or an accepted invite); nobody can be added. The daemon takes the joiner from the authenticated session
@@ -295,6 +310,15 @@ slice, and would be a ring buffer in the room blob or a per-room queue; not desi
 R1 as built (rc.214): the registry, store persistence (redb, PersistAnt, `migrate`), the shared role and room namespace, `room-create` and `room-admin`, and the daemon routes `/v1/rooms` (list, filtered by `synapse:see`), `create`, `delete`, `policy`, `invite`; the Authorizer allows room actions other than `see` until A2. Tests: `tests/rooms_registry.rs`, `crates/synapsed/tests/rooms.rs`, `migrate_copies_rooms`.
 
 R2 as built (rc.217): `join`, `leave`, `remove`, `ban`, `members` (with `online`, `retired`, `deliverable`), policy and ban enforcement, hidden rooms answering `404`. An uninvited role to an invite-only room it cannot see hears `404 unknown_room`; one that can see it (a member, banned, invited, creator or a `see` grant) hears `403 join_refused`. An Open room is joinable by name by any claimed role of the account, so a `join` to an Open room reveals that it exists; moving `join` behind `synapse:see` is A2's decision. Tests: `crates/synapsed/tests/rooms.rs`.
+
+R3 as built (rc.218): `Mailbox::enqueue_many` (one store transaction; a full queue is skipped, reported `full`),
+`send` resolves a room name, and the reply gains `room: {room, joined, delivered, refused: {offline, full, retired}}`.
+The copy is `to` the member, `from` the original sender, `message_id` `<sender>/<client id>#<room>` (the room travels in
+the id for now; no `Envelope` field), so a retry dedupes per member. The sender receives nothing back. Members that are
+offline or retired get nothing and nothing is queued. Not in R3: rate limits and size caps (R5), `mention_only`, the
+adapter's room framing (R4). Tests: `crates/synapsed/tests/rooms.rs`; the conformance case
+`enqueue_many_queues_each_copy_skips_a_full_queue_and_dedupes` runs on every store (atomicity is the store's
+`a_failed_write_changes_nothing`).
 
 Each slice is its own PR; the PM allocates the version at gate time. Order is R1 to R5; R3 is the first that can deliver a message.
 
