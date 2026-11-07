@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.227): delegating certificates (A3, part 2)
+
+A role holding `role-admin` now gets `may_delegate: 2` in its own certificate (every other role still 0; `keystore::ROLE_DELEGATION`), and `Keystore::delegate(role, label, keys, permissions, now, valid_for)` issues the sub-agent `label.role@account` a certificate signed with the role's own key, chained under the role's: one off the budget, a window that never outlasts the creator's, and never a permission the creator lacks (`KeystoreError::DelegationRefused`; the chain rules refuse a forged widening too). A role-only home accepts a certificate with a budget up to 2 where it required 0. Not in this change: a command to run `delegate` or to give a sub-agent its own home; until then it is a library call.
+
 ### Added (rc.226): dotted role ids are mailable (A3, part 1)
 
 A recipient may now be a sub-agent address such as `worker.pm@acct`: a role part of up to three names joined by single dots (`keystore::valid_role_id`, `MAX_ROLE_DEPTH`). Before, `mailbox::well_formed` refused any dot and mail to such a role was `400 malformed`. An empty level (`.pm`, `a..b`, `pm.`) and a fourth level are still refused. A role still claims under a plain name and no dot reaches a path component. No policy change: who may see or send is still the access rules. The delegating certificates that create such a role are part 2.

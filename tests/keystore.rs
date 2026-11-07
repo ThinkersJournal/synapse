@@ -507,3 +507,111 @@ fn racing_init_account_has_exactly_one_winner_per_home() {
         Keystore::open(dir.path()).expect("the winner's account opens");
     }
 }
+
+/// A new sub-agent's public keys: any fresh signing key, a fixed sealing key.
+fn sub_agent_keys() -> (ed25519_dalek::SigningKey, synapse::keystore::RolePublicKeys) {
+    let key = ed25519_dalek::SigningKey::from_bytes(
+        uuid::Uuid::new_v4()
+            .as_bytes()
+            .repeat(2)
+            .as_slice()
+            .try_into()
+            .unwrap(),
+    );
+    let keys = synapse::keystore::RolePublicKeys {
+        signing: key.verifying_key().to_bytes(),
+        sealing: [7; 32],
+    };
+    (key, keys)
+}
+
+/// A3: only a role holding `role-admin` gets a delegation budget in its certificate.
+#[test]
+fn only_a_role_admin_gets_a_delegation_budget() {
+    use synapse::certificate::Permission;
+    let (_dir, store) = store_with_account();
+    assert_eq!(store.role("pm", t0()).unwrap().chain[0].may_delegate, 0);
+    store.grant("pm", &Permission::RoleAdmin).unwrap();
+    store.grant("dev", &Permission::StateReadAll).unwrap();
+    assert_eq!(
+        store.role("pm", t0()).unwrap().chain[0].may_delegate,
+        synapse::keystore::ROLE_DELEGATION,
+        "role-admin: the certificate is re-issued with a budget"
+    );
+    assert_eq!(
+        store.role("dev", t0()).unwrap().chain[0].may_delegate,
+        0,
+        "control: another grant gives no budget"
+    );
+}
+
+/// A3: the certificate a role-admin issues for a sub-agent chains to the account, narrows the id,
+/// takes one off the budget and cannot hold what its creator lacks.
+#[test]
+fn a_delegated_certificate_cannot_widen_its_parent() {
+    use synapse::certificate::{ChainError, Permission};
+    let (dir, store) = store_with_account();
+    store.grant("pm", &Permission::RoleAdmin).unwrap();
+    let pm = store.role("pm", t0()).unwrap();
+    let (_worker_key, keys) = sub_agent_keys();
+    let hours = chrono::Duration::hours(1);
+
+    // A subset of pm's permissions: issued, and the whole chain validates.
+    let pem = store
+        .delegate("pm", "worker", keys, &[Permission::Send], t0(), hours)
+        .unwrap();
+    let chain = synapse::certificate::chain_from_pem(&pem).unwrap();
+    assert_eq!(chain.len(), 2, "the leaf, then pm's own certificate");
+    assert_eq!(chain[0].subject_global_id, "worker.pm@acct");
+    assert_eq!(chain[0].may_delegate, 1, "one less than pm's 2");
+    validates(&store, &chain, t0()).expect("a narrower permission set chains");
+
+    // More than pm holds: refused at issue.
+    let wider = [Permission::Send, Permission::StateAdmin];
+    assert!(pm.permissions.contains(&Permission::Send));
+    assert!(!pm.permissions.contains(&Permission::StateAdmin));
+    assert!(matches!(
+        store.delegate("pm", "worker", keys, &wider, t0(), hours),
+        Err(KeystoreError::DelegationRefused(_))
+    ));
+
+    // And a certificate forged with pm's own key to be wider is refused by the chain rules.
+    let pem = std::fs::read_to_string(dir.path().join("roles").join("pm").join("signing.key.pem"))
+        .unwrap();
+    let pm_key = {
+        use ed25519_dalek::pkcs8::DecodePrivateKey;
+        ed25519_dalek::SigningKey::from_pkcs8_pem(&pem).unwrap()
+    };
+    let mut forged = chain[0].clone();
+    forged.permissions.push(Permission::StateAdmin);
+    let forged = synapse::certificate::AgentCertificate::sign(forged, &pm_key);
+    let forged_chain = [forged, chain[1].clone()];
+    assert_eq!(
+        validates(&store, &forged_chain, t0()).unwrap_err(),
+        ChainError::PermissionWidened
+    );
+}
+
+/// A3: a role without the budget, and a name that is not a label, issue nothing.
+#[test]
+fn a_role_without_a_budget_cannot_delegate() {
+    use synapse::certificate::Permission;
+    let (_dir, store) = store_with_account();
+    store.grant("pm", &Permission::RoleAdmin).unwrap();
+    let (_key, keys) = sub_agent_keys();
+    let hours = chrono::Duration::hours(1);
+    assert!(matches!(
+        store.delegate("dev", "worker", keys, &[Permission::Send], t0(), hours),
+        Err(KeystoreError::DelegationRefused(_))
+    ));
+    assert!(matches!(
+        store.delegate("pm", "a.b", keys, &[Permission::Send], t0(), hours),
+        Err(KeystoreError::InvalidName)
+    ));
+    // Control: pm, with the budget, may.
+    assert!(
+        store
+            .delegate("pm", "worker", keys, &[Permission::Send], t0(), hours)
+            .is_ok()
+    );
+}
