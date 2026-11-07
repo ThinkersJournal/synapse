@@ -52,6 +52,11 @@ pub struct MailConfig {
     /// set and reported by [`Mailbox::dead_exhausted`]. The sum of the gaps is the total time a
     /// sender waits before it is told.
     pub redelivery_gaps: Vec<Duration>,
+    /// The sender (a global id) whose messages are delivered once: leased once, and set aside
+    /// quietly when that lease runs out, never redelivered and never brought back by a claim. The
+    /// daemon sets it to its own notice sender, so a notice (`[UNACKED]`) does not keep arriving
+    /// with the age and attempts it had when it was made.
+    pub single_delivery_from: Option<String>,
 }
 
 impl MailConfig {
@@ -62,6 +67,15 @@ impl MailConfig {
             (0, g) => g,
             (m, 0) => m,
             (m, g) => m.min(g),
+        }
+    }
+
+    /// Deliveries after which this message is set aside: one for the single-delivery sender's.
+    fn cap_for(&self, from: &str) -> u32 {
+        if self.single_delivery_from.as_deref() == Some(from) {
+            1
+        } else {
+            self.delivery_cap()
         }
     }
 
@@ -98,6 +112,7 @@ impl Default for MailConfig {
             max_bytes: 64 * 1024 * 1024,
             max_deliveries: 10,
             redelivery_gaps: Vec::new(),
+            single_delivery_from: None,
         }
     }
 }
@@ -675,6 +690,11 @@ impl<S: MailStore> Mailbox<S> {
         })
     }
 
+    /// Deliver this sender's messages once (see [`MailConfig::single_delivery_from`]).
+    pub fn set_single_delivery_sender(&mut self, from: String) {
+        self.config.single_delivery_from = Some(from);
+    }
+
     /// Replace the redelivery back-off (see [`MailConfig::redelivery_gaps`]); empty turns it off.
     pub fn set_redelivery_gaps(&mut self, gaps: Vec<Duration>) {
         self.config.redelivery_gaps = gaps;
@@ -1043,7 +1063,6 @@ impl<S: MailStore> Mailbox<S> {
             return Err(MailError::LeaseOutOfRange);
         }
         let config = self.config.clone();
-        let cap = config.delivery_cap();
         let mut out = Vec::new();
         let mut moved: Vec<Exhausted> = Vec::new();
         if max == 0 {
@@ -1067,6 +1086,7 @@ impl<S: MailStore> Mailbox<S> {
                 // Leased `max_deliveries` times already and still here: set it aside, body and all,
                 // instead of leasing it again. If the dead set is itself full it stays queued: a
                 // message is never dropped to make room.
+                let cap = config.cap_for(&stored.envelope.from);
                 if cap > 0 && stored.attempts >= cap {
                     let (count, bytes) = txn.stats(&dead_set).map_err(MailError::Store)?;
                     if count < config.max_messages
@@ -1222,16 +1242,17 @@ impl<S: MailStore> Mailbox<S> {
     pub fn dead_exhausted(&mut self, now: DateTime<Utc>) -> Result<Vec<Exhausted>, MailError> {
         self.live()?;
         let config = self.config.clone();
-        let cap = config.delivery_cap();
         let roles = self.roles.snapshot();
         let mut moved: Vec<Exhausted> = Vec::new();
-        if cap > 0 {
+        if config.delivery_cap() > 0 || config.single_delivery_from.is_some() {
             self.store.write(&mut |txn| {
                 moved.clear();
                 for role in roles.roles.keys() {
                     let mut due = Vec::new();
                     txn.scan(role, &mut |stored| {
-                        if stored.attempts >= cap
+                        let cap = config.cap_for(&stored.envelope.from);
+                        if cap > 0
+                            && stored.attempts >= cap
                             && stored.lease.as_ref().is_none_or(|held| held.until <= now)
                         {
                             due.push(stored.clone());
@@ -1286,6 +1307,11 @@ impl<S: MailStore> Mailbox<S> {
                 let Some(mut stored) = txn.queued(&dead, &id).map_err(MailError::Store)? else {
                     continue;
                 };
+                // A single-delivery message (a daemon notice) stays dead: it was told once, and a
+                // restart must not bring its stale text back.
+                if config.single_delivery_from.as_deref() == Some(stored.envelope.from.as_str()) {
+                    continue;
+                }
                 let (count, bytes) = txn.stats(role).map_err(MailError::Store)?;
                 if count + 1 > config.max_messages
                     || bytes.saturating_add(stored.envelope.body.len() as u64) > config.max_bytes

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.216): an [UNACKED] notice is delivered once
+
+The daemon's `[UNACKED]` notice was an ordinary message, so an unacked one was redelivered at about 2, 4, 8 and 16 minutes with the age and attempts it had when it was made, and one for a message that was acked later kept arriving. It is now leased once and set aside quietly when that lease runs out (`MailConfig::single_delivery_from`, set by the daemon to its own notice sender), and a claim does not bring a dead notice back. The notice is still counted as dead-lettered for the sender. Tests: `crates/synapsed/tests/delivery_backoff.rs` (`a_notice_for_an_already_acked_original_is_not_redelivered`, and the existing back-off test now asserts no redelivery).
+
 ### Docs (rc.215): federation trust note
 
 `docs/FEDERATION_TRUST.md`: what a receiving daemon must verify for a message from another account, what the library already has (`sender_auth.rs`, certificates, replay) against the daemon path (bearer session, daemon-attested `from`), room copies keeping the original sender's proof, the two signing variants (adapter, daemon), key discovery and the local allow-list, and the stated weaknesses. No code; vouching (board 138) is not designed.
