@@ -196,7 +196,13 @@ async fn room_name_taken_by_a_role_refused_and_a_role_cannot_take_a_rooms_name()
     let store = Keystore::open(d.home.path()).unwrap();
     let identity = store.role("lounge", Utc::now()).unwrap();
     let signed_at = Utc::now().max(d.started_at + chrono::Duration::seconds(1));
-    let req = sign_claim_for(&identity, &instance_id(&d), [9u8; 16], signed_at).unwrap();
+    let req = sign_claim_for(
+        &identity,
+        &instance_id(&d),
+        *uuid::Uuid::new_v4().as_bytes(),
+        signed_at,
+    )
+    .unwrap();
     let body = json!({
         "audience": req.audience,
         "chain_pem": chain_to_pem(&req.chain),
