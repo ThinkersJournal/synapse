@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.215): federation trust note
+
+`docs/FEDERATION_TRUST.md`: what a receiving daemon must verify for a message from another account, what the library already has (`sender_auth.rs`, certificates, replay) against the daemon path (bearer session, daemon-attested `from`), room copies keeping the original sender's proof, the two signing variants (adapter, daemon), key discovery and the local allow-list, and the stated weaknesses. No code; vouching (board 138) is not designed.
+
 ### Added (rc.214): rooms registry and policy (slice R1)
 
 `src/rooms.rs`: `RoomsState`, kept in the mailbox store beside the roles (redb table `rooms`, PersistAnt key `g/state`; an absent blob decodes as empty, so existing homes load unchanged) and copied by `migrate`. A room is `name@account` in the same namespace as roles: a room cannot take a claimed role's name, and a role cannot first claim a room's name (`claim_refused`). New certificate permissions `room-create` and `room-admin`, grantable by the account holder. Daemon: `POST /v1/rooms/create`, `/delete`, `/policy`, `/invite` and `GET /v1/rooms`; a new room is visible to its creator and the account holder only (board 388), and a caller who may not see a room hears the same `404 unknown_room` as for an absent one. Room actions other than `see` are allowed by the Authorizer until A2. No join, presence or fan-out yet (R2, R3). Tests: `tests/rooms_registry.rs`, `crates/synapsed/tests/rooms.rs`, `migrate_copies_rooms`, the conformance case `rooms_are_written_through_the_store`.
