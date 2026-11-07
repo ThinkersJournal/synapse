@@ -294,6 +294,8 @@ slice, and would be a ring buffer in the room blob or a per-room queue; not desi
 
 R1 as built (rc.214): the registry, store persistence (redb, PersistAnt, `migrate`), the shared role and room namespace, `room-create` and `room-admin`, and the daemon routes `/v1/rooms` (list, filtered by `synapse:see`), `create`, `delete`, `policy`, `invite`; the Authorizer allows room actions other than `see` until A2. Tests: `tests/rooms_registry.rs`, `crates/synapsed/tests/rooms.rs`, `migrate_copies_rooms`.
 
+R2 as built (rc.217): `join`, `leave`, `remove`, `ban`, `members` (with `online`, `retired`, `deliverable`), policy and ban enforcement, hidden rooms answering `404`. An uninvited role to an invite-only room it cannot see hears `404 unknown_room`; one that can see it (a member, banned, invited, creator or a `see` grant) hears `403 join_refused`. An Open room is joinable by name by any claimed role of the account, so a `join` to an Open room reveals that it exists; moving `join` behind `synapse:see` is A2's decision. Tests: `crates/synapsed/tests/rooms.rs`.
+
 Each slice is its own PR; the PM allocates the version at gate time. Order is R1 to R5; R3 is the first that can deliver a message.
 
 ## 14. Evidence not gathered

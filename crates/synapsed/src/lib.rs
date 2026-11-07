@@ -977,6 +977,11 @@ impl Daemon {
             .route("/v1/rooms/delete", post(room_delete))
             .route("/v1/rooms/policy", post(room_policy))
             .route("/v1/rooms/invite", post(room_invite))
+            .route("/v1/rooms/join", post(room_join))
+            .route("/v1/rooms/leave", post(room_leave))
+            .route("/v1/rooms/remove", post(room_remove))
+            .route("/v1/rooms/ban", post(room_ban))
+            .route("/v1/rooms/members", get(room_members))
             .route("/v1/state/create", post(state_api::create))
             .route("/v1/state/get", get(state_api::get))
             .route("/v1/state/list", get(state_api::list))
@@ -1112,6 +1117,12 @@ impl From<MailError> for ApiError {
                 }
                 synapse::rooms::RoomError::NotModerator => {
                     ApiError::new(StatusCode::FORBIDDEN, "not_moderator", e)
+                }
+                synapse::rooms::RoomError::JoinRefused => {
+                    ApiError::new(StatusCode::FORBIDDEN, "join_refused", e)
+                }
+                synapse::rooms::RoomError::RoomFull => {
+                    ApiError::new(StatusCode::TOO_MANY_REQUESTS, "room_full", e)
                 }
             },
             MailError::InvalidState(_)
@@ -2648,6 +2659,183 @@ async fn room_invite(
     );
     result.map_err(|e| room_refusal(&shared, &global_id, &session.global_id, e))?;
     Ok(axum::Json(json!({ "room": global_id, "invited": body.invitee })).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomMemberBody {
+    room: String,
+    /// `role@account`.
+    member: String,
+}
+
+/// May `session` see `global_id`: `synapse:see` on it, or it is a member, moderator, creator,
+/// invited or on its allow-list? What it may not see answers as unknown.
+fn room_visible_to(shared: &Shared, session: &Session, global_id: &str) -> bool {
+    let object = format!("room:{global_id}");
+    if shared
+        .access
+        .decide(
+            principal_of(session),
+            access::Action::See,
+            &object,
+            access::Freshness::Cached,
+        )
+        .allowed()
+    {
+        return true;
+    }
+    let me = session.global_id.as_str();
+    shared.mailbox.lock().is_ok_and(|m| {
+        m.rooms_snapshot().rooms.get(global_id).is_some_and(|r| {
+            r.members.contains_key(me)
+                || r.banned.contains(me)
+                || r.moderators.contains(me)
+                || r.creator == me
+                || r.invites.contains(me)
+                || matches!(&r.join_policy, synapse::rooms::JoinPolicy::AllowList(l) if l.contains(me))
+        })
+    })
+}
+
+fn unknown_room() -> ApiError {
+    ApiError::new(
+        StatusCode::NOT_FOUND,
+        "unknown_room",
+        synapse::rooms::RoomError::Unknown,
+    )
+}
+
+/// `POST /v1/rooms/join {room}`: the caller joins, and only the caller: the joiner is the
+/// session, never a field of the request. The room's join policy decides; a role that may not see
+/// the room hears the same `404` as for an absent one.
+async fn room_join(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    room_allowed(&shared, &session, access::Action::Join, &object)?;
+    let result = locked(&shared.mailbox)?.join_room(&global_id, &session.global_id, Utc::now());
+    match result {
+        Ok(can_send) => Ok(axum::Json(
+            json!({ "room": global_id, "joined": true, "muted": !can_send }),
+        )
+        .into_response()),
+        Err(MailError::Room(synapse::rooms::RoomError::JoinRefused))
+            if !room_visible_to(&shared, &session, &global_id) =>
+        {
+            Err(unknown_room())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// `POST /v1/rooms/leave {room}`: the caller leaves (a no-op if it was not in).
+async fn room_leave(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomBody = parse(&headers, &body)?;
+    let (global_id, _) = room_ids(&shared, &body.room)?;
+    if !room_visible_to(&shared, &session, &global_id) {
+        return Err(unknown_room());
+    }
+    locked(&shared.mailbox)?.leave_room(&global_id, &session.global_id)?;
+    Ok(axum::Json(json!({ "room": global_id, "left": true })).into_response())
+}
+
+/// `POST /v1/rooms/remove {room, member}` and `/ban`: the creator, a moderator or an admin.
+async fn room_remove(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    room_moderate(state.0, headers, body, false)
+}
+
+async fn room_ban(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    room_moderate(state.0, headers, body, true)
+}
+
+fn room_moderate(
+    shared: Arc<Shared>,
+    headers: HeaderMap,
+    body: Bytes,
+    ban: bool,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let body: RoomMemberBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    if !synapse::rooms::valid_room_id(&body.member) {
+        return Err(malformed("member"));
+    }
+    room_allowed(&shared, &session, access::Action::ManageRoom, &object)?;
+    let admin = room_admin(&session);
+    let result = {
+        let mut mailbox = locked(&shared.mailbox)?;
+        if ban {
+            mailbox.ban_from_room(&global_id, &session.global_id, admin, &body.member)
+        } else {
+            mailbox.remove_from_room(&global_id, &session.global_id, admin, &body.member)
+        }
+    };
+    result.map_err(|e| room_refusal(&shared, &global_id, &session.global_id, e))?;
+    Ok(
+        axum::Json(json!({ "room": global_id, "member": body.member, "banned": ban }))
+            .into_response(),
+    )
+}
+
+/// `GET /v1/rooms/members?room=name`: who is in the room and who would be delivered to now
+/// (claimed, not retired, online). Visible to what may see the room, else `404`.
+async fn room_members(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let name = query_param(&uri, "room").ok_or_else(|| malformed("room"))?;
+    let (global_id, _) = room_ids(&shared, &name)?;
+    if !room_visible_to(&shared, &session, &global_id) {
+        return Err(unknown_room());
+    }
+    let (rooms, roles) = {
+        let mailbox = locked(&shared.mailbox)?;
+        (mailbox.rooms_snapshot(), mailbox.roles_snapshot())
+    };
+    let room = rooms.rooms.get(&global_id).ok_or_else(unknown_room)?;
+    let presence = locked(&shared.presence)?;
+    let now = Utc::now();
+    let members: Vec<Value> = room
+        .members
+        .iter()
+        .map(|(id, m)| {
+            let online = presence
+                .get(id)
+                .is_some_and(|p| now - p.last_seen <= shared.online_window);
+            let record = roles.roles.get(id);
+            let retired = record.is_some_and(|r| r.retired_at.is_some());
+            json!({
+                "member": id,
+                "can_send": m.can_send,
+                "online": online,
+                "retired": retired,
+                "deliverable": online && record.is_some() && !retired,
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({ "room": global_id, "members": members })).into_response())
 }
 
 /// `GET /v1/rooms`: the rooms the caller may see (`synapse:see` on the room).

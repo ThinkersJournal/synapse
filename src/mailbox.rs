@@ -783,6 +783,61 @@ impl<S: MailStore> Mailbox<S> {
         })
     }
 
+    /// `joiner` joins a room (under its own authority; see [`RoomsState::join`]). Returns whether
+    /// it may post.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn join_room(
+        &mut self,
+        global_id: &str,
+        joiner: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, MailError> {
+        let mut can_send = false;
+        self.change_rooms(|rooms, _| {
+            can_send = rooms.join(global_id, joiner, now)?;
+            Ok(())
+        })?;
+        Ok(can_send)
+    }
+
+    /// `who` leaves a room.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn leave_room(&mut self, global_id: &str, who: &str) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.leave(global_id, who).map(|_| ()))
+    }
+
+    /// Remove `target` from a room.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn remove_from_room(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+        target: &str,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.remove(global_id, actor, admin, target).map(|_| ()))
+    }
+
+    /// Remove `target` from a room and refuse its rejoining.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn ban_from_room(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+        target: &str,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.ban(global_id, actor, admin, target))
+    }
+
     /// Invite `invitee` to a room.
     ///
     /// # Errors

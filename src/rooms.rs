@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 /// Rooms one account may hold (`docs/ROOMS_DESIGN.md` section 10).
 pub const MAX_ROOMS: usize = 16;
 
+/// Members one room may hold (`docs/ROOMS_DESIGN.md` section 10).
+pub const MAX_MEMBERS: usize = 32;
+
 /// Who may join.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -87,6 +90,10 @@ pub enum RoomError {
     Unknown,
     /// The actor is not the creator, a moderator, or an admin.
     NotModerator,
+    /// The join policy does not admit the joiner, or the joiner is banned.
+    JoinRefused,
+    /// The room is at [`MAX_MEMBERS`].
+    RoomFull,
 }
 
 impl fmt::Display for RoomError {
@@ -97,6 +104,8 @@ impl fmt::Display for RoomError {
             RoomError::RoomCap => "the account has reached its room limit",
             RoomError::Unknown => "no such room",
             RoomError::NotModerator => "only the room's creator or a moderator may do that",
+            RoomError::JoinRefused => "the room does not admit this role",
+            RoomError::RoomFull => "the room has reached its member limit",
         })
     }
 }
@@ -187,6 +196,98 @@ impl RoomsState {
         Ok(())
     }
 
+    /// `joiner` joins `global_id` under its own authority: the join policy decides, a ban refuses,
+    /// and the room has a member cap. Joining again is a no-op. Returns whether the joiner may
+    /// post (a room that mutes new joiners says `false`). An invitation is used up by the join.
+    ///
+    /// # Errors
+    /// [`RoomError::Unknown`], [`RoomError::JoinRefused`], [`RoomError::RoomFull`].
+    pub fn join(
+        &mut self,
+        global_id: &str,
+        joiner: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, RoomError> {
+        let room = self.rooms.get_mut(global_id).ok_or(RoomError::Unknown)?;
+        if room.banned.contains(joiner) {
+            return Err(RoomError::JoinRefused);
+        }
+        if let Some(member) = room.members.get(joiner) {
+            return Ok(member.can_send);
+        }
+        let admitted = match &room.join_policy {
+            JoinPolicy::Open => true,
+            JoinPolicy::AllowList(listed) => listed.contains(joiner),
+            JoinPolicy::InviteOnly => room.invites.contains(joiner),
+        };
+        if !admitted {
+            return Err(RoomError::JoinRefused);
+        }
+        if room.members.len() >= MAX_MEMBERS {
+            return Err(RoomError::RoomFull);
+        }
+        let can_send = room.default_send == DefaultSend::Speak;
+        room.invites.remove(joiner);
+        room.members.insert(
+            joiner.to_string(),
+            Member {
+                joined_at: now,
+                can_send,
+                mention_only: false,
+            },
+        );
+        Ok(can_send)
+    }
+
+    /// `who` leaves; leaving a room one is not in is a no-op. Returns whether it was a member.
+    ///
+    /// # Errors
+    /// [`RoomError::Unknown`].
+    pub fn leave(&mut self, global_id: &str, who: &str) -> Result<bool, RoomError> {
+        let room = self.rooms.get_mut(global_id).ok_or(RoomError::Unknown)?;
+        Ok(room.members.remove(who).is_some())
+    }
+
+    /// Remove `target` from the room (it may rejoin if the policy allows). The creator is not
+    /// removed by anyone else.
+    ///
+    /// # Errors
+    /// [`RoomError::Unknown`], [`RoomError::NotModerator`].
+    pub fn remove(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+        target: &str,
+    ) -> Result<bool, RoomError> {
+        let room = self.managed(global_id, actor, admin)?;
+        if target == room.creator && actor != room.creator {
+            return Err(RoomError::NotModerator);
+        }
+        Ok(room.members.remove(target).is_some())
+    }
+
+    /// Remove `target` and refuse its rejoining. The creator is not banned by anyone else.
+    ///
+    /// # Errors
+    /// [`RoomError::Unknown`], [`RoomError::NotModerator`].
+    pub fn ban(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+        target: &str,
+    ) -> Result<(), RoomError> {
+        let room = self.managed(global_id, actor, admin)?;
+        if target == room.creator {
+            return Err(RoomError::NotModerator);
+        }
+        room.members.remove(target);
+        room.invites.remove(target);
+        room.banned.insert(target.to_string());
+        Ok(())
+    }
+
     /// Invite `invitee`; the invitation is accepted by the invitee's own join (R2).
     ///
     /// # Errors
@@ -265,6 +366,74 @@ mod tests {
         assert_eq!(
             s.create("extra@acct", "account", now(), false),
             Err(RoomError::RoomCap)
+        );
+    }
+
+    #[test]
+    fn join_follows_the_policy_a_ban_and_the_cap() {
+        let mut s = RoomsState::default();
+        s.create("lounge@acct", "pm@acct", now(), false)
+            .expect("create");
+        assert_eq!(s.join("lounge@acct", "dev@acct", now()), Ok(true), "open");
+        assert_eq!(
+            s.join("lounge@acct", "dev@acct", now()),
+            Ok(true),
+            "again is a no-op"
+        );
+        s.set_policy(
+            "lounge@acct",
+            "pm@acct",
+            false,
+            JoinPolicy::InviteOnly,
+            DefaultSend::Muted,
+        )
+        .expect("policy");
+        assert_eq!(
+            s.join("lounge@acct", "ops@acct", now()),
+            Err(RoomError::JoinRefused)
+        );
+        s.invite("lounge@acct", "pm@acct", false, "ops@acct")
+            .expect("invite");
+        assert_eq!(
+            s.join("lounge@acct", "ops@acct", now()),
+            Ok(false),
+            "muted on arrival"
+        );
+        assert!(
+            !s.rooms["lounge@acct"].invites.contains("ops@acct"),
+            "invite used up"
+        );
+        s.ban("lounge@acct", "pm@acct", false, "ops@acct")
+            .expect("ban");
+        s.invite("lounge@acct", "pm@acct", false, "ops@acct")
+            .expect("invite again");
+        assert_eq!(
+            s.join("lounge@acct", "ops@acct", now()),
+            Err(RoomError::JoinRefused),
+            "banned"
+        );
+        assert_eq!(
+            s.ban("lounge@acct", "dev@acct", false, "pm@acct"),
+            Err(RoomError::NotModerator)
+        );
+        assert_eq!(
+            s.ban("lounge@acct", "pm@acct", false, "pm@acct"),
+            Err(RoomError::NotModerator)
+        );
+        s.set_policy(
+            "lounge@acct",
+            "pm@acct",
+            false,
+            JoinPolicy::Open,
+            DefaultSend::Speak,
+        )
+        .expect("policy");
+        for i in 0..MAX_MEMBERS {
+            let _ = s.join("lounge@acct", &format!("r{i}@acct"), now());
+        }
+        assert_eq!(
+            s.join("lounge@acct", "late@acct", now()),
+            Err(RoomError::RoomFull)
         );
     }
 
