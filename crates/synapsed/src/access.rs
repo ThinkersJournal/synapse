@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Who may see and message whom (`docs/ACCESS_CONTROL_DESIGN.md`, slice A1).
 //!
 //! The daemon asks an [`Authorizer`] and enforces the answer; what decides is behind the trait. A1

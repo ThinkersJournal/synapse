@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Shared by the daemon tests.
 
 /// Seed `<home>/access.json` with an allow-all rule before the daemon first opens the home, so a
