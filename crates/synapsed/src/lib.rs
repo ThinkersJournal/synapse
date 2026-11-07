@@ -1531,6 +1531,9 @@ async fn send(
             if id.is_empty()
                 || id.len() > MAX_CLIENT_ID
                 || id.contains('/')
+                // `#` marks a room copy's id (`<sender>/<id>#<room>`): a direct message cannot
+                // claim to come from a room.
+                || id.contains('#')
                 || id.chars().any(char::is_control)
             {
                 return Err(malformed("message_id"));
