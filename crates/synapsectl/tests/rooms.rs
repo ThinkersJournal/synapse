@@ -251,3 +251,89 @@ fn a_bad_room_name_or_policy_is_a_usage_error_before_any_daemon_call() {
         );
     }
 }
+
+#[test]
+fn the_access_commands_share_list_and_revoke() {
+    let home = home_where_pm_makes_rooms();
+    home.ok(&["room", "create", "--role", "pm", "lounge"]);
+    // A new room is its creator's: dev sees nothing until pm shares it.
+    let before = json_of(&home.ok(&["room", "list", "--role", "dev"]));
+    assert_eq!(before["rooms"], serde_json::json!([]), "{before}");
+    let granted = json_of(&home.ok(&[
+        "access",
+        "grant",
+        "--role",
+        "pm",
+        "--to",
+        "dev@acct",
+        "--action",
+        "see",
+        "--object",
+        "room:lounge@acct",
+    ]));
+    let id = granted["id"].as_str().unwrap().to_string();
+    let after = json_of(&home.ok(&["room", "list", "--role", "dev"]));
+    assert_eq!(after["rooms"][0]["room"], "lounge@acct", "{after}");
+    // The grant is listed for the one who issued it and the one who holds it.
+    let mine = json_of(&home.ok(&["access", "list", "--role", "pm"]));
+    assert_eq!(mine["grants"][0]["id"], id.as_str(), "{mine}");
+    let theirs = json_of(&home.ok(&["access", "list", "--role", "dev"]));
+    assert_eq!(theirs["grants"][0]["id"], id.as_str(), "{theirs}");
+    // dev may not revoke what pm gave it; pm may.
+    let out = home.run(&["access", "revoke", "--role", "dev", &id]);
+    assert_ne!(out.status.code(), Some(0), "the holder revoked the grant");
+    let revoked = json_of(&home.ok(&["access", "revoke", "--role", "pm", &id]));
+    assert_eq!(revoked["revoked"], true, "{revoked}");
+    let gone = json_of(&home.ok(&["room", "list", "--role", "dev"]));
+    assert_eq!(gone["rooms"], serde_json::json!([]), "{gone}");
+}
+
+#[test]
+fn a_bad_grant_is_a_usage_error_before_any_daemon_call() {
+    let home = Home::new();
+    let base = ["access", "grant", "--role", "pm"];
+    let cases: [&[&str]; 5] = [
+        &[
+            "--to",
+            "dev",
+            "--action",
+            "see",
+            "--object",
+            "room:lounge@acct",
+        ],
+        &[
+            "--to",
+            "dev@acct",
+            "--action",
+            "peek",
+            "--object",
+            "room:lounge@acct",
+        ],
+        &[
+            "--to",
+            "dev@acct",
+            "--action",
+            "see",
+            "--object",
+            "lounge@acct",
+        ],
+        &[
+            "--to",
+            "dev@acct",
+            "--action",
+            "see",
+            "--object",
+            "room:a b@acct",
+        ],
+        &["--to", "dev@acct", "--object", "room:lounge@acct"],
+    ];
+    for extra in cases {
+        let args: Vec<&str> = base.iter().chain(extra.iter()).copied().collect();
+        let out = home.run(&args);
+        assert_ne!(out.status.code(), Some(0), "{args:?} was accepted");
+        assert!(
+            home.announced_pid().is_none(),
+            "{args:?} started a daemon: the refusal must come first"
+        );
+    }
+}

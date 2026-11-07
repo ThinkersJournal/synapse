@@ -263,13 +263,16 @@ async fn the_tool_set_and_the_untrusted_wording() {
         [
             "ack",
             "fetch",
+            "grants",
             "join",
             "leave",
             "list",
             "members",
+            "revoke_share",
             "rooms",
             "send",
             "set_summary",
+            "share",
             "whoami"
         ]
     );
@@ -807,4 +810,75 @@ async fn join_can_ask_for_mentions_only() {
         )
         .await;
     assert_eq!(named["room"]["delivered"], 1, "{named}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn share_grants_lists_and_revokes_what_a_creator_owns() {
+    let home = home_where_alice_makes_rooms();
+    let alice = agent(&home, "alice").await;
+    let bob = agent(&home, "bob").await;
+    create_room(&home, "alice", "lounge").await;
+    assert_eq!(
+        bob.ok("rooms", json!({})).await["rooms"],
+        json!([]),
+        "a new room is alice's"
+    );
+    let shared = alice
+        .ok(
+            "share",
+            json!({"to": "bob@acct", "actions": ["see"], "objects": ["room:lounge@acct"]}),
+        )
+        .await;
+    let id = shared["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        bob.ok("rooms", json!({})).await["rooms"][0]["room"],
+        "lounge@acct"
+    );
+    assert_eq!(
+        alice.ok("grants", json!({})).await["grants"][0]["id"],
+        id.as_str()
+    );
+    assert_eq!(
+        bob.ok("grants", json!({})).await["grants"][0]["id"],
+        id.as_str()
+    );
+    // bob may not take back what alice gave him; alice may.
+    assert!(
+        !bob.refused("revoke_share", json!({"id": id}))
+            .await
+            .is_empty()
+    );
+    let revoked = alice.ok("revoke_share", json!({"id": id})).await;
+    assert_eq!(revoked["revoked"], true, "{revoked}");
+    assert_eq!(bob.ok("rooms", json!({})).await["rooms"], json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_malformed_share_is_refused_before_the_daemon_hears_it() {
+    let home = Home::new();
+    let alice = agent(&home, "alice").await;
+    let good = json!({"to": "bob@acct", "actions": ["see"], "objects": ["room:lounge@acct"]});
+    for (field, value) in [
+        ("to", json!("bob")),
+        ("actions", json!(["peek"])),
+        ("actions", json!([])),
+        ("objects", json!(["lounge@acct"])),
+        ("objects", json!(["room:a b@acct"])),
+        ("objects", json!([])),
+    ] {
+        let mut args = good.clone();
+        args[field] = value.clone();
+        let why = alice.refused("share", args).await;
+        // The words are the adapter's own (check_share): a daemon refusal would not match.
+        assert!(
+            why.contains("must be role@account")
+                || why.contains("is not an action")
+                || why.contains("give one to")
+                || why.contains("is not agent:role@account"),
+            "{field}={value}: not refused by the adapter's own check: {why}"
+        );
+    }
+    // The control: a well-formed share for a room that does not exist reaches the daemon.
+    let why = alice.refused("share", good).await;
+    assert!(why.contains("no such") || why.contains("unknown"), "{why}");
 }
