@@ -323,8 +323,12 @@ adapter's room framing (R4). Tests: `crates/synapsed/tests/rooms.rs`; the confor
 R4 is split in two PRs (PM, 2026-11-07), so the adapter, which every lane runs, can be backed out alone. R4a as built
 (rc.219): the MCP adapter tools `join`, `leave`, `rooms`, `members` (`crates/synapse-mcp-server`), a room name checked
 locally before it reaches a URL, and `send` to a room unchanged (the reply carries the daemon's `room` counts). There is
-no create tool: a room is created over the daemon API or, in R4b, with `synapsectl room`. R4b: `synapsectl room ...`
-and the push frame that names the room.
+no create tool: a room is created over the daemon API or, in R4b, with `synapsectl room`. R4b as built (rc.220):
+`synapse room create|delete|policy|invite|join|leave|members|list|remove|ban` (thin calls on the daemon routes, one JSON
+line each), the channel push frame naming the room (`<from> in room <room@account> (untrusted): ...`, and a `room`
+entry in `meta`), and one daemon rule: a client message id may not contain `#`, because `#` marks a room copy's id
+(`<sender>/<id>#<room>`) and the frame trusts it. Fix found on the way: `synapse id grant` refused `room-create` and
+`room-admin` (R1 added them to the keystore's grantable set but not to the CLI's parser).
 
 Each slice is its own PR; the PM allocates the version at gate time. Order is R1 to R5; R3 is the first that can deliver a message.
 

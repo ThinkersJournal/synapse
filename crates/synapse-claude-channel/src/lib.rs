@@ -87,6 +87,9 @@ fn escape(text: &str, multiline: bool) -> String {
 /// message); `/v1/fetch`, the `inbox` tool and `list` still carry it.
 fn channel_meta(message: &MessageView, from: &str, id: &str) -> Value {
     let mut meta = json!({ "sender": from, "message_id": id });
+    if let Some(room) = message.room() {
+        meta["room"] = Value::String(escape(room, false));
+    }
     if let Some(summary) = message.from_summary() {
         meta["sender_summary"] = Value::String(escape(summary, false));
     }
@@ -102,9 +105,14 @@ pub fn channel_params(message: &MessageView) -> Value {
         Some(body) => escape(body, true),
         None => "[the body is not UTF-8 text and was not shown]".to_string(),
     };
+    // A room copy says so in its first words; the "(untrusted)" marker stays (CireSnave's rule).
+    let who = match message.room() {
+        Some(room) => format!("{from} in room {}", escape(room, false)),
+        None => from.clone(),
+    };
     json!({
         "content": format!(
-            "{from} (untrusted): {body}"
+            "{who} (untrusted): {body}"
         ),
         "meta": channel_meta(message, &from, &id),
     })
@@ -163,6 +171,29 @@ mod tests {
     use super::{channel_params, escape};
     use serde_json::json;
     use synapse_mcp_server::MessageView;
+
+    /// A room copy names its room in the first words and in `meta`; a direct message does not, and
+    /// an id that only looks like a room suffix names nothing. The "(untrusted)" marker stays.
+    #[test]
+    fn a_room_copy_names_its_room_and_a_direct_message_does_not() {
+        let copy = json!({
+            "message_id": "pm@acct/p1#lounge@acct", "from": "pm@acct", "body_b64": "aGk=",
+        });
+        let params = channel_params(&MessageView::from_wire(&copy));
+        assert_eq!(
+            params["content"],
+            "pm@acct in room lounge@acct (untrusted): hi"
+        );
+        assert_eq!(params["meta"]["room"], "lounge@acct");
+        let direct = json!({"message_id": "pm@acct/p1", "from": "pm@acct", "body_b64": "aGk="});
+        let params = channel_params(&MessageView::from_wire(&direct));
+        assert_eq!(params["content"], "pm@acct (untrusted): hi");
+        assert!(params["meta"].get("room").is_none(), "{params}");
+        let lookalike =
+            json!({"message_id": "pm@acct/x#not a room", "from": "pm@acct", "body_b64": "aGk="});
+        let params = channel_params(&MessageView::from_wire(&lookalike));
+        assert_eq!(params["content"], "pm@acct (untrusted): hi");
+    }
 
     /// The adapter shows the model what the daemon sent and nothing it did not: the daemon payload
     /// carries no verification or sealing field, so no text built from it may say a message is

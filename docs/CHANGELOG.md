@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.220): synapsectl room commands and the push frame names the room (slice R4b)
+
+`synapse room create|delete|policy|invite|join|leave|members|list|remove|ban`: thin calls on the daemon's `/v1/rooms*` routes, each printing the daemon's reply as one JSON line; a room is `name` or `name@account`, and a bad name or policy is a usage error before any daemon call. The `synapse-claude-channel` push frame for a room copy begins `<from> in room <room@account> (untrusted): ...` and its `meta` carries `room`; a direct message is unchanged. `MessageView::room()` reads the room from the copy's id. **Behaviour change:** the daemon now refuses a client `message_id` containing `#` (`400 malformed`), because `#` marks a room copy's id and a direct message must not be able to pose as a room post. **Fix:** `synapse id grant --role R room-create` (and `room-admin`) was refused by the CLI although the keystore accepts them. Tests: `crates/synapsectl/tests/rooms.rs`, `crates/synapsed/tests/rooms.rs` (`a_client_id_cannot_carry_a_room_suffix`), `crates/synapse-claude-channel/src/lib.rs` (`a_room_copy_names_its_room_and_a_direct_message_does_not`).
+
 ### Added (rc.219): room tools in the MCP adapter (slice R4a)
 
 `synapse-mcp` gains four tools: `join`, `leave`, `rooms` and `members` (the daemon's `/v1/rooms*` routes). A room is named `name` or `name@account`; a name that is not letters, digits, `-` or `_` is refused in the adapter before a URL is built. Sending to a room is the existing `send` tool and its reply carries the daemon's `room` counts. No tool creates a room (R4b: `synapsectl room`). The tool set grows from six to ten: a client that pins the list must be updated ( serves the same tools, and its foreign-client test pins them). Tests: `crates/synapse-mcp-server/tests/adapter.rs` (`the_room_tools_join_list_members_post_and_leave`, `a_room_name_of_the_wrong_shape_is_refused_before_the_daemon_hears_it`, and the tool-set test).

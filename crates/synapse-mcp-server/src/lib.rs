@@ -442,6 +442,15 @@ impl MessageView {
         self.message_id.as_deref()
     }
 
+    /// The room this message was posted to, `name@account`, when it is a room copy: the daemon
+    /// gives a copy the id `<sender>/<client id>#<room>`, and refuses `#` in a client id, so a
+    /// direct message cannot carry one.
+    pub fn room(&self) -> Option<&str> {
+        let id = self.message_id.as_deref()?;
+        let (_, room) = id.rsplit_once('#')?;
+        synapse::rooms::valid_room_id(room).then_some(room)
+    }
+
     /// The sender's global id, as the daemon verified it.
     pub fn from(&self) -> Option<&str> {
         self.from.as_deref()

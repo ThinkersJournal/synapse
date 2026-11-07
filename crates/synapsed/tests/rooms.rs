@@ -749,3 +749,40 @@ async fn membership_is_the_consent_no_per_pair_send_check() {
     );
     d.stop().await;
 }
+
+#[tokio::test]
+async fn a_client_id_cannot_carry_a_room_suffix() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    claim(&d, "dev").await;
+    // `#` marks a room copy's id; a direct message that carried one could pose as a room post.
+    let (status, reply) = call(
+        &d,
+        &pm,
+        "/v1/send",
+        Some(
+            json!({"to": "dev@acct", "message_id": "x#lounge@acct", "body_b64": B64.encode(b"hi")}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (400, Some("malformed")),
+        "{reply}"
+    );
+    // The control: the same id without the suffix is accepted by the id check (the send itself is
+    // then judged on access, not on the id).
+    let (status, reply) = call(
+        &d,
+        &pm,
+        "/v1/send",
+        Some(json!({"to": "dev@acct", "message_id": "x", "body_b64": B64.encode(b"hi")})),
+    )
+    .await;
+    assert_ne!(
+        reply["error"].as_str(),
+        Some("malformed"),
+        "{status} {reply}"
+    );
+    d.stop().await;
+}

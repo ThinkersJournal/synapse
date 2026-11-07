@@ -43,6 +43,10 @@ enum Command {
     /// Shared state between lanes: one record per cross-lane thread, written by compare-and-set.
     #[command(subcommand)]
     State(StateCommand),
+    /// Rooms: a shared channel whose joined, online members receive what is posted. Post with
+    /// `send --to <room>`; sending never joins.
+    #[command(subcommand)]
+    Room(RoomCommand),
     /// Claim a role on the daemon (taking it over if another holder has it).
     ///
     /// The session is cached per role in this home, so every `synapse` command for the role here
@@ -429,6 +433,185 @@ fn state_command(home: &std::path::Path, command: StateCommand) -> Result<(), Ma
     Ok(())
 }
 
+/// `synapse room ...`: thin calls on the daemon's `/v1/rooms*` routes. A room is `name` or
+/// `name@account`. Each prints the daemon's reply as one JSON line.
+#[derive(Subcommand)]
+enum RoomCommand {
+    /// Create a room (needs `room-create`). Only you and the account holder see it until a rule
+    /// says otherwise.
+    Create {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+    },
+    /// Delete a room you created or moderate.
+    Delete {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+    },
+    /// Set who may join and whether new joiners may post.
+    Policy {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+        /// `open`, `invite-only`, or `allow-list` (with one or more --allow).
+        #[arg(long)]
+        join: String,
+        /// A role (`role@account`) the allow-list admits; repeat for several.
+        #[arg(long)]
+        allow: Vec<String>,
+        /// New joiners are muted (they receive, but do not post).
+        #[arg(long)]
+        muted: bool,
+    },
+    /// Invite a role (`role@account`); the invitation is used by that role's own join.
+    Invite {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+        invitee: String,
+    },
+    /// Join a room as this role.
+    Join {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+    },
+    /// Leave a room.
+    Leave {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+    },
+    /// Who is in a room, and whether each member is online, retired and deliverable.
+    Members {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+    },
+    /// The rooms this role may see.
+    List {
+        #[command(flatten)]
+        role: RoleArg,
+    },
+    /// Remove a member (it may rejoin if the policy allows).
+    Remove {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+        /// `role@account`.
+        member: String,
+    },
+    /// Remove a member and refuse its rejoining.
+    Ban {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+        /// `role@account`.
+        member: String,
+    },
+}
+
+/// The bare room name the daemon's routes take, from `name` or `name@account`.
+fn room_name(room: &str) -> Result<String, MailError> {
+    let name = room.split_once('@').map_or(room, |(name, _)| name);
+    if valid_name(name) {
+        Ok(name.to_string())
+    } else {
+        Err(MailError::Usage(format!(
+            "`{room}` is not a room name: use [A-Za-z0-9_-], at most 64 characters"
+        )))
+    }
+}
+
+/// The daemon's room-policy body for `--join` and `--allow`.
+fn join_policy(join: &str, allow: &[String]) -> Result<serde_json::Value, MailError> {
+    match (join, allow.is_empty()) {
+        ("open", true) => Ok(json!("open")),
+        ("invite-only", true) => Ok(json!("invite-only")),
+        ("allow-list", false) => Ok(json!({"allow-list": allow})),
+        ("allow-list", true) => Err(MailError::Usage(
+            "--join allow-list needs at least one --allow role@account".to_string(),
+        )),
+        ("open" | "invite-only", false) => Err(MailError::Usage(
+            "--allow only goes with --join allow-list".to_string(),
+        )),
+        _ => Err(MailError::Usage(
+            "--join is open, invite-only or allow-list".to_string(),
+        )),
+    }
+}
+
+fn room_command(home: &std::path::Path, command: RoomCommand) -> Result<(), MailError> {
+    let (role, path, body): (RoleArg, String, Option<serde_json::Value>) = match command {
+        RoomCommand::Create { role, room } => (
+            role,
+            "/v1/rooms/create".into(),
+            Some(json!({"room": room_name(&room)?})),
+        ),
+        RoomCommand::Delete { role, room } => (
+            role,
+            "/v1/rooms/delete".into(),
+            Some(json!({"room": room_name(&room)?})),
+        ),
+        RoomCommand::Policy {
+            role,
+            room,
+            join,
+            allow,
+            muted,
+        } => (
+            role,
+            "/v1/rooms/policy".into(),
+            Some(json!({
+                "room": room_name(&room)?,
+                "join_policy": join_policy(&join, &allow)?,
+                "default_send": if muted { "muted" } else { "speak" },
+            })),
+        ),
+        RoomCommand::Invite {
+            role,
+            room,
+            invitee,
+        } => (
+            role,
+            "/v1/rooms/invite".into(),
+            Some(json!({"room": room_name(&room)?, "invitee": invitee})),
+        ),
+        RoomCommand::Join { role, room } => (
+            role,
+            "/v1/rooms/join".into(),
+            Some(json!({"room": room_name(&room)?})),
+        ),
+        RoomCommand::Leave { role, room } => (
+            role,
+            "/v1/rooms/leave".into(),
+            Some(json!({"room": room_name(&room)?})),
+        ),
+        RoomCommand::Members { role, room } => (
+            role,
+            format!("/v1/rooms/members?room={}", room_name(&room)?),
+            None,
+        ),
+        RoomCommand::List { role } => (role, "/v1/rooms".into(), None),
+        RoomCommand::Remove { role, room, member } => (
+            role,
+            "/v1/rooms/remove".into(),
+            Some(json!({"room": room_name(&room)?, "member": member})),
+        ),
+        RoomCommand::Ban { role, room, member } => (
+            role,
+            "/v1/rooms/ban".into(),
+            Some(json!({"room": room_name(&room)?, "member": member})),
+        ),
+    };
+    let daemon = connect(home, &role)?;
+    let reply = daemon.call(&role.role, &path, body.as_ref())?;
+    println!("{reply}");
+    Ok(())
+}
+
 #[derive(clap::Args)]
 struct RoleArg {
     /// The role to act as.
@@ -515,8 +698,8 @@ enum IdCommand {
         #[arg(long)]
         role: String,
     },
-    /// With the account key: give --role an extra grant (state-read-all, state-admin or
-    /// state-derive). It takes effect when the role's certificate is next made.
+    /// With the account key: give --role an extra grant (state-read-all, state-admin,
+    /// state-derive, role-admin, daemon-admin, room-create or room-admin). It takes effect when the role's certificate is next made.
     Grant {
         #[arg(long)]
         role: String,
@@ -594,7 +777,9 @@ fn parse_grant(text: &str) -> Result<Permission, MailError> {
             | Permission::StateAdmin
             | Permission::StateDerive
             | Permission::RoleAdmin
-            | Permission::DaemonAdmin),
+            | Permission::DaemonAdmin
+            | Permission::RoomCreate
+            | Permission::RoomAdmin),
         ) => Ok(p),
         _ => Err(MailError::Usage(
             "a grant is state-read-all, state-admin, state-derive, role-admin, daemon-admin, room-create or room-admin"
@@ -849,6 +1034,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 printable(reply["outcome"].as_str().unwrap_or(""))
             );
         }
+        Command::Room(command) => room_command(&home, command)?,
         Command::Retire { role, target } => {
             let daemon = connect(&home, &role)?;
             let reply = daemon.call(
