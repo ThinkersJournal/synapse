@@ -349,6 +349,62 @@ async fn send_fetch_ack_list_summary_and_whoami() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generated_ids_are_short_and_a_long_older_id_still_acks() {
+    let home = Home::new();
+    let alice = agent(&home, "alice").await;
+    let bob = agent(&home, "bob").await;
+
+    // Row 41 V2: the id the adapter makes is `<role>@<account>/<start>-<pid>-<n>`, not the old
+    // `mcp-<pid>-<nanoseconds>-<n>` (33 bytes of client id).
+    let mut ids = Vec::new();
+    for n in 0..5 {
+        let sent = alice
+            .ok("send", json!({"to": "bob", "body": format!("m{n}")}))
+            .await;
+        ids.push(sent["message_id"].as_str().unwrap().to_string());
+    }
+    let distinct: std::collections::HashSet<_> = ids.iter().collect();
+    assert_eq!(distinct.len(), 5, "{ids:?}");
+    for id in &ids {
+        let client_part = id
+            .strip_prefix("alice@acct/")
+            .unwrap_or_else(|| panic!("{id}"));
+        assert!(client_part.len() < 20, "{client_part} is not short");
+        assert!(!client_part.starts_with("mcp-"), "{client_part}");
+    }
+
+    // An id made by an older build (long, with nanoseconds) is just an opaque string to the daemon:
+    // it sends, fetches and acks as before, so a transition leaves nothing stuck.
+    let old = "mcp-25684-1793488356941680200-395";
+    let sent = alice
+        .ok(
+            "send",
+            json!({"to": "bob", "body": "old", "message_id": old}),
+        )
+        .await;
+    assert_eq!(sent["message_id"], format!("alice@acct/{old}"));
+    // Resent with the same id it is a duplicate (dedupe is by recipient and id), not a second copy.
+    let again = alice
+        .ok(
+            "send",
+            json!({"to": "bob", "body": "old", "message_id": old}),
+        )
+        .await;
+    assert_eq!(again["outcome"], "duplicate", "{again}");
+    let fetched = bob.ok("fetch", json!({})).await;
+    let messages = fetched["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 6, "{fetched}");
+    for m in messages {
+        let id = m["message_id"].as_str().unwrap();
+        assert_eq!(
+            bob.ok("ack", json!({"message_id": id})).await["outcome"],
+            "removed",
+            "{id}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn control_characters_in_a_body_or_a_summary_cannot_reach_the_model_raw() {
     let home = Home::new();
     let alice = agent(&home, "alice").await;
