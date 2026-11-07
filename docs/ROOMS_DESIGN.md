@@ -1,6 +1,6 @@
 # Rooms: fan-out to member mailboxes
 
-Status: design note, 2026-11-06. No code. Requested by CireSnave (brief: `C:\Projects\.lane-state\synapse-rooms-brief.md`,
+Status: design note, 2026-11-06; updated 2026-11-07 for slice A1 (merged, rc.212) and CireSnave's join/post and scope rulings. No code. Requested by CireSnave (brief: `C:\Projects\.lane-state\synapse-rooms-brief.md`,
 his words quoted in section 1) and relayed by the PM. Every claim about today's behaviour cites a file and line at
 `origin/main` ffe9964 (6.0.0-rc.206). **Not read**, and so not claimed: `crates/synapsed/src/settings.rs` defaults,
 `crates/synapse-mcp-server/src/push.rs` frame internals, the SQL (MySQL/Postgres) store paths beyond the trait, and the
@@ -142,6 +142,23 @@ direct-mail consent for roles (call 5), fan-out must re-run that check per `(sen
 counting it as `refused`; the design leaves the hook in `deliver_to_member` and names a born-red test for it now (section
 13) so the later slice cannot forget it. Joining a room is not a standing grant of direct mail from the other members.
 
+### 6a. Join and post are separate actions (CireSnave, 2026-11-06)
+
+Since A1 the daemon asks an `Authorizer` (`docs/ACCESS_CONTROL_DESIGN.md` 3.5, `crates/synapsed/src/access.rs`) and F1 above is
+partly overtaken: agents now have `synapse:see` and `synapse:send`. Rooms use the same call with the room actions
+`synapse:join`, `synapse:post`, `synapse:create-room`, `synapse:manage-room` over objects `room:<name>@<account>`.
+Until A2 the Authorizer allows every room action, so R1 to R3 build against an allow-all and the checks below still run.
+
+- **Sending to a room never joins it.** `send` to a room by a non-member is refused with the typed `not_a_member` reason
+  (a `403`, naming what is missing), and nothing is delivered.
+- **Join and post are two grants.** `synapse:join` lets a role become a member (subject to the room's join policy);
+  `synapse:post` lets a role post. Membership does not imply post, and post does not imply join.
+- **Post without join (announcers, send-only tools).** A role holding `synapse:post` on a room but not joined may post; the
+  fan-out goes to members only, and the poster receives nothing back and is not listed as a member.
+- **Join then send** is allowed only when the tool runs the same join checks, visibly: an invite-only room still refuses
+  an uninvited role, and the reply says it joined. A convenience may never become a way around the join policy.
+- Each room action is its own decision: hidden rooms answer as unknown (404) when the caller lacks `synapse:see`.
+
 ## 7. Membership and presence
 
 - Delivery set = members whose role is claimed, not retired, and `online` at the instant of the send (a presence entry
@@ -240,9 +257,23 @@ None by default: a room keeps no log, because items 3 and "currently online" des
 would be a second mailbox with its own retention. Bounded replay for late joiners (last K messages, K small) is a later
 slice, and would be a ring buffer in the room blob or a per-room queue; not designed here.
 
+## 11a. Scope: account level, daemon level, federation (CireSnave, 2026-11-06)
+
+- **A room belongs to an account**: `name@account`. Its registry, join policy, membership and moderation are account-level
+  state, with one **home daemon** (the creator's) as the single writer. Other daemons never write them.
+- **Daemon-local**: presence (who is online) and delivery (the per-member copies of section 9).
+- **Each account has its own `announce` room**, created at install, its name changeable. `lane-new` joins a new lane to
+  `announce` once rooms exist (R4). Announcers hold `synapse:post` without joining.
+- **Cross-account**: a foreign account's role joins through the room's join-policy allow-list (`role@otheraccount`),
+  decided by the home daemon. v1 stays one account; this fixes the shape, not the code.
+- **What federation must later provide**: propagating a member's presence to the home daemon; forwarding a post and its
+  fan-out to members on other daemons; failover of the home daemon. Rooms must therefore **not assume the sender and the
+  members share a daemon**: the fan-out takes a member list and a delivery function per member, local today.
+- Room copies keep the original sender through fan-out and forwarding (see F3 and `docs/FEDERATION_TRUST.md` when it lands).
+
 ## 12. Not decided (calls for the PM / CireSnave)
 
-1. **Cross-account rooms** (F2). Needs routing between daemons and a way for a foreign account's agent to join. Out of v1; v1 is one account.
+1. **Cross-account rooms** (F2). Shape fixed in 11a (home daemon, allow-list join); the routing between daemons is not built. Out of v1; v1 is one account.
 2. **Who may join an Open room**: every claimed role of the account (proposed), or only roles with a `room-join` permission.
 3. **Mute semantics**: mute-as-silence (proposed) vs also stopping delivery.
 4. **Dead-lettering of room copies**: drop silently, one summarising notice (proposed), or none.
@@ -255,9 +286,9 @@ slice, and would be a ring buffer in the room blob or a per-room queue; not desi
 
 | Slice | Scope | Born-red tests (each is red before the code, and sabotage-checked) |
 |---|---|---|
-| R1 registry and policy | `RoomsState`, `MailTxn::rooms/set_rooms` on redb + PersistAnt, migration copy, `room-create`/`room-admin` permissions, create/delete/set_policy/invite, name namespace | `unauthorized_create_refused`; `room_name_taken_by_a_role_refused`; `restart_keeps_rooms_and_joins`; `migrate_copies_rooms` (per backend); `unknown_permission_string_still_invalidates_cert` |
+| R1 registry and policy | `RoomsState`, `MailTxn::rooms/set_rooms` on redb + PersistAnt, migration copy, `room-create`/`room-admin` permissions, create/delete/set_policy/invite, name namespace | `unauthorized_create_refused`; `room_name_taken_by_a_role_refused`; `restart_keeps_rooms_and_joins`; `migrate_copies_rooms` (per backend); `unknown_permission_string_still_invalidates_cert`; board 388: `a_new_room_is_invisible_to_a_third_agent_and_visible_to_its_creator_and_the_account_holder` |
 | R2 join/leave/presence | `join`, `leave`, `members`, `rooms`, ban/remove, visibility, presence-gated membership read | `nobody_can_be_joined_by_another` (target in body ignored); `invite_only_refuses_uninvited`; `banned_cannot_rejoin`; `hidden_room_answers_404_same_as_unknown`; `retired_member_not_in_delivery_set` |
-| R3 fan-out and send resolution | `enqueue_many`, send resolves role-or-room, per-copy ids, reply counts, mute/not-member refusals | `non_member_post_refused`; `muted_post_refused_with_typed_error`; `forged_sender_refused` (request `from` ignored); `offline_member_receives_nothing_and_nothing_queued`; `copy_keeps_original_sender_and_room`; `half_delivery_impossible_on_store_error`; `resend_dedupes_per_member`; `muted_member_still_receives`; `fanout_rechecks_direct_mail_consent_hook` |
+| R3 fan-out and send resolution | `enqueue_many`, send resolves role-or-room, per-copy ids, reply counts, mute/not-member refusals | `a_non_member_post_is_refused_with_the_typed_reason`; `a_non_member_holding_the_post_grant_posts_and_receives_nothing`; `the_post_grant_does_not_imply_join`; `join_then_send_honours_an_invite_only_room`; `muted_post_refused_with_typed_error`; `forged_sender_refused` (request `from` ignored); `offline_member_receives_nothing_and_nothing_queued`; `copy_keeps_original_sender_and_room`; `half_delivery_impossible_on_store_error`; `resend_dedupes_per_member`; `muted_member_still_receives`; `fanout_rechecks_direct_mail_consent_hook` |
 | R4 adapter and CLI | MCP tools `join/leave/rooms/members`, `send` to a room unchanged, `synapse room …`, push frame names the room | `adapter_send_to_room_same_call`; `push_frame_marks_room_untrusted`; `busy_lane_stays_online_through_a_blocked_tool_call` |
 | R5 limits | rate, size, caps, `mention_only`, one summarising unacked notice | `rate_limit_per_sender_and_per_room`; `oversize_room_post_refused`; `mention_only_skips_unmentioned`; `room_dead_letter_sends_one_notice` |
 
