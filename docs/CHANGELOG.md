@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.219): room tools in the MCP adapter (slice R4a)
+
+`synapse-mcp` gains four tools: `join`, `leave`, `rooms` and `members` (the daemon's `/v1/rooms*` routes). A room is named `name` or `name@account`; a name that is not letters, digits, `-` or `_` is refused in the adapter before a URL is built. Sending to a room is the existing `send` tool and its reply carries the daemon's `room` counts. No tool creates a room (R4b: `synapsectl room`). The tool set grows from six to ten: a client that pins the list must be updated ( serves the same tools, and its foreign-client test pins them). Tests: `crates/synapse-mcp-server/tests/adapter.rs` (`the_room_tools_join_list_members_post_and_leave`, `a_room_name_of_the_wrong_shape_is_refused_before_the_daemon_hears_it`, and the tool-set test).
+
 ### Added (rc.218): posting to a room fans out to its members (slice R3)
 
 `send` to `room@account` now writes one copy to each member that is claimed, not retired and online, in one store transaction (`Mailbox::enqueue_many`; a full queue is skipped and counted). The reply gains `room: {room, joined, delivered, refused: {offline, full, retired}}`. A member posts unless muted (`403 muted`); anyone else needs a `synapse:post` grant on the room (`403 not_a_member` if it can see the room, else `404 unknown_recipient`), and posting does not make it a member or send anything back to it. The copy is from the original sender with message id `<sender>/<client id>#<room>`, so a retry writes no second copy. Membership is the consent: no per-pair `synapse:send` check (PM ruling, option A; `deliverable_to`). Under the interim Authorizer `synapse:post` on a room is grant-based like `see`; other room actions stay allowed until A2. Tests: `crates/synapsed/tests/rooms.rs`, conformance case `enqueue_many_queues_each_copy_skips_a_full_queue_and_dedupes`.

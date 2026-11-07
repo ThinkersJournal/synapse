@@ -260,7 +260,18 @@ async fn the_tool_set_and_the_untrusted_wording() {
     names.sort();
     assert_eq!(
         names,
-        ["ack", "fetch", "list", "send", "set_summary", "whoami"]
+        [
+            "ack",
+            "fetch",
+            "join",
+            "leave",
+            "list",
+            "members",
+            "rooms",
+            "send",
+            "set_summary",
+            "whoami"
+        ]
     );
     for name in ["fetch", "list"] {
         let tool = tools.iter().find(|t| t.name == name).unwrap();
@@ -614,4 +625,79 @@ fn no_role_is_a_usage_error() {
         String::from_utf8_lossy(&out.stderr).contains("usage"),
         "{out:?}"
     );
+}
+
+/// Create `room` as `role`, which holds `room-create`, straight over the daemon's API (the
+/// adapter has no create tool).
+async fn create_room(home: &Home, role: &str, room: &str) {
+    let path = home.path().to_path_buf();
+    let (role, room) = (role.to_string(), room.to_string());
+    // The client is blocking, so it runs off the async threads.
+    tokio::task::spawn_blocking(move || {
+        let daemon = Daemon::connect_existing(&path).expect("connect");
+        daemon
+            .call(&role, "/v1/rooms/create", Some(&json!({"room": room})))
+            .expect("create the room");
+    })
+    .await
+    .unwrap();
+}
+
+/// A home where `alice` may create rooms.
+fn home_where_alice_makes_rooms() -> Home {
+    let home = Home::new();
+    Keystore::open(home.path())
+        .unwrap()
+        .grant("alice", &synapse::certificate::Permission::RoomCreate)
+        .unwrap();
+    home
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_room_tools_join_list_members_post_and_leave() {
+    let home = home_where_alice_makes_rooms();
+    let alice = agent(&home, "alice").await;
+    let bob = agent(&home, "bob").await;
+    create_room(&home, "alice", "lounge").await;
+    // A new room is visible to its creator only: bob's list is empty, and a join by name answers
+    // as the room being absent would be, for a closed room; this one is open, so bob can join.
+    assert_eq!(bob.ok("rooms", json!({})).await["rooms"], json!([]));
+    let joined = bob.ok("join", json!({"room": "lounge"})).await;
+    assert_eq!(joined["joined"], true, "{joined}");
+    let members = bob.ok("members", json!({"room": "lounge@acct"})).await;
+    assert_eq!(members["members"][0]["member"], "bob@acct", "{members}");
+    // alice posts with the ordinary send tool; the room's member receives it.
+    let sent = alice
+        .ok(
+            "send",
+            json!({"to": "lounge", "body": "hello room", "message_id": "r1"}),
+        )
+        .await;
+    assert_eq!(sent["room"]["delivered"], 1, "{sent}");
+    let got = bob.ok("fetch", json!({})).await;
+    assert_eq!(got["messages"][0]["from"], "alice@acct", "{got}");
+    assert_eq!(
+        got["messages"][0]["message_id"],
+        "alice@acct/r1#lounge@acct"
+    );
+    let left = bob.ok("leave", json!({"room": "lounge"})).await;
+    assert_eq!(left["left"], true);
+    let members = alice.ok("members", json!({"room": "lounge"})).await;
+    assert_eq!(members["members"], json!([]), "{members}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_room_name_of_the_wrong_shape_is_refused_before_the_daemon_hears_it() {
+    let home = Home::new();
+    let bob = agent(&home, "bob").await;
+    for bad in ["a b", "x&room=lounge", "../x", "", "lounge/../x"] {
+        for tool in ["join", "leave", "members"] {
+            let why = bob.refused(tool, json!({"room": bad})).await;
+            assert!(why.contains("room name"), "{tool} {bad:?}: {why}");
+        }
+    }
+    // The control: a well-formed name for a room that does not exist reaches the daemon and is
+    // refused there, as an absent room.
+    let why = bob.refused("join", json!({"room": "nowhere"})).await;
+    assert!(!why.contains("room name may contain"), "{why}");
 }

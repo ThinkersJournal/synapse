@@ -256,7 +256,18 @@ async fn a_hand_written_client_negotiates_receives_the_push_and_acks_it() {
     names.sort();
     assert_eq!(
         names,
-        ["ack", "fetch", "list", "send", "set_summary", "whoami"],
+        [
+            "ack",
+            "fetch",
+            "join",
+            "leave",
+            "list",
+            "members",
+            "rooms",
+            "send",
+            "set_summary",
+            "whoami"
+        ],
         "{tools}"
     );
     let whoami = tool_json(
