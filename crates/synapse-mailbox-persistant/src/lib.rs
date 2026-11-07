@@ -36,6 +36,7 @@ use synapse::mailbox::{
     Stored, is_free,
 };
 use synapse::roles::RolesState;
+use synapse::rooms::RoomsState;
 use tokio::runtime::Runtime;
 
 /// How many lost races one `write` tolerates before giving up.
@@ -442,7 +443,7 @@ impl<K: KvBackend + Send + Sync + 'static> Cursor<'_, K> {
 /// `q/<role>/<seq:020>` meta, `b/<role>/<seq:020>` body, `i/<role>/<hex id>` seq of that id,
 /// `f/<role>/<seq:020>` a marker for each message with no lease, `l/<role>/<seq:020>` the
 /// `Lease` of each message that has one (so `fetch` and `depths` read only what they need),
-/// `s/<role>` (count, bytes), `a/<role>/<hex id>` ack time, `c/seq`, `r/state`.
+/// `s/<role>` (count, bytes), `a/<role>/<hex id>` ack time, `c/seq`, `r/state`, `g/state` (rooms).
 /// Zero-padded `seq` makes the backend's key order the queue's order.
 struct Tx<'a, K: KvBackend + Send + Sync + 'static> {
     st: &'a PersistantMailStore<K>,
@@ -868,6 +869,19 @@ impl<K: KvBackend + Send + Sync + 'static> MailTxn for Tx<'_, K> {
     fn set_roles(&mut self, state: &RolesState) -> Result<(), StoreError> {
         let raw = serde_json::to_vec(state).map_err(|e| se("encode", e))?;
         self.stage(format!("{}/r/state", self.st.ns), raw);
+        Ok(())
+    }
+
+    fn rooms(&self) -> Result<RoomsState, StoreError> {
+        match self.get(&format!("{}/g/state", self.st.ns))? {
+            Some(r) => serde_json::from_slice(&r).map_err(|e| se("decode", e)),
+            None => Ok(RoomsState::default()),
+        }
+    }
+
+    fn set_rooms(&mut self, state: &RoomsState) -> Result<(), StoreError> {
+        let raw = serde_json::to_vec(state).map_err(|e| se("encode", e))?;
+        self.stage(format!("{}/g/state", self.st.ns), raw);
         Ok(())
     }
 }

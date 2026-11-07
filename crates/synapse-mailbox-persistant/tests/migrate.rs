@@ -62,6 +62,35 @@ fn busy_redb(path: &std::path::Path) -> (u64, u64) {
     (epoch_a, epoch_dead)
 }
 
+/// Rooms (docs/ROOMS_DESIGN.md, R1) travel with the mailbox: copied, and the proof compares them.
+#[test]
+fn migrate_copies_rooms() {
+    let (_d1, redb_path) = fresh("mailbox.redb");
+    let (_d2, sqlite_path) = fresh("mailbox.sqlite");
+    {
+        let mut mb = Mailbox::open(
+            RedbStore::open(&redb_path).unwrap(),
+            MailConfig::default(),
+            suite::t0() - Duration::seconds(1),
+        )
+        .unwrap();
+        mb.create_room("lounge@acct", "pm@acct", suite::t0())
+            .unwrap();
+        mb.invite_to_room("lounge@acct", "pm@acct", false, "dev@acct")
+            .unwrap();
+    }
+    let redb = RedbStore::open(&redb_path).unwrap();
+    let sqlite = SqliteMailStore::open(&sqlite_path).unwrap();
+    let copied = copy_verified(&redb, &sqlite).expect("copy");
+    assert_eq!(
+        copied.rooms.rooms.len(),
+        1,
+        "the control: a room was copied"
+    );
+    let back = dump(&sqlite).unwrap();
+    assert!(back.rooms.rooms["lounge@acct"].invites.contains("dev@acct"));
+}
+
 #[test]
 fn a_busy_redb_mailbox_is_copied_whole_and_proved() {
     let (_d1, redb_path) = fresh("mailbox.redb");

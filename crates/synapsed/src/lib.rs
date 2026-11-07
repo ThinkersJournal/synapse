@@ -1089,6 +1089,23 @@ impl From<MailError> for ApiError {
             MailError::NotFound => ApiError::new(StatusCode::NOT_FOUND, "not_found", e),
             MailError::NotYourLease => ApiError::new(StatusCode::FORBIDDEN, "not_your_lease", e),
             MailError::Claim(c) => ApiError::new(StatusCode::FORBIDDEN, "claim_refused", c),
+            MailError::Room(r) => match r {
+                synapse::rooms::RoomError::BadName => {
+                    ApiError::new(StatusCode::BAD_REQUEST, "malformed", e)
+                }
+                synapse::rooms::RoomError::NameTaken => {
+                    ApiError::new(StatusCode::CONFLICT, "name_taken", e)
+                }
+                synapse::rooms::RoomError::RoomCap => {
+                    ApiError::new(StatusCode::TOO_MANY_REQUESTS, "room_cap", e)
+                }
+                synapse::rooms::RoomError::Unknown => {
+                    ApiError::new(StatusCode::NOT_FOUND, "unknown_room", e)
+                }
+                synapse::rooms::RoomError::NotModerator => {
+                    ApiError::new(StatusCode::FORBIDDEN, "not_moderator", e)
+                }
+            },
             MailError::InvalidState(_)
             | MailError::Store(_)
             | MailError::Poisoned

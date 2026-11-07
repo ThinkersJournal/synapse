@@ -422,6 +422,23 @@ pub fn claims_are_written_through_the_store<S: MailStore>(make: impl Fn() -> S) 
     assert_eq!(seen, Some(epoch));
 }
 
+/// Rooms (docs/ROOMS_DESIGN.md, R1): the registry is written through the store, so a restarted
+/// daemon still has every room.
+pub fn rooms_are_written_through_the_store<S: MailStore>(make: impl Fn() -> S) {
+    let mut mb = open(make());
+    mb.create_room("lounge@acct", "pm@acct", t0()).unwrap();
+    let mut seen = None;
+    mb.store()
+        .write(&mut |txn| {
+            seen = Some(txn.rooms().map_err(MailError::Store)?);
+            Ok(())
+        })
+        .unwrap();
+    let rooms = seen.unwrap().rooms;
+    assert_eq!(rooms.len(), 1);
+    assert_eq!(rooms["lounge@acct"].creator, "pm@acct");
+}
+
 /// Liveness (docs/ROLE_LIVENESS_DESIGN.md, L1): sightings and retirement are written through the
 /// store, so a restarted daemon still knows when a role was last seen and that it was retired.
 pub fn role_liveness_is_written_through_the_store<S: MailStore>(make: impl Fn() -> S) {
@@ -1004,6 +1021,9 @@ pub fn a_stalled_backend_returns_an_error_not_a_hang<S: MailStore>(
 /// # Panics
 /// With the case name prefixed, on the first failing case.
 pub fn run_all<S: MailStore>(make: impl Fn() -> S) {
+    case("rooms_are_written_through_the_store", || {
+        rooms_are_written_through_the_store(&make)
+    });
     case("enqueue_then_fetch_leases_and_hides", || {
         enqueue_then_fetch_leases_and_hides(&make)
     });

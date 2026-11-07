@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::certificate::RevocationLookup;
 use crate::roles::{ClaimError, ClaimRequest, Grant, InvalidState, Roles, RolesState, Superseded};
+use crate::rooms::{DefaultSend, JoinPolicy, RoomError, RoomsState};
 
 /// Bounds and timings (PM-approved defaults, spec §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +238,7 @@ pub enum MailError {
     /// The envelope's `to`, `message_id` or `from` is not well formed or is too long.
     Malformed,
     Claim(ClaimError),
+    Room(RoomError),
     InvalidState(InvalidState),
     Store(StoreError),
     /// The store declares a [`DurabilityClass`] below [`REQUIRED_DURABILITY`]; [`Mailbox::open`]
@@ -311,6 +313,7 @@ impl fmt::Display for MailError {
             MailError::LeaseOutOfRange => write!(f, "the requested lease is out of range"),
             MailError::Malformed => write!(f, "the envelope's addressing is malformed"),
             MailError::Claim(e) => write!(f, "{e}"),
+            MailError::Room(e) => write!(f, "{e}"),
             MailError::InvalidState(e) => write!(f, "{e}"),
             MailError::Store(e) => write!(f, "{e}"),
             MailError::DurabilityTooWeak { declared, required } => write!(
@@ -405,6 +408,19 @@ pub trait MailTxn {
     fn next_seq(&mut self) -> Result<u64, StoreError>;
     fn roles(&self) -> Result<RolesState, StoreError>;
     fn set_roles(&mut self, state: &RolesState) -> Result<(), StoreError>;
+    /// The account's rooms (`docs/ROOMS_DESIGN.md`). A store that predates rooms holds none.
+    fn rooms(&self) -> Result<RoomsState, StoreError> {
+        Ok(RoomsState::default())
+    }
+    /// Replace the rooms. The default refuses anything but an empty state, so a store that cannot
+    /// hold rooms never silently drops one.
+    fn set_rooms(&mut self, state: &RoomsState) -> Result<(), StoreError> {
+        if state.rooms.is_empty() {
+            Ok(())
+        } else {
+            Err(StoreError("this store cannot hold rooms".into()))
+        }
+    }
 
     // The four methods below exist for [`migrate`] (copying a mailbox between stores). They have
     // defaults that refuse, so a store that does not support export still compiles.
@@ -472,6 +488,7 @@ struct MemState {
     acked: BTreeMap<(String, String), DateTime<Utc>>,
     seq: u64,
     roles: RolesState,
+    rooms: RoomsState,
 }
 
 impl MemoryStore {
@@ -593,6 +610,15 @@ impl MailTxn for MemState {
         self.roles = state.clone();
         Ok(())
     }
+
+    fn rooms(&self) -> Result<RoomsState, StoreError> {
+        Ok(self.rooms.clone())
+    }
+
+    fn set_rooms(&mut self, state: &RoomsState) -> Result<(), StoreError> {
+        self.rooms = state.clone();
+        Ok(())
+    }
 }
 
 /// The mailbox: role epochs (M3) in memory, everything else in the store.
@@ -600,6 +626,7 @@ pub struct Mailbox<S: MailStore> {
     store: S,
     config: MailConfig,
     roles: Roles,
+    rooms: RoomsState,
     poisoned: bool,
     /// Messages set aside since the daemon last asked ([`Mailbox::dead_exhausted`]).
     exhausted: Vec<Exhausted>,
@@ -630,8 +657,10 @@ impl<S: MailStore> Mailbox<S> {
         now: DateTime<Utc>,
     ) -> Result<Self, MailError> {
         let mut state = None;
+        let mut rooms = RoomsState::default();
         store.read(&mut |txn| {
             state = Some(txn.roles().map_err(MailError::Store)?);
+            rooms = txn.rooms().map_err(MailError::Store)?;
             Ok(())
         })?;
         let roles =
@@ -640,6 +669,7 @@ impl<S: MailStore> Mailbox<S> {
             store,
             config,
             roles,
+            rooms,
             poisoned: false,
             exhausted: Vec::new(),
         })
@@ -660,6 +690,91 @@ impl<S: MailStore> Mailbox<S> {
     #[must_use]
     pub fn roles_snapshot(&self) -> RolesState {
         self.roles.snapshot()
+    }
+
+    /// Every room of the account (`docs/ROOMS_DESIGN.md`).
+    #[must_use]
+    pub fn rooms_snapshot(&self) -> RoomsState {
+        self.rooms.clone()
+    }
+
+    /// Apply `change` to a copy of the rooms and persist it; the live state changes only if the
+    /// write succeeded, and a failed write poisons the mailbox like a failed claim write does.
+    fn change_rooms(
+        &mut self,
+        change: impl FnOnce(&mut RoomsState, &RolesState) -> Result<(), RoomError>,
+    ) -> Result<(), MailError> {
+        self.live()?;
+        let mut next = self.rooms.clone();
+        change(&mut next, &self.roles.snapshot()).map_err(MailError::Room)?;
+        let written = self
+            .store
+            .write(&mut |txn| txn.set_rooms(&next).map_err(MailError::Store));
+        if let Err(e) = written {
+            self.poisoned = true;
+            return Err(e);
+        }
+        self.rooms = next;
+        Ok(())
+    }
+
+    /// Create the room `global_id` (`name@account`); `creator` is a role's global id or `account`.
+    ///
+    /// # Errors
+    /// [`MailError::Room`] for a bad or taken name or the room cap; a store error.
+    pub fn create_room(
+        &mut self,
+        global_id: &str,
+        creator: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, roles| {
+            rooms.create(global_id, creator, now, roles.roles.contains_key(global_id))
+        })
+    }
+
+    /// Delete a room.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn delete_room(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.delete(global_id, actor, admin))
+    }
+
+    /// Set a room's join policy and the default for new joiners.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn set_room_policy(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+        join_policy: JoinPolicy,
+        default_send: DefaultSend,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| {
+            rooms.set_policy(global_id, actor, admin, join_policy, default_send)
+        })
+    }
+
+    /// Invite `invitee` to a room.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn invite_to_room(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+        invitee: &str,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.invite(global_id, actor, admin, invitee))
     }
 
     /// Every claimed role's [`Depth`] at `now` (S-1, the daemon's `list`). Changes nothing. A lease
@@ -812,6 +927,11 @@ impl<S: MailStore> Mailbox<S> {
         now: DateTime<Utc>,
     ) -> Result<Grant, MailError> {
         self.live()?;
+        if let Some(leaf) = req.chain.first()
+            && self.rooms.contains(&leaf.subject_global_id)
+        {
+            return Err(MailError::Claim(ClaimError::RoomNameTaken));
+        }
         let grant = self
             .roles
             .claim(req, account_keys, revoked, now)
@@ -1253,6 +1373,8 @@ mod redb_tables {
     pub const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters");
     /// `"state"` -> serde_json `RolesState`.
     pub const ROLES: TableDefinition<&str, &[u8]> = TableDefinition::new("roles");
+    /// `"state"` -> serde_json `RoomsState`.
+    pub const ROOMS: TableDefinition<&str, &[u8]> = TableDefinition::new("rooms");
     /// `(role, seq)` -> `(epoch, until micros)` for each message that holds a lease: a fixed-width
     /// copy of `Meta::lease`, so `fetch` can tell a held message from a free one without decoding
     /// its JSON (the fetch-scan slice). `RedbTxn::put` and `remove` keep it equal to `META`.
@@ -1308,6 +1430,7 @@ impl RedbStore {
             txn.open_table(COUNTERS)
                 .map_err(|e| store_err("table")(&e))?;
             txn.open_table(ROLES).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(ROOMS).map_err(|e| store_err("table")(&e))?;
             txn.open_table(LEASES).map_err(|e| store_err("table")(&e))?;
         }
         // The migration shares this transaction with the table creation, so a crash anywhere in it
@@ -2147,6 +2270,30 @@ impl MailTxn for RedbTxn<'_> {
             .map_err(|e| store_err("roles")(&e))?;
         t.insert("state", raw.as_slice())
             .map_err(|e| store_err("roles")(&e))?;
+        Ok(())
+    }
+
+    fn rooms(&self) -> Result<RoomsState, StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::ROOMS)
+            .map_err(|e| store_err("rooms")(&e))?;
+        match t.get("state").map_err(|e| store_err("rooms")(&e))? {
+            Some(raw) => {
+                serde_json::from_slice(raw.value()).map_err(|e| store_err("rooms decode")(&e))
+            }
+            None => Ok(RoomsState::default()),
+        }
+    }
+
+    fn set_rooms(&mut self, state: &RoomsState) -> Result<(), StoreError> {
+        let raw = serde_json::to_vec(state).map_err(|e| store_err("rooms encode")(&e))?;
+        let mut t = self
+            .txn
+            .open_table(redb_tables::ROOMS)
+            .map_err(|e| store_err("rooms")(&e))?;
+        t.insert("state", raw.as_slice())
+            .map_err(|e| store_err("rooms")(&e))?;
         Ok(())
     }
 }
