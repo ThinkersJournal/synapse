@@ -320,6 +320,12 @@ adapter's room framing (R4). Tests: `crates/synapsed/tests/rooms.rs`; the confor
 `enqueue_many_queues_each_copy_skips_a_full_queue_and_dedupes` runs on every store (atomicity is the store's
 `a_failed_write_changes_nothing`).
 
+R4 is split in two PRs (PM, 2026-11-07), so the adapter, which every lane runs, can be backed out alone. R4a as built
+(rc.219): the MCP adapter tools `join`, `leave`, `rooms`, `members` (`crates/synapse-mcp-server`), a room name checked
+locally before it reaches a URL, and `send` to a room unchanged (the reply carries the daemon's `room` counts). There is
+no create tool: a room is created over the daemon API or, in R4b, with `synapsectl room`. R4b: `synapsectl room ...`
+and the push frame that names the room.
+
 Each slice is its own PR; the PM allocates the version at gate time. Order is R1 to R5; R3 is the first that can deliver a message.
 
 ## 14. Evidence not gathered

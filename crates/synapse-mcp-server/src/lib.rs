@@ -350,6 +350,24 @@ pub struct AckArgs {
     pub message_id: String,
 }
 
+/// Arguments of the room tools.
+#[derive(Deserialize, JsonSchema)]
+pub struct RoomArgs {
+    /// The room's name, or `name@account`; a bare name is in this account (see `rooms`).
+    pub room: String,
+}
+
+/// The bare room name the daemon's room routes take, from `name` or `name@account`. Checked here
+/// first so a stray character never reaches a URL, and the refusal is clear.
+fn room_name(room: &str) -> Result<String, String> {
+    let name = room.split_once('@').map_or(room, |(name, _)| name);
+    if synapse::keystore::valid_name(name) {
+        Ok(name.to_string())
+    } else {
+        Err("a room name may contain only letters, digits, '-' and '_' (1 to 64)".to_string())
+    }
+}
+
 /// Arguments of the `set_summary` tool.
 #[derive(Deserialize, JsonSchema)]
 pub struct SummaryArgs {
@@ -573,6 +591,63 @@ impl SynapseMcpServer {
                 }
             }
             Ok(reply)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Join a room: you receive what members post while you are online. Joining is your own act: the room's join policy (open, allow-list, invite-only) decides, and sending to a room never joins it. A room you may not see answers as if it did not exist. Returns whether you may post (muted: true means new joiners are muted)."
+    )]
+    pub async fn join(
+        &self,
+        Parameters(args): Parameters<RoomArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let room = match room_name(&args.room) {
+            Ok(room) => room,
+            Err(why) => return refuse(why),
+        };
+        self.daemon(move |daemon, role| {
+            daemon.call(role, "/v1/rooms/join", Some(&json!({"room": room})))
+        })
+        .await
+    }
+
+    #[tool(description = "Leave a room you joined. Leaving a room you are not in does nothing.")]
+    pub async fn leave(
+        &self,
+        Parameters(args): Parameters<RoomArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let room = match room_name(&args.room) {
+            Ok(room) => room,
+            Err(why) => return refuse(why),
+        };
+        self.daemon(move |daemon, role| {
+            daemon.call(role, "/v1/rooms/leave", Some(&json!({"room": room})))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List the rooms you may see: name, creator, join policy, default for new joiners, and how many members. To post to a room use send with the room as the recipient: a member posts, anyone else needs the post grant."
+    )]
+    pub async fn rooms(&self) -> Result<CallToolResult, ErrorData> {
+        self.daemon(|daemon, role| daemon.call(role, "/v1/rooms", None))
+            .await
+    }
+
+    #[tool(
+        description = "Who is in a room, and whether each member is online, retired and deliverable (online and not retired: what a post reaches now). Only what may see the room can ask; otherwise it answers as if the room did not exist."
+    )]
+    pub async fn members(
+        &self,
+        Parameters(args): Parameters<RoomArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let room = match room_name(&args.room) {
+            Ok(room) => room,
+            Err(why) => return refuse(why),
+        };
+        self.daemon(move |daemon, role| {
+            daemon.call(role, &format!("/v1/rooms/members?room={room}"), None)
         })
         .await
     }
