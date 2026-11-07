@@ -149,7 +149,7 @@ fn well_formed(env: &Envelope) -> bool {
     let printable =
         |s: &str| !s.is_empty() && s.len() <= MAX_ADDRESS_LEN && !s.chars().any(char::is_control);
     let role_id = env.to.split_once('@').is_some_and(|(role, account)| {
-        crate::keystore::valid_name(role) && crate::keystore::valid_name(account)
+        crate::keystore::valid_role_id(role) && crate::keystore::valid_name(account)
     });
     role_id && printable(&env.message_id) && printable(&env.from)
 }
@@ -2455,5 +2455,39 @@ mod needs_tests {
         assert!(n.atomic_batch && n.ordered_scan && n.lease_ttl && n.bounded_calls);
         // Control: the class really is ordered, so a Process store is below the need.
         assert!(DurabilityClass::Process < n.durability);
+    }
+}
+
+#[cfg(test)]
+mod dotted_recipient_tests {
+    use super::*;
+
+    fn to(recipient: &str) -> bool {
+        well_formed(&Envelope {
+            message_id: "m".into(),
+            to: recipient.into(),
+            from: "pm@acct".into(),
+            body: Vec::new(),
+        })
+    }
+
+    /// A3: a sub-agent such as `worker.pm@acct` is a mailable address, to a depth of three; the
+    /// shapes that are not a chain of names are not.
+    #[test]
+    fn a_dotted_role_is_a_recipient_to_a_depth_of_three() {
+        assert!(to("pm@acct"), "control: a plain role");
+        assert!(to("worker.pm@acct"));
+        assert!(to("a.worker.pm@acct"), "three levels");
+        assert!(!to("x.a.worker.pm@acct"), "four levels");
+        for bad in [
+            ".pm@acct",
+            "pm.@acct",
+            "a..b@acct",
+            "@acct",
+            "a b.pm@acct",
+            "pm@a.cct",
+        ] {
+            assert!(!to(bad), "{bad}");
+        }
     }
 }

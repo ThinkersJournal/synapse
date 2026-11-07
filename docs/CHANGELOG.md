@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.226): dotted role ids are mailable (A3, part 1)
+
+A recipient may now be a sub-agent address such as `worker.pm@acct`: a role part of up to three names joined by single dots (`keystore::valid_role_id`, `MAX_ROLE_DEPTH`). Before, `mailbox::well_formed` refused any dot and mail to such a role was `400 malformed`. An empty level (`.pm`, `a..b`, `pm.`) and a fourth level are still refused. A role still claims under a plain name and no dot reaches a path component. No policy change: who may see or send is still the access rules. The delegating certificates that create such a role are part 2.
+
 ### Changed (rc.225): agent smoke test, tool-use modes and A2a visibility
 
 `crates/synapse-agent/smoke/smoke.sh` gains `mock-tools` and `gemini-tools`: the agent gets `--allow-send ops`, is asked to send TOOLOK to `ops` and then reply DONE, and PASS needs TOOLOK in ops's inbox from gem and a reply to the asker. The mock endpoint calls `send_message` once when tools are offered. The script also works again under A2a: the asker holds `role-admin` so it can see `gem`, and `gem` is granted see and send on the roles it answers (`synapse access grant`). No daemon or library change.
