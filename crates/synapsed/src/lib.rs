@@ -690,8 +690,11 @@ impl Daemon {
         )
         .map_err(|e| DaemonError::Security(e.to_string()))?;
         let started_at = Utc::now();
-        let mailbox =
+        let mut mailbox =
             Mailbox::open(store, MailConfig::default(), started_at).map_err(DaemonError::Mail)?;
+        // The daemon's own notices are delivered once (a stale `[UNACKED]` must not come back).
+        mailbox
+            .set_single_delivery_sender(format!("{NOTICE_SENDER}@{}", keystore.account().account));
         let instance = random_bytes::<16>().ok_or(DaemonError::NoRandomness)?;
         let instance_id = hex(&instance);
         let summary = keystore.account();

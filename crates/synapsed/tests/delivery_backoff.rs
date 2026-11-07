@@ -198,19 +198,67 @@ async fn an_unacked_message_backs_off_goes_dead_and_tells_its_sender_once() {
     assert_eq!(b_row["pending"]["dead"], 1, "visible in list: {b_row}");
     assert!(fetch(&d, &b).await.is_empty(), "dead is not redelivered");
 
-    // The notice is never itself reported: a never acks it, it runs out its own deliveries and goes
-    // dead quietly, and nothing new reaches a (or the daemon's own inbox).
-    for _ in 0..2 {
+    // The notice is delivered once (PM, option A): a never acks it, and it is not sent again, so a
+    // stale age and attempts never come back. It goes dead quietly and nothing new reaches a (or
+    // the daemon's own inbox): there is no notice about a notice.
+    for _ in 0..3 {
         tokio::time::sleep(Duration::from_millis(350)).await;
-        assert_eq!(
-            fetch(&d, &a).await.len(),
-            1,
-            "the notice is redelivered like any message"
+        assert!(
+            fetch(&d, &a).await.is_empty(),
+            "the notice is not redelivered"
         );
     }
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    assert!(fetch(&d, &a).await.is_empty(), "no notice about the notice");
     assert_eq!(dead_lettered(&d, &a, "a").await, 1, "it went dead, counted");
+}
+
+/// A notice about a message that is acked afterwards does not keep arriving: the role claims
+/// again (which brings its dead mail back), acks the original, and the notice, already delivered
+/// once, never comes again with its stale age and attempts.
+#[tokio::test]
+async fn a_notice_for_an_already_acked_original_is_not_redelivered() {
+    let d = start(&[]).await;
+    let a = claim(&d, "a").await;
+    let b = claim(&d, "b").await;
+    send(&d, &a, "m3", "[STATUS] lane=a doing=z").await;
+    for _ in 0..3 {
+        assert_eq!(fetch(&d, &b).await.len(), 1);
+        tokio::time::sleep(Duration::from_millis(350)).await;
+    }
+    let mut notice = Vec::new();
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        notice = fetch(&d, &a).await;
+        if !notice.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(notice.len(), 1, "the sender is told once");
+    // b claims again: its dead message comes back, and it acks it this time.
+    let b = claim(&d, "b").await;
+    let back = fetch(&d, &b).await;
+    assert_eq!(back.len(), 1, "the dead original is delivered again");
+    let (status, _) = call(
+        &d,
+        Some(&b),
+        "/v1/ack",
+        Some(json!({"message_id": back[0]["message_id"]})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    // a never acked the notice. It must still not come back.
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert!(
+            fetch(&d, &a).await.is_empty(),
+            "a stale notice for an acked original came back"
+        );
+    }
+    // Nor does a restart of a bring the dead notice back.
+    let a = claim(&d, "a").await;
+    assert!(
+        fetch(&d, &a).await.is_empty(),
+        "a claim brought a stale notice back from the dead set"
+    );
 }
 
 #[tokio::test]
