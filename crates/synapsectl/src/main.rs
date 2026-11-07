@@ -477,6 +477,10 @@ enum RoomCommand {
         #[command(flatten)]
         role: RoleArg,
         room: String,
+        /// `true`: receive only the posts that name this role (`@role`); `false`: everything.
+        /// Leave it out to keep the current choice.
+        #[arg(long)]
+        mention_only: Option<bool>,
     },
     /// Leave a room.
     Leave {
@@ -579,11 +583,17 @@ fn room_command(home: &std::path::Path, command: RoomCommand) -> Result<(), Mail
             "/v1/rooms/invite".into(),
             Some(json!({"room": room_name(&room)?, "invitee": invitee})),
         ),
-        RoomCommand::Join { role, room } => (
+        RoomCommand::Join {
             role,
-            "/v1/rooms/join".into(),
-            Some(json!({"room": room_name(&room)?})),
-        ),
+            room,
+            mention_only,
+        } => {
+            let mut body = json!({"room": room_name(&room)?});
+            if let Some(flag) = mention_only {
+                body["mention_only"] = json!(flag);
+            }
+            (role, "/v1/rooms/join".into(), Some(body))
+        }
         RoomCommand::Leave { role, room } => (
             role,
             "/v1/rooms/leave".into(),

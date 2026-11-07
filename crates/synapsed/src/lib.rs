@@ -282,11 +282,48 @@ struct Shared {
     access: access::Access,
     /// How recently a role must have been heard from to count as online.
     online_window: chrono::Duration,
+    /// Size and rate ceilings for a post to a room (docs/ROOMS_DESIGN.md section 10).
+    room_limits: RoomLimits,
+    /// Recent accepted posts per `room|sender` and per `room`, for the rate limits; in memory.
+    room_rate: Mutex<HashMap<String, std::collections::VecDeque<DateTime<Utc>>>>,
+    /// Room copies that ran out of deliveries, waiting out [`ROOM_NOTICE_GRACE`] so one post
+    /// earns its sender one notice, not one per member; in memory.
+    room_unacked: Mutex<RoomUnacked>,
     /// A role idle longer than this is retired by the sweep.
     role_ttl: chrono::Duration,
     /// A session unused longer than this is expired (401 `session_expired`).
     session_ttl: chrono::Duration,
 }
+
+/// Ceilings for a post to a room (docs/ROOMS_DESIGN.md section 10): a room is chat, and every
+/// member pays tokens to read each post.
+#[derive(Debug, Clone, Copy)]
+pub struct RoomLimits {
+    /// The largest post body, in bytes.
+    pub max_body_bytes: usize,
+    /// Posts one sender may make to one room per minute.
+    pub per_sender_per_min: usize,
+    /// Posts one room takes per minute, from everyone.
+    pub per_room_per_min: usize,
+}
+
+impl Default for RoomLimits {
+    fn default() -> Self {
+        RoomLimits {
+            max_body_bytes: 4096,
+            per_sender_per_min: 6,
+            per_room_per_min: 30,
+        }
+    }
+}
+
+/// Copies of a room post that ran out of deliveries, per (sender, sender/client id, room): how
+/// many, and when the first did.
+type RoomUnacked = BTreeMap<(String, String, String), (u32, DateTime<Utc>)>;
+
+/// How long copies of one room post may keep running out of deliveries before the sender is told,
+/// once, how many did.
+const ROOM_NOTICE_GRACE: chrono::Duration = chrono::Duration::seconds(2);
 
 /// How the daemon waits out an owed failure delay before answering. The default sleeps on the tokio
 /// clock; tests inject one that records the delay instead, so they assert *which* answers were held
@@ -735,6 +772,9 @@ impl Daemon {
                 launches: Mutex::new(launch::Table::new(started_at)),
                 access,
                 online_window: ONLINE_WINDOW,
+                room_limits: RoomLimits::default(),
+                room_rate: Mutex::new(HashMap::new()),
+                room_unacked: Mutex::new(BTreeMap::new()),
                 role_ttl: chrono::Duration::days(DEFAULT_ROLE_TTL_DAYS),
                 session_ttl: chrono::Duration::hours(DEFAULT_SESSION_TTL_HOURS),
             },
@@ -856,6 +896,14 @@ impl Daemon {
     #[must_use]
     pub fn with_online_window(mut self, window: chrono::Duration) -> Daemon {
         self.shared.online_window = window;
+        self
+    }
+
+    /// Replaces the size and rate ceilings for room posts. Tests shrink them; production keeps
+    /// the defaults. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_room_limits(mut self, limits: RoomLimits) -> Daemon {
+        self.shared.room_limits = limits;
         self
     }
 
@@ -1123,6 +1171,9 @@ impl From<MailError> for ApiError {
                 }
                 synapse::rooms::RoomError::RoomFull => {
                     ApiError::new(StatusCode::TOO_MANY_REQUESTS, "room_full", e)
+                }
+                synapse::rooms::RoomError::NotMember => {
+                    ApiError::new(StatusCode::FORBIDDEN, "not_a_member", e)
                 }
             },
             MailError::InvalidState(_)
@@ -1752,6 +1803,16 @@ fn post_to_room(
             }
         }
     }
+    // A room is chat: a bounded body, and a bounded rate per sender and per room.
+    let limits = shared.room_limits;
+    if envelope.body.len() > limits.max_body_bytes {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "room_body_too_large",
+            format!("a room post is at most {} bytes", limits.max_body_bytes),
+        ));
+    }
+    room_rate_check(shared, &envelope.to, me, Utc::now())?;
     // One id per post and room, so a resend of the same client id dedupes per member.
     let copy_id = format!("{}#{}", envelope.message_id, envelope.to);
     if copy_id.len() > synapse::mailbox::MAX_ADDRESS_LEN {
@@ -1759,7 +1820,7 @@ fn post_to_room(
     }
     let roles = mailbox.roles_snapshot();
     let now = Utc::now();
-    let (mut offline, mut retired) = (0u32, 0u32);
+    let (mut offline, mut retired, mut quiet) = (0u32, 0u32, 0u32);
     let mut copies = Vec::new();
     for member in room.members.keys().filter(|m| m.as_str() != me) {
         // Membership is the consent (PM, option A): no per-pair `send` check on the agent.
@@ -1778,6 +1839,16 @@ fn post_to_room(
             .is_some_and(|at| now - *at <= shared.online_window)
         {
             offline += 1;
+            continue;
+        }
+        // A member that asked for mentions only gets a post that names it.
+        let local = member
+            .split_once('@')
+            .map_or(member.as_str(), |(role, _)| role);
+        if room.members.get(member).is_some_and(|m| m.mention_only)
+            && !mentions(&envelope.body, local)
+        {
+            quiet += 1;
             continue;
         }
         copies.push(Envelope {
@@ -1809,9 +1880,74 @@ fn post_to_room(
             "room": envelope.to,
             "joined": room.members.len(),
             "delivered": delivered,
-            "refused": { "offline": offline, "full": full, "retired": retired },
+            "refused": { "offline": offline, "full": full, "retired": retired, "mention_only": quiet },
         },
     })))
+}
+
+/// Whether `body` names the role `local` as an `@role` token: the `@` starts a word and the name
+/// ends at a character that cannot be in a role name, so `@devops` does not name `dev`.
+fn mentions(body: &[u8], local: &str) -> bool {
+    let text = String::from_utf8_lossy(body);
+    let name_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    text.match_indices('@').any(|(at, _)| {
+        let starts_word = text[..at].chars().next_back().is_none_or(|c| !name_char(c));
+        let after = &text[at + 1..];
+        starts_word
+            && after.starts_with(local)
+            && after[local.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !name_char(c))
+    })
+}
+
+/// Record one accepted post against its sender's and its room's minute, or refuse with
+/// `429 room_rate` and how long to wait. Only accepted posts count.
+fn room_rate_check(
+    shared: &Shared,
+    room: &str,
+    sender: &str,
+    now: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    let window = chrono::Duration::seconds(60);
+    let limits = shared.room_limits;
+    let Ok(mut recent) = shared.room_rate.lock() else {
+        return Ok(()); // a poisoned counter loses a count, never the post
+    };
+    let keys = [
+        (
+            format!("{room}|{sender}"),
+            limits.per_sender_per_min,
+            "from you",
+        ),
+        (room.to_string(), limits.per_room_per_min, "to this room"),
+    ];
+    for (key, limit, who) in &keys {
+        let queue = recent.entry(key.clone()).or_default();
+        while queue.front().is_some_and(|at| now - *at >= window) {
+            queue.pop_front();
+        }
+        if queue.len() >= *limit {
+            let wait = queue
+                .front()
+                .map_or(1, |at| (*at + window - now).num_seconds().max(1));
+            return Err(ApiError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                body: json!({
+                    "error": "room_rate",
+                    "message": format!("too many posts {who} this minute ({limit}); try again in {wait} s"),
+                    "retry_after_secs": wait,
+                }),
+                delay: None,
+            });
+        }
+    }
+    for (key, _, _) in keys {
+        recent.entry(key).or_default().push_back(now);
+    }
+    recent.retain(|_, queue| !queue.is_empty());
+    Ok(())
 }
 
 /// The hook for per-recipient consent on a fan-out copy. Membership is the consent: the member
@@ -2180,8 +2316,21 @@ fn report_exhausted(shared: &Shared) {
         },
         Err(_) => return,
     };
+    let notice_from = format!("{NOTICE_SENDER}@{}", shared.account);
     for gone in exhausted {
         count(shared, &gone.to, |c| c.dead_lettered += 1);
+        // A room copy is not told one by one: its sender hears once per post, after the grace.
+        if let Some((base, room)) = room_copy(&gone.message_id) {
+            if gone.from != notice_from
+                && let Ok(mut pending) = shared.room_unacked.lock()
+            {
+                let entry = pending
+                    .entry((gone.from.clone(), base.to_string(), room.to_string()))
+                    .or_insert((0, now));
+                entry.0 += 1;
+            }
+            continue;
+        }
         let Some(notice) = unacked_notice(&gone, &shared.account, now) else {
             continue;
         };
@@ -2190,6 +2339,45 @@ fn report_exhausted(shared: &Shared) {
         };
         if let Err(e) = mailbox.enqueue(notice, now) {
             eprintln!("synapsed: an [UNACKED] notice was not queued: {e}");
+        }
+    }
+    flush_room_notices(shared, &notice_from, now);
+}
+
+/// `(sender/client id, room)` of a room copy's id `<sender>/<id>#<room>`.
+fn room_copy(message_id: &str) -> Option<(&str, &str)> {
+    let (base, room) = message_id.rsplit_once('#')?;
+    synapse::rooms::valid_room_id(room).then_some((base, room))
+}
+
+/// Send the one `[ROOM-UNACKED]` notice for each post whose copies stopped running out.
+fn flush_room_notices(shared: &Shared, notice_from: &str, now: DateTime<Utc>) {
+    let due: Vec<((String, String, String), u32)> = {
+        let Ok(mut pending) = shared.room_unacked.lock() else {
+            return;
+        };
+        let keys: Vec<_> = pending
+            .iter()
+            .filter(|(_, (_, first))| now - *first >= ROOM_NOTICE_GRACE)
+            .map(|(k, _)| k.clone())
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| pending.remove(&k).map(|(n, _)| (k, n)))
+            .collect()
+    };
+    for ((from, base, room), unacked) in due {
+        let id = base.split_once('/').map_or(base.as_str(), |(_, id)| id);
+        let notice = Envelope {
+            message_id: format!("{notice_from}/room-unacked-{}", uuid::Uuid::new_v4()),
+            to: from,
+            from: notice_from.to_string(),
+            body: format!("[ROOM-UNACKED] room={room} id={id} unacked={unacked}").into_bytes(),
+        };
+        let Ok(mut mailbox) = shared.mailbox.lock() else {
+            return;
+        };
+        if let Err(e) = mailbox.enqueue(notice, now) {
+            eprintln!("synapsed: a [ROOM-UNACKED] notice was not queued: {e}");
         }
     }
 }
@@ -2643,6 +2831,15 @@ struct RoomBody {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RoomJoinBody {
+    room: String,
+    /// Receive only the posts that name this role (`@role`). Joining again changes it.
+    #[serde(default)]
+    mention_only: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RoomPolicyBody {
     room: String,
     join_policy: synapse::rooms::JoinPolicy,
@@ -2895,10 +3092,20 @@ async fn room_join(
 ) -> Result<Response, ApiError> {
     let shared = state.0;
     let session = authed(&shared, &headers)?;
-    let body: RoomBody = parse(&headers, &body)?;
+    let body: RoomJoinBody = parse(&headers, &body)?;
     let (global_id, object) = room_ids(&shared, &body.room)?;
     room_allowed(&shared, &session, access::Action::Join, &object)?;
-    let result = locked(&shared.mailbox)?.join_room(&global_id, &session.global_id, Utc::now());
+    let result = {
+        let mut mailbox = locked(&shared.mailbox)?;
+        mailbox
+            .join_room(&global_id, &session.global_id, Utc::now())
+            .and_then(|can_send| {
+                if let Some(flag) = body.mention_only {
+                    mailbox.set_room_mention_only(&global_id, &session.global_id, flag)?;
+                }
+                Ok(can_send)
+            })
+    };
     match result {
         Ok(can_send) => Ok(axum::Json(
             json!({ "room": global_id, "joined": true, "muted": !can_send }),

@@ -330,6 +330,16 @@ entry in `meta`), and one daemon rule: a client message id may not contain `#`, 
 (`<sender>/<id>#<room>`) and the frame trusts it. Fix found on the way: `synapse id grant` refused `room-create` and
 `room-admin` (R1 added them to the keystore's grantable set but not to the CLI's parser).
 
+R5 as built (rc.221): a post body is at most 4 KiB (`413 room_body_too_large`); 6 posts a minute per sender per room and
+30 per room (`429 room_rate`, with `retry_after_secs`; only accepted posts count; in memory, so a restart forgets the
+minute); `mention_only` is chosen by the member on `join` (`mention_only: true|false`; joining again changes it, leaving it
+out keeps it) and skips a post that does not name the member as an `@role` token (`@devops` and `mail@dev.example` do not
+name `dev`), reported as `refused.mention_only`; and the sender of a post whose copies ran out of deliveries gets one
+`[ROOM-UNACKED] room=<room> id=<client id> unacked=<n>` notice, not one `[UNACKED]` per member. The limits are daemon
+ceilings (`RoomLimits`, `Daemon::with_room_limits`); a per-room, creator-adjustable limit is not built (it needs a stored
+`limits` field, a later row). The notice waits a 2 s grace so one post's copies are counted together; the grace and the
+pending counts are in memory, so a restart inside it loses that notice (the dead-lettered copies remain in `list`).
+
 Each slice is its own PR; the PM allocates the version at gate time. Order is R1 to R5; R3 is the first that can deliver a message.
 
 ## 14. Evidence not gathered

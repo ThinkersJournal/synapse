@@ -357,6 +357,17 @@ pub struct RoomArgs {
     pub room: String,
 }
 
+/// Arguments of the `join` tool.
+#[derive(Deserialize, JsonSchema)]
+pub struct JoinArgs {
+    /// The room's name, or `name@account`; a bare name is in this account (see `rooms`).
+    pub room: String,
+    /// Receive only the posts that name you (`@yourrole`): the way to stay in a busy room without
+    /// paying for every post. Joining again changes it; leave it out to keep the current choice.
+    #[serde(default)]
+    pub mention_only: Option<bool>,
+}
+
 /// The bare room name the daemon's room routes take, from `name` or `name@account`. Checked here
 /// first so a stray character never reaches a URL, and the refusal is clear.
 fn room_name(room: &str) -> Result<String, String> {
@@ -609,16 +620,18 @@ impl SynapseMcpServer {
     )]
     pub async fn join(
         &self,
-        Parameters(args): Parameters<RoomArgs>,
+        Parameters(args): Parameters<JoinArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let room = match room_name(&args.room) {
             Ok(room) => room,
             Err(why) => return refuse(why),
         };
-        self.daemon(move |daemon, role| {
-            daemon.call(role, "/v1/rooms/join", Some(&json!({"room": room})))
-        })
-        .await
+        let mut body = json!({"room": room});
+        if let Some(flag) = args.mention_only {
+            body["mention_only"] = json!(flag);
+        }
+        self.daemon(move |daemon, role| daemon.call(role, "/v1/rooms/join", Some(&body)))
+            .await
     }
 
     #[tool(description = "Leave a room you joined. Leaving a room you are not in does nothing.")]

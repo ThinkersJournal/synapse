@@ -701,3 +701,29 @@ async fn a_room_name_of_the_wrong_shape_is_refused_before_the_daemon_hears_it() 
     let why = bob.refused("join", json!({"room": "nowhere"})).await;
     assert!(!why.contains("room name may contain"), "{why}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn join_can_ask_for_mentions_only() {
+    let home = home_where_alice_makes_rooms();
+    let alice = agent(&home, "alice").await;
+    let bob = agent(&home, "bob").await;
+    create_room(&home, "alice", "lounge").await;
+    let joined = bob
+        .ok("join", json!({"room": "lounge", "mention_only": true}))
+        .await;
+    assert_eq!(joined["joined"], true, "{joined}");
+    let quiet = alice
+        .ok(
+            "send",
+            json!({"to": "lounge", "body": "hello all", "message_id": "q1"}),
+        )
+        .await;
+    assert_eq!(quiet["room"]["delivered"], 0, "{quiet}");
+    let named = alice
+        .ok(
+            "send",
+            json!({"to": "lounge", "body": "hello @bob", "message_id": "q2"}),
+        )
+        .await;
+    assert_eq!(named["room"]["delivered"], 1, "{named}");
+}
