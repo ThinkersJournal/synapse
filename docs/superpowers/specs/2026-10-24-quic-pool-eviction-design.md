@@ -1,6 +1,6 @@
 # QUIC pool eviction on verification failure: design (#49, spec condition 3)
 
-Status: design, no code. 2026-10-24, read against `origin/main` 033f399 (6.0.0-rc.149). Parent:
+Status: slices 1 and 2 built (rc.175, #280, the hook and the manager's call; rc.176, #281, QUIC's eviction and cooldown); slice 3 (the survey of the other transports) is open and waits on the PM (open call 2). Written 2026-10-24, read against `origin/main` 033f399 (6.0.0-rc.149). Parent:
 `docs/superpowers/specs/2026-09-22-quic-transport-design.md` section 3, condition 3: *any application-layer
 verification failure on a message received over a pooled connection evicts that pool entry.* Issue #49.
 
