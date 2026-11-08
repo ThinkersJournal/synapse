@@ -135,3 +135,5 @@ the daemon to keep a per-peer-account allow-list and for `access.json`/A2 to be 
 ## 8. Slice 1 of first contact is built (rc.232)
 
 PM ruling 2026-11-07: a first contact stays a knock and the holder promotes it. `synapse::keystore::trust_book` and `synapse trust knocks|pinned|pin` implement it: the pin needs the account public key from the other account's holder and its key id typed back, and a knock alone grants nothing. Section 5's rule stands: adding an account is the holder's act, never a message's. Name resolution and fetching a key by name are still not chosen.
+
+Slice 1b (rc.234): the library `TransportManager` is the first thing to write a knock into the book (only a first contact whose chain names an unpinned root; bounded and throttled) and to load the pins, with `reload_trust_book` for a running process. The daemon does not yet, because it takes no cross-daemon mail.

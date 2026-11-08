@@ -69,7 +69,7 @@ fn over_budget(verdict: Verdict) -> bool {
 }
 
 /// The IP part of a `host:port` source, or the whole string when it is not a socket address.
-fn source_ip(source: &str) -> String {
+pub(super) fn source_ip(source: &str) -> String {
     source
         .parse::<std::net::SocketAddr>()
         .map_or_else(|_| source.to_string(), |addr| addr.ip().to_string())
