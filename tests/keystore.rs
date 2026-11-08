@@ -693,42 +693,32 @@ fn a_sub_agent_home_installs_its_chain_and_loads_it() {
         Err(KeystoreError::Corrupt(_))
     ));
 
-    // A foreign chain put on disk by hand is not read back as this home's role either.
-    let abroad = {
+    // A foreign chain put on disk by hand is not read back as this home's role either. The home
+    // makes its own keys (so they are as private as the platform wants); only the certificate is
+    // written by hand.
+    let loose = tempfile::tempdir().unwrap();
+    let loose_keys = Keystore::init_role(loose.path(), "acct", "worker").unwrap();
+    let (_foreign_dir, foreign_store) = {
         let dir = tempfile::tempdir().unwrap();
         Keystore::init_account(dir.path(), "other").unwrap();
-        let foreign = Keystore::open(dir.path()).unwrap();
-        foreign.grant("pm", &Permission::RoleAdmin).unwrap();
-        foreign
-            .delegate("pm", "worker", keys, &[Permission::Send], t0(), hours)
-            .unwrap()
+        let store = Keystore::open(dir.path()).unwrap();
+        store.grant("pm", &Permission::RoleAdmin).unwrap();
+        (dir, store)
     };
-    let loose = tempfile::tempdir().unwrap();
-    Keystore::init_role(loose.path(), "acct", "worker").unwrap();
-    let signing = std::fs::read(sub_home.path().join("roles/worker/signing.key.pem")).unwrap();
-    let sealing = std::fs::read(sub_home.path().join("roles/worker/sealing.key.pem")).unwrap();
-    std::fs::write(loose.path().join("roles/worker/signing.key.pem"), signing).unwrap();
-    std::fs::write(loose.path().join("roles/worker/sealing.key.pem"), sealing).unwrap();
+    let abroad = foreign_store
+        .delegate("pm", "worker", loose_keys, &[Permission::Send], t0(), hours)
+        .unwrap();
     std::fs::write(loose.path().join("roles/worker/cert.pem"), &abroad).unwrap();
     let only = Keystore::open_role_only(loose.path()).unwrap();
-    assert!(matches!(
-        only.role("worker", t0()),
-        Err(KeystoreError::Corrupt(_))
-    ));
+    let read = only.role("worker", t0());
+    assert!(matches!(read, Err(KeystoreError::Corrupt(_))), "{read:?}");
     // A one-link certificate of another account for this home's keys is refused too.
-    let foreign_leaf = {
-        let dir = tempfile::tempdir().unwrap();
-        Keystore::init_account(dir.path(), "other").unwrap();
-        Keystore::open(dir.path())
-            .unwrap()
-            .issue_role_certificate("worker", keys, t0(), chrono::Duration::days(1))
-            .unwrap()
-    };
+    let foreign_leaf = foreign_store
+        .issue_role_certificate("worker", loose_keys, t0(), chrono::Duration::days(1))
+        .unwrap();
     std::fs::write(loose.path().join("roles/worker/cert.pem"), &foreign_leaf).unwrap();
-    assert!(matches!(
-        only.role("worker", t0()),
-        Err(KeystoreError::Corrupt(_))
-    ));
+    let read = only.role("worker", t0());
+    assert!(matches!(read, Err(KeystoreError::Corrupt(_))), "{read:?}");
     // ...while this home's own chain reads back through the role-only view.
     let mine = Keystore::open_role_only(sub_home.path()).unwrap();
     assert_eq!(
