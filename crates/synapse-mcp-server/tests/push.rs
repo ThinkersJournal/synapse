@@ -54,6 +54,32 @@ impl Renderer for Example {
     }
 }
 
+/// A renderer for a client that is known to drop what it is pushed, as Claude Code's channel adapter
+/// is set up: the adapter never acks and never stops, only the receiver's `ack` ends a message.
+#[derive(Default)]
+struct Forever;
+
+impl Renderer for Forever {
+    fn capability_key(&self) -> &str {
+        "forever/inbox"
+    }
+    fn method(&self) -> &str {
+        "notifications/forever/inbox"
+    }
+    fn protocol_cap(&self) -> ProtocolVersion {
+        ProtocolVersion::V_2025_06_18
+    }
+    fn instructions(&self) -> &str {
+        "Forever client."
+    }
+    fn render(&self, message: &MessageView) -> Value {
+        json!({"id": message.message_id(), "text": message.body_text()})
+    }
+    fn ack_policy(&self) -> AckPolicy {
+        AckPolicy::Never
+    }
+}
+
 /// A renderer that says nothing about acking: it gets the trait's default policy.
 #[derive(Default)]
 struct Quiet;
@@ -366,6 +392,100 @@ async fn a_receiver_only_renderer_stops_pushing_at_the_bound_and_never_removes_t
     let left = bob.pull(10, 5).await.unwrap();
     assert_eq!(left.len(), 1, "{left:?}");
     assert_eq!(left[0]["body"], "nobody will ack this");
+}
+
+/// ROADMAP row 35, first gap: a client that drops every push (nothing bound for the method, as a
+/// Python SDK before a handler is registered) must lose nothing. With `AckPolicy::Never` the loop
+/// keeps pushing past the bound of three, every lease, and the adapter never acks: the message is
+/// still the receiver's, not dead, with no ack recorded. (The earlier reading of the code was
+/// "three pushes, then the adapter's ack", which is `BoundedAttempts`, not what the channel adapter
+/// uses.) The receiver's own `ack` then removes it, the control for the fields read here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_that_drops_every_push_gets_them_past_the_bound_and_loses_nothing() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    let server = PushServer::<Forever>::start(
+        home.config("bob"),
+        PushConfig {
+            poll_every: Duration::from_millis(100),
+            lease_secs: 5,
+            ..PushConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (client_io, server_io) = tokio::io::duplex(1 << 16);
+    tokio::spawn(async move {
+        if let Ok(running) = server.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    // Receives every frame and acts on none of them.
+    let got = Catcher::default();
+    let _client = got.clone().serve(client_io).await.expect("handshake");
+
+    alice
+        .send(Parameters(SendArgs {
+            to: "bob".into(),
+            body: "dropped on the floor".into(),
+            message_id: None,
+        }))
+        .await
+        .expect("send");
+
+    // Five pushes: two more than the bound that stops a receiver-only loop, one per lease.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while got.0.lock().unwrap().len() < 5 {
+        assert!(Instant::now() < deadline, "fewer than 5 pushes arrived");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let row_of = |listed: Value| {
+        listed["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["global_id"] == "bob@acct")
+            .unwrap_or_else(|| panic!("bob is not listed: {listed}"))
+            .clone()
+    };
+    let listed = |from: &SynapseMcpServer| {
+        let from = from.clone();
+        async move {
+            let result = from.list().await.expect("list");
+            let text: String = result
+                .content
+                .iter()
+                .filter_map(|c| c.as_text())
+                .map(|t| t.text.clone())
+                .collect();
+            serde_json::from_str::<Value>(&text).expect("list is JSON")
+        }
+    };
+    let row = row_of(listed(&alice).await);
+    let pending = &row["pending"];
+    assert_eq!(
+        pending["queued"].as_u64().unwrap() + pending["leased"].as_u64().unwrap(),
+        1,
+        "the message is still bob's: {row}"
+    );
+    assert_eq!(pending["dead"], 0, "{row}");
+    assert!(
+        row["last_ack_at"].is_null(),
+        "the adapter acked for it: {row}"
+    );
+
+    // Control: the receiver's own ack removes it and is recorded.
+    let id = got.0.lock().unwrap()[0].1["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    bob.confirm(id).await.expect("the receiver's ack");
+    let row = row_of(listed(&alice).await);
+    assert_eq!(row["pending"]["queued"], 0, "{row}");
+    assert_eq!(row["pending"]["leased"], 0, "{row}");
+    assert!(!row["last_ack_at"].is_null(), "the ack is recorded: {row}");
 }
 
 /// A notifier that records what it was asked to write. With `takeover` set, the first write also
