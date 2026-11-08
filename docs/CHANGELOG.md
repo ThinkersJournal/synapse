@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.231): ROADMAP row 20 corrected (documentation only)
+
+Row 20 (#49, QUIC pool eviction) said `evict` had no production caller. It has had one since rc.176: slice 1 (`Transport::on_verification_failure`, the manager's call after its guards drop) is rc.175 (#280), slice 2 (QUIC evicts the pooled connection, once per address per cooldown) is rc.176 (#281), and #49 is closed. The row and the design note's status line now say so; only the optional slice 3 (a survey of the other transports) remains, on the PM's call.
+
 ### Added (rc.229): a sub-agent's own home can install its chain and claim (A3, part (b))
 
 `Keystore::install_role_certificate`, the role-only view behind `synapse id show` and `load_role` (which every client reads its identity through) now accept, besides the account holder's one-link certificate, the chain `Keystore::delegate` issues a sub-agent: a leaf `<role>.<creator's id>` that certifies this home's own signing and sealing keys, under its creator's chain, at most three links, in this home's account. So a home made with `synapse id init-role`, which never held the account key, can install the chain (`synapse id install-cert`) and claim as `worker.pm@account`. The signatures are still the daemon's to check at claim; provisioning keeps its strict one-link rule. Daemon unchanged.
