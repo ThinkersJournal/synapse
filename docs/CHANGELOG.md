@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (rc.231): ROADMAP row 20 corrected (documentation only)
 
-Row 20 (#49, QUIC pool eviction) said `evict` had no production caller. It has had one since rc.176: slice 1 (`Transport::on_verification_failure`, the manager's call after its guards drop) is rc.175 (#280), slice 2 (QUIC evicts the pooled connection, once per address per cooldown) is rc.176 (#281), and #49 is closed. The row and the design note's status line now say so; only the optional slice 3 (a survey of the other transports) remains, on the PM's call.
+Row 20 (#49, QUIC pool eviction) said `evict` had no production caller. It has had one since rc.176: slice 1 (`Transport::on_verification_failure`, the manager's call after its guards drop) is rc.175 (#280), slice 2 (QUIC evicts the pooled connection, once per address per cooldown) is rc.176 (#281), and #49 is closed. The row and the design note's status line now say so; only the optional slice 3 (a survey of the other transports) remains, and the PM ruled 2026-11-07 that it waits until a second transport shows the problem.
+
+### Added (rc.230): tests for a client that drops every push (ROADMAP row 35)
+
+Two tests, no source change. The row said a client with nothing bound for the push method would get three pushes and then the adapter's ack; that was derived from `should_ack` and is no longer the channel adapter's policy (`AckPolicy::Never` since rc.204). `a_client_that_drops_every_push_gets_them_past_the_bound_and_loses_nothing` runs a `Never` renderer against a client that acts on nothing: five pushes, one per lease, the message still pending, not dead, no ack recorded, and the receiver's own `ack` then removes it. `a_client_that_drops_every_push_loses_no_mail_and_the_adapter_never_acks` does the same over the real `synapse-claude-channel` binary's wire (its lease is 30 s, so it shows no loss and no ack over several polls, not the policy). ROADMAP row 35 and the 2026-10-12 spec row are updated; the stock Python SDK and an agent acting on a real request are still not run.
 
 ### Added (rc.229): a sub-agent's own home can install its chain and claim (A3, part (b))
 
