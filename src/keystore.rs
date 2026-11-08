@@ -28,6 +28,8 @@ use crate::certificate::{AgentCertificate, Permission, chain_from_pem, chain_to_
 use crate::crypto::CryptoManager;
 use crate::sealing::SealingKeyPair;
 
+pub mod trust_book;
+
 /// How long a role certificate is valid (PM-approved, spec §4 Q3).
 pub const CERT_VALIDITY: Duration = Duration::hours(24);
 /// A certificate with less than this left is reissued on load.

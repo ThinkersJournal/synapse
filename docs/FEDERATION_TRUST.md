@@ -131,3 +131,7 @@ is chosen, the receiver's code is the same `TrustStore::verify`.
 **Not present, to be built when federation is scheduled:** a signer abstraction (section 6.2); the name-to-keys discovery;
 the daemon-to-daemon transport and its authentication; presence propagation and home-daemon failover for rooms; a place for
 the daemon to keep a per-peer-account allow-list and for `access.json`/A2 to be asked about a foreign principal.
+
+## 8. Slice 1 of first contact is built (rc.232)
+
+PM ruling 2026-11-07: a first contact stays a knock and the holder promotes it. `synapse::keystore::trust_book` and `synapse trust knocks|pinned|pin` implement it: the pin needs the account public key from the other account's holder and its key id typed back, and a knock alone grants nothing. Section 5's rule stands: adding an account is the holder's act, never a message's. Name resolution and fetching a key by name are still not chosen.

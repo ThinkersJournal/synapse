@@ -53,6 +53,11 @@ enum Command {
     /// holds (and a grant lasts only while its issuer still holds what it gave).
     #[command(subcommand)]
     Access(AccessCommand),
+    /// Which other accounts this node believes: list the knocks (first contacts from accounts nobody
+    /// pinned, which grant nothing), and pin an account key from one. Adding an account is the
+    /// holder's act, never a message's.
+    #[command(subcommand)]
+    Trust(TrustCommand),
     /// Claim a role on the daemon (taking it over if another holder has it).
     ///
     /// The session is cached per role in this home, so every `synapse` command for the role here
@@ -559,6 +564,63 @@ enum AccessCommand {
         #[command(flatten)]
         role: RoleArg,
     },
+}
+
+/// `synapse trust ...`: the trust book in the keystore home (`<home>/trust/`), one JSON line per row.
+#[derive(Subcommand)]
+enum TrustCommand {
+    /// The knocks, most recent first: who claimed to be whom, and the account key id their chain
+    /// named. A knock grants nothing.
+    Knocks,
+    /// The account keys pinned, oldest first.
+    Pinned,
+    /// Pin an account key that knocked. Get the account's public key from that account's holder (not
+    /// from the knock, which carries only its hash), then type its key id back: there is no default
+    /// and no yes flag. Refused unless the key hashes to the id typed and a knock names that id.
+    Pin {
+        /// Your name for the account; reporting only.
+        #[arg(long)]
+        label: String,
+        /// The account's Ed25519 public key, 64 hex digits.
+        #[arg(long, value_name = "HEX")]
+        public_key: String,
+        /// The key id (SHA-256 of the public key, hex) typed back as the confirmation.
+        #[arg(long, value_name = "KEY_ID")]
+        confirm_key_id: String,
+    },
+}
+
+fn trust_command(home: &std::path::Path, command: TrustCommand) -> Result<(), MailError> {
+    let book = synapse::keystore::trust_book::TrustBook::open(home);
+    match command {
+        TrustCommand::Knocks => {
+            for knock in book.knocks()? {
+                println!("{}", serde_json::to_string(&knock).map_err(json_err)?);
+            }
+        }
+        TrustCommand::Pinned => {
+            for pin in book.pinned()? {
+                println!("{}", serde_json::to_string(&pin).map_err(json_err)?);
+            }
+        }
+        TrustCommand::Pin {
+            label,
+            public_key,
+            confirm_key_id,
+        } => {
+            let key = unhex32(&public_key, "--public-key")?;
+            match book.pin(&label, key, &confirm_key_id, chrono::Utc::now()) {
+                Ok(pinned) => println!("{}", serde_json::to_string(&pinned).map_err(json_err)?),
+                Err(synapse::keystore::trust_book::PinError::Store(e)) => return Err(e.into()),
+                Err(refused) => return Err(MailError::Usage(refused.to_string())),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn json_err(e: serde_json::Error) -> MailError {
+    MailError::Usage(format!("cannot print a row: {e}"))
 }
 
 /// The actions a grant can name; the daemon checks which fit which object.
@@ -1218,6 +1280,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
         }
         Command::Room(command) => room_command(&home, command)?,
         Command::Access(command) => access_command(&home, command)?,
+        Command::Trust(command) => trust_command(&home, command)?,
         Command::Retire { role, target } => {
             let daemon = connect(&home, &role)?;
             let reply = daemon.call(
