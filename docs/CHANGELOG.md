@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.228): `synapse id delegate` (A3, part 2 caller)
+
+`synapse id delegate --role pm --label worker --signing-pub HEX --sealing-pub HEX [--permission NAME]... [--days N]` runs `Keystore::delegate` in the account home: for a role holding `role-admin` it prints the chain for `worker.pm@account` (the sub-agent's certificate, then pm's), for the public keys `synapse id init-role` printed in the sub-agent's own home. Default permissions are the four every role holds; a permission the role lacks, an unknown name, or a role without the budget is an error and prints nothing. No daemon change. Still to come: a sub-agent home that can install this chain and claim as `worker.pm`.
+
 ### Added (rc.227): delegating certificates (A3, part 2)
 
 A role holding `role-admin` now gets `may_delegate: 2` in its own certificate (every other role still 0; `keystore::ROLE_DELEGATION`), and `Keystore::delegate(role, label, keys, permissions, now, valid_for)` issues the sub-agent `label.role@account` a certificate signed with the role's own key, chained under the role's: one off the budget, a window that never outlasts the creator's, and never a permission the creator lacks (`KeystoreError::DelegationRefused`; the chain rules refuse a forged widening too). A role-only home accepts a certificate with a budget up to 2 where it required 0. Not in this change: a command to run `delegate` or to give a sub-agent its own home; until then it is a library call.

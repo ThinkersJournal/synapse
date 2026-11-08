@@ -787,6 +787,27 @@ enum IdCommand {
         #[arg(long, default_value_t = 8)]
         days: i64,
     },
+    /// With the account key: have `--role`, which must hold role-admin, issue the sub-agent
+    /// `--label` (so `worker` under `pm` is `worker.pm@account`) a certificate for its public keys
+    /// (from `init-role`), and print the chain: the sub-agent's certificate, then the role's own.
+    /// The sub-agent never holds more than `--permission` (default: send, request-ack, ack,
+    /// state-write), nor more than the role holds, and never outlasts the role's certificate.
+    Delegate {
+        #[arg(long)]
+        role: String,
+        #[arg(long)]
+        label: String,
+        #[arg(long, value_name = "HEX")]
+        signing_pub: String,
+        #[arg(long, value_name = "HEX")]
+        sealing_pub: String,
+        /// A permission the sub-agent holds; repeat for several.
+        #[arg(long = "permission", value_name = "NAME")]
+        permissions: Vec<String>,
+        /// Validity in days (1 to 30); it is cut to the role's own certificate.
+        #[arg(long, default_value_t = 1)]
+        days: i64,
+    },
     /// With the account key: give every role in --roles-file its own home under --lane-home-root
     /// (`<root>/<role>`), holding that role's keys and a current certificate and NOT the account key.
     /// A dry run unless --apply. Idempotent: a role whose certificate is current is `ok` and
@@ -889,6 +910,25 @@ fn print_identity(identity: &synapse::keystore::RoleIdentity) {
     println!("permissions: {}", permissions.join(", "));
 }
 
+/// What a delegated sub-agent holds: the names given, or the four every role holds by default.
+fn delegate_permissions(names: &[String]) -> Result<Vec<Permission>, MailError> {
+    if names.is_empty() {
+        return Ok(vec![
+            Permission::Send,
+            Permission::RequestAck,
+            Permission::Ack,
+            Permission::StateWrite,
+        ]);
+    }
+    names
+        .iter()
+        .map(|name| {
+            Permission::parse(name)
+                .ok_or_else(|| MailError::Usage(format!("`{name}` is not a permission")))
+        })
+        .collect()
+}
+
 fn parse_grant(text: &str) -> Result<Permission, MailError> {
     match Permission::parse(text) {
         Some(
@@ -972,6 +1012,29 @@ fn run(cli: Cli) -> Result<(), MailError> {
             let pem = Keystore::open(&home)?.issue_role_certificate(
                 &role,
                 keys,
+                chrono::Utc::now(),
+                chrono::Duration::days(days),
+            )?;
+            std::io::stdout().write_all(pem.as_bytes())?;
+        }
+        Command::Id(IdCommand::Delegate {
+            role,
+            label,
+            signing_pub,
+            sealing_pub,
+            permissions,
+            days,
+        }) => {
+            let keys = RolePublicKeys {
+                signing: unhex32(&signing_pub, "--signing-pub")?,
+                sealing: unhex32(&sealing_pub, "--sealing-pub")?,
+            };
+            let permissions = delegate_permissions(&permissions)?;
+            let pem = Keystore::open(&home)?.delegate(
+                &role,
+                &label,
+                keys,
+                &permissions,
                 chrono::Utc::now(),
                 chrono::Duration::days(days),
             )?;
