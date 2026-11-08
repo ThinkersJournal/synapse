@@ -607,19 +607,44 @@ fn leaf_for(pem: &[u8], global_id: &str, keys: &RolePublicKeys) -> Result<Vec<Ag
     chain.ok_or(KeystoreError::Corrupt("role certificate"))
 }
 
-/// As [`leaf_for`], for any account: the subject is `<role>@<something>` and the label is `role`.
+/// As [`leaf_for`], for any account: see [`chain_for_role`].
 fn leaf_for_role(pem: &[u8], role: &str, keys: &RolePublicKeys) -> Result<Vec<AgentCertificate>> {
-    let prefix = format!("{role}@");
+    chain_for_role(pem, role, None, keys)
+}
+
+/// The chain in `pem` when it certifies `keys` for `role` (A3): either one link, `<role>@<account>`
+/// from the account holder, or a delegated sub-agent's, whose leaf is `<role>.<creator's id>` under
+/// its creator's chain (at most `1 + ROLE_DELEGATION` links). `account`, when given, is the account
+/// the id must be in. Whether the signatures chain to the account is the daemon's to check at claim
+/// (this home has no account key to check them with).
+fn chain_for_role(
+    pem: &[u8],
+    role: &str,
+    account: Option<&str>,
+    keys: &RolePublicKeys,
+) -> Result<Vec<AgentCertificate>> {
+    let own = |chain: &[AgentCertificate]| {
+        let leaf = &chain[0];
+        leaf.subject_label == role
+            && leaf.subject_signing_key == keys.signing
+            && leaf.subject_sealing_key == keys.sealing
+            && leaf.may_delegate <= ROLE_DELEGATION
+    };
+    let in_account = |id: &str| {
+        account.is_none_or(|account| id.rsplit_once('@').is_some_and(|(_, a)| a == account))
+    };
     let chain = std::str::from_utf8(pem)
         .ok()
         .and_then(|pem| chain_from_pem(pem).ok())
         .filter(|chain| {
-            chain.len() == 1
-                && chain[0].subject_label == role
-                && chain[0].subject_global_id.starts_with(&prefix)
-                && chain[0].subject_signing_key == keys.signing
-                && chain[0].subject_sealing_key == keys.sealing
-                && chain[0].may_delegate <= ROLE_DELEGATION
+            (1..=1 + usize::from(ROLE_DELEGATION)).contains(&chain.len())
+                && own(chain)
+                && in_account(&chain[chain.len() - 1].subject_global_id)
+                && if chain.len() == 1 {
+                    chain[0].subject_global_id.starts_with(&format!("{role}@"))
+                } else {
+                    chain[0].subject_global_id == format!("{role}.{}", chain[1].subject_global_id)
+                }
         });
     chain.ok_or(KeystoreError::Corrupt("role certificate"))
 }
@@ -858,7 +883,7 @@ impl Keystore {
     pub fn install_role_certificate(home: &Path, role: &str, pem: &str) -> Result<()> {
         let store = Keystore::open_role_only(home)?;
         let (_, keys) = store.role_keys(role)?;
-        leaf_for(pem.as_bytes(), &format!("{role}@{}", store.account), &keys)?;
+        chain_for_role(pem.as_bytes(), role, Some(&store.account), &keys)?;
         replace(
             &home.join(ROLES_DIR).join(role).join(CERT),
             pem.as_bytes(),
@@ -909,8 +934,22 @@ impl RoleOnlyKeystore {
     /// a missing certificate is [`KeystoreError::NoRoleCertificate`], an expired one
     /// [`KeystoreError::CertificateExpired`].
     pub fn role(&self, role: &str, now: DateTime<Utc>) -> Result<RoleIdentity> {
-        let expected = format!("{role}@{}", self.account);
-        identity_from_files(&self.home, role, Some(&expected), now)
+        let identity = identity_from_files(&self.home, role, None, now)?;
+        // This home's account: the one-link certificate is exactly `<role>@<account>`, a delegated
+        // sub-agent's chain (A3) ends in a root certificate of this account.
+        let root = identity.chain[identity.chain.len() - 1]
+            .subject_global_id
+            .as_str();
+        let ours = if identity.chain.len() == 1 {
+            identity.global_id == format!("{role}@{}", self.account)
+        } else {
+            root.ends_with(&format!("@{}", self.account))
+        };
+        if ours {
+            Ok(identity)
+        } else {
+            Err(KeystoreError::Corrupt("role certificate"))
+        }
     }
 }
 
