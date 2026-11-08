@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.229): a sub-agent's own home can install its chain and claim (A3, part (b))
+
+`Keystore::install_role_certificate`, the role-only view behind `synapse id show` and `load_role` (which every client reads its identity through) now accept, besides the account holder's one-link certificate, the chain `Keystore::delegate` issues a sub-agent: a leaf `<role>.<creator's id>` that certifies this home's own signing and sealing keys, under its creator's chain, at most three links, in this home's account. So a home made with `synapse id init-role`, which never held the account key, can install the chain (`synapse id install-cert`) and claim as `worker.pm@account`. The signatures are still the daemon's to check at claim; provisioning keeps its strict one-link rule. Daemon unchanged.
+
 ### Added (rc.228): `synapse id delegate` (A3, part 2 caller)
 
 `synapse id delegate --role pm --label worker --signing-pub HEX --sealing-pub HEX [--permission NAME]... [--days N]` runs `Keystore::delegate` in the account home: for a role holding `role-admin` it prints the chain for `worker.pm@account` (the sub-agent's certificate, then pm's), for the public keys `synapse id init-role` printed in the sub-agent's own home. Default permissions are the four every role holds; a permission the role lacks, an unknown name, or a role without the budget is an error and prints nothing. No daemon change. Still to come: a sub-agent home that can install this chain and claim as `worker.pm`.

@@ -569,3 +569,40 @@ async fn a_chain_issued_sub_agent_can_be_mailed_by_its_creator() {
         (404, Some("unknown_recipient"))
     );
 }
+
+/// A3 (b): the sub-agent claims from a home of its own, which never held the account key: its keys
+/// are made there, its creator's `delegate` chain is installed, `load_role` reads it, and the claim
+/// it signs is accepted. Its creator's mail to `worker.pm@acct` reaches it.
+#[tokio::test]
+async fn a_sub_agent_claims_from_its_own_home_and_receives_its_creators_mail() {
+    let d = start(new_home(&[("pm", Permission::RoleAdmin)])).await;
+    let pm = claim(&d, "pm").await;
+
+    let sub_home = tempfile::tempdir().unwrap();
+    let keys = Keystore::init_role(sub_home.path(), "acct", "worker").unwrap();
+    let store = Keystore::open(d.home.path()).unwrap();
+    let pem = store
+        .delegate(
+            "pm",
+            "worker",
+            keys,
+            &[Permission::Send, Permission::Ack],
+            Utc::now(),
+            chrono::Duration::hours(1),
+        )
+        .unwrap();
+    Keystore::install_role_certificate(sub_home.path(), "worker", &pem).unwrap();
+
+    let identity = synapse::keystore::load_role(sub_home.path(), "worker", Utc::now()).unwrap();
+    assert_eq!(identity.global_id, "worker.pm@acct");
+    let signed_at = Utc::now().max(d.started_at + chrono::Duration::seconds(1));
+    let nonce = *uuid::Uuid::new_v4().as_bytes();
+    let req = sign_claim_for(&identity, &instance_id(&d), nonce, signed_at).unwrap();
+    let worker = post_claim(&d, &req).await;
+
+    let (status, reply) = send(&d, &pm, "worker.pm@acct", "task").await;
+    assert_eq!(status, 200, "{reply}");
+    let got = fetch(&d, &worker).await;
+    assert_eq!(got.len(), 1, "the sub-agent receives the mail");
+    assert_eq!(got[0]["from"], "pm@acct");
+}

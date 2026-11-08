@@ -615,3 +615,140 @@ fn a_role_without_a_budget_cannot_delegate() {
             .is_ok()
     );
 }
+
+/// A3 (b): a sub-agent's own home installs the chain its creator issued and loads it back as
+/// `worker.pm@acct`; a chain for other keys, or for another account, is refused.
+#[test]
+fn a_sub_agent_home_installs_its_chain_and_loads_it() {
+    use synapse::certificate::Permission;
+    let (_dir, store) = store_with_account();
+    store.grant("pm", &Permission::RoleAdmin).unwrap();
+    let sub_home = tempfile::tempdir().unwrap();
+    let keys = Keystore::init_role(sub_home.path(), "acct", "worker").unwrap();
+    let hours = chrono::Duration::hours(1);
+    let pem = store
+        .delegate("pm", "worker", keys, &[Permission::Send], t0(), hours)
+        .unwrap();
+
+    Keystore::install_role_certificate(sub_home.path(), "worker", &pem).expect("its own chain");
+    let identity = synapse::keystore::load_role(sub_home.path(), "worker", t0()).unwrap();
+    assert_eq!(identity.global_id, "worker.pm@acct");
+    assert_eq!(identity.chain.len(), 2, "its certificate, then pm's");
+
+    // A chain issued for someone else's keys is not this home's.
+    let other_home = tempfile::tempdir().unwrap();
+    let other_keys = Keystore::init_role(other_home.path(), "acct", "worker").unwrap();
+    let others = store
+        .delegate("pm", "worker", other_keys, &[Permission::Send], t0(), hours)
+        .unwrap();
+    assert!(matches!(
+        Keystore::install_role_certificate(sub_home.path(), "worker", &others),
+        Err(KeystoreError::Corrupt(_))
+    ));
+
+    // A leaf whose id does not narrow its creator's (forged with pm's own key), and a chain longer
+    // than a role-admin's budget allows, are not a sub-agent's chain either.
+    let chain = synapse::certificate::chain_from_pem(&pem).unwrap();
+    let pm_key = {
+        use ed25519_dalek::pkcs8::DecodePrivateKey;
+        let text =
+            std::fs::read_to_string(_dir.path().join("roles").join("pm").join("signing.key.pem"))
+                .unwrap();
+        ed25519_dalek::SigningKey::from_pkcs8_pem(&text).unwrap()
+    };
+    let mut renamed = chain[0].clone();
+    renamed.subject_global_id = "worker.root@acct".to_string();
+    let renamed = synapse::certificate::AgentCertificate::sign(renamed, &pm_key);
+    let wrong_id = synapse::certificate::chain_to_pem(&[renamed, chain[1].clone()]);
+    assert!(matches!(
+        Keystore::install_role_certificate(sub_home.path(), "worker", &wrong_id),
+        Err(KeystoreError::Corrupt(_))
+    ));
+    // Keys that differ in only one half are not this home's either (forged with pm's key).
+    for (signing_differs, label) in [(true, "signing"), (false, "sealing")] {
+        let mut half = chain[0].clone();
+        if signing_differs {
+            half.subject_signing_key = other_keys.signing;
+        } else {
+            half.subject_sealing_key = other_keys.sealing;
+        }
+        let half = synapse::certificate::AgentCertificate::sign(half, &pm_key);
+        let pem = synapse::certificate::chain_to_pem(&[half, chain[1].clone()]);
+        assert!(
+            matches!(
+                Keystore::install_role_certificate(sub_home.path(), "worker", &pem),
+                Err(KeystoreError::Corrupt(_))
+            ),
+            "only the {label} key differs"
+        );
+    }
+    let too_long = synapse::certificate::chain_to_pem(&[
+        chain[0].clone(),
+        chain[1].clone(),
+        chain[1].clone(),
+        chain[1].clone(),
+    ]);
+    assert!(matches!(
+        Keystore::install_role_certificate(sub_home.path(), "worker", &too_long),
+        Err(KeystoreError::Corrupt(_))
+    ));
+
+    // A foreign chain put on disk by hand is not read back as this home's role either.
+    let abroad = {
+        let dir = tempfile::tempdir().unwrap();
+        Keystore::init_account(dir.path(), "other").unwrap();
+        let foreign = Keystore::open(dir.path()).unwrap();
+        foreign.grant("pm", &Permission::RoleAdmin).unwrap();
+        foreign
+            .delegate("pm", "worker", keys, &[Permission::Send], t0(), hours)
+            .unwrap()
+    };
+    let loose = tempfile::tempdir().unwrap();
+    Keystore::init_role(loose.path(), "acct", "worker").unwrap();
+    let signing = std::fs::read(sub_home.path().join("roles/worker/signing.key.pem")).unwrap();
+    let sealing = std::fs::read(sub_home.path().join("roles/worker/sealing.key.pem")).unwrap();
+    std::fs::write(loose.path().join("roles/worker/signing.key.pem"), signing).unwrap();
+    std::fs::write(loose.path().join("roles/worker/sealing.key.pem"), sealing).unwrap();
+    std::fs::write(loose.path().join("roles/worker/cert.pem"), &abroad).unwrap();
+    let only = Keystore::open_role_only(loose.path()).unwrap();
+    assert!(matches!(
+        only.role("worker", t0()),
+        Err(KeystoreError::Corrupt(_))
+    ));
+    // A one-link certificate of another account for this home's keys is refused too.
+    let foreign_leaf = {
+        let dir = tempfile::tempdir().unwrap();
+        Keystore::init_account(dir.path(), "other").unwrap();
+        Keystore::open(dir.path())
+            .unwrap()
+            .issue_role_certificate("worker", keys, t0(), chrono::Duration::days(1))
+            .unwrap()
+    };
+    std::fs::write(loose.path().join("roles/worker/cert.pem"), &foreign_leaf).unwrap();
+    assert!(matches!(
+        only.role("worker", t0()),
+        Err(KeystoreError::Corrupt(_))
+    ));
+    // ...while this home's own chain reads back through the role-only view.
+    let mine = Keystore::open_role_only(sub_home.path()).unwrap();
+    assert_eq!(
+        mine.role("worker", t0()).unwrap().global_id,
+        "worker.pm@acct"
+    );
+
+    // A chain from another account is not this home's account.
+    let (_dir2, foreign) = {
+        let dir = tempfile::tempdir().unwrap();
+        Keystore::init_account(dir.path(), "other").unwrap();
+        let store = Keystore::open(dir.path()).unwrap();
+        (dir, store)
+    };
+    foreign.grant("pm", &Permission::RoleAdmin).unwrap();
+    let from_abroad = foreign
+        .delegate("pm", "worker", keys, &[Permission::Send], t0(), hours)
+        .unwrap();
+    assert!(matches!(
+        Keystore::install_role_certificate(sub_home.path(), "worker", &from_abroad),
+        Err(KeystoreError::Corrupt(_))
+    ));
+}

@@ -173,3 +173,72 @@ fn id_delegate_issues_a_sub_agent_chain_and_refuses_what_it_may_not() {
     let typo = delegate("pm", &["--permission", "sendd"]);
     assert_ne!(typo.status.code(), Some(0), "not a permission");
 }
+
+/// A3 (b), through the commands: a sub-agent home made with `init-role` installs the chain
+/// `id delegate` printed (`install-cert` reads it on stdin) and `id show` reads it back as
+/// `worker.pm@acct`, without the home ever holding the account key.
+#[test]
+fn a_sub_agent_home_installs_a_delegated_chain_and_shows_its_identity() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let account = tempfile::tempdir().unwrap();
+    run(account.path(), &["id", "init", "--account", "acct"]);
+    run(
+        account.path(),
+        &["id", "grant", "--role", "pm", "role-admin"],
+    );
+    let sub_home = tempfile::tempdir().unwrap();
+    let made = stdout(&run(
+        sub_home.path(),
+        &["id", "init-role", "--account", "acct", "--role", "worker"],
+    ));
+    let issued = run(
+        account.path(),
+        &[
+            "id",
+            "delegate",
+            "--role",
+            "pm",
+            "--label",
+            "worker",
+            "--signing-pub",
+            line(&made, "signing-pub"),
+            "--sealing-pub",
+            line(&made, "sealing-pub"),
+        ],
+    );
+    assert_eq!(issued.status.code(), Some(0), "{issued:?}");
+
+    let mut install = Command::new(env!("CARGO_BIN_EXE_synapse"))
+        .args(["id", "install-cert", "--role", "worker"])
+        .env("SYNAPSE_HOME", sub_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    install
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&issued.stdout)
+        .unwrap();
+    let installed = install.wait_with_output().unwrap();
+    assert_eq!(installed.status.code(), Some(0), "{installed:?}");
+
+    let shown = run(sub_home.path(), &["id", "show", "--role", "worker"]);
+    assert_eq!(shown.status.code(), Some(0), "{shown:?}");
+    assert!(
+        stdout(&shown).contains("worker.pm@acct"),
+        "{}",
+        stdout(&shown)
+    );
+    assert!(
+        !sub_home
+            .path()
+            .join("account")
+            .join("account.key.pem")
+            .exists(),
+        "the sub-agent home never held the account key"
+    );
+}
