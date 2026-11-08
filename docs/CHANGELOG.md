@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.230): tests for a client that drops every push (ROADMAP row 35)
+
+Two tests, no source change. The row said a client with nothing bound for the push method would get three pushes and then the adapter's ack; that was derived from `should_ack` and is no longer the channel adapter's policy (`AckPolicy::Never` since rc.204). `a_client_that_drops_every_push_gets_them_past_the_bound_and_loses_nothing` runs a `Never` renderer against a client that acts on nothing: five pushes, one per lease, the message still pending, not dead, no ack recorded, and the receiver's own `ack` then removes it. `a_client_that_drops_every_push_loses_no_mail_and_the_adapter_never_acks` does the same over the real `synapse-claude-channel` binary's wire (its lease is 30 s, so it shows no loss and no ack over several polls, not the policy). ROADMAP row 35 and the 2026-10-12 spec row are updated; the stock Python SDK and an agent acting on a real request are still not run.
+
 ### Added (rc.229): a sub-agent's own home can install its chain and claim (A3, part (b))
 
 `Keystore::install_role_certificate`, the role-only view behind `synapse id show` and `load_role` (which every client reads its identity through) now accept, besides the account holder's one-link certificate, the chain `Keystore::delegate` issues a sub-agent: a leaf `<role>.<creator's id>` that certifies this home's own signing and sealing keys, under its creator's chain, at most three links, in this home's account. So a home made with `synapse id init-role`, which never held the account key, can install the chain (`synapse id install-cert`) and claim as `worker.pm@account`. The signatures are still the daemon's to check at claim; provisioning keeps its strict one-link rule. Daemon unchanged.

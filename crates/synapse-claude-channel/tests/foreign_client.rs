@@ -8,9 +8,12 @@
 //! `server/discover` first (as Claude Code does), reads what it is told at `initialize`, and then
 //! treats the push as an ordinary notification frame. It acks over the wire too.
 //!
-//! NOT covered: a stock Python `mcp` client (whose SDK binds notification methods before the
-//! handshake and drops an unbound one at DEBUG, FAM handover section 2) and a live Claude Code push.
-//! This is the pipe, not an agent.
+//! Also covered: a client that drops every push (what a Python SDK with no handler bound does,
+//! FAM handover section 2) loses no mail, and the adapter never acks for it.
+//!
+//! NOT covered: a stock Python `mcp` client itself (the client here only behaves like one on the
+//! wire: it reads the push frames and does nothing with them) and a live Claude Code push. This is
+//! the pipe, not an agent.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -335,4 +338,105 @@ async fn a_hand_written_client_negotiates_receives_the_push_and_acks_it() {
         .await,
     );
     assert_eq!(again["outcome"], "already_acked", "{again}");
+}
+
+/// The row a `list` reply holds for `global_id`.
+fn role_row(listed: &Value, global_id: &str) -> Value {
+    listed["roles"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{listed}"))
+        .iter()
+        .find(|r| r["global_id"] == global_id)
+        .unwrap_or_else(|| panic!("{global_id} is not listed: {listed}"))
+        .clone()
+}
+
+/// ROADMAP row 35, first gap: a client with nothing bound for the push method drops every one. The
+/// adapter pushes, the frame reaches the wire, nobody acts on it, and the message must still be
+/// there afterwards: still pending on the daemon, not dead, never acked. (The old reading of the
+/// code was "three pushes, then the adapter's ack"; the channel adapter's ack policy is `Never`, so
+/// the adapter never removes a message the receiver did not ack.) The receiver's own `ack` over the
+/// wire then removes it, which is the positive control for the fields read here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_that_drops_every_push_loses_no_mail_and_the_adapter_never_acks() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(McpConfig {
+        role: "alice".into(),
+        home: home.dir.path().to_path_buf(),
+    })
+    .await
+    .unwrap();
+    let mut bob = RawClient::spawn(&home, "bob");
+    let init = bob
+        .request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "client-with-no-handler", "version": "0"},
+            }),
+        )
+        .await;
+    assert!(
+        init["result"]["capabilities"]["experimental"].is_object(),
+        "{init}"
+    );
+    bob.write(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        .await;
+
+    let sent = alice
+        .send(Parameters(SendArgs {
+            to: "bob".into(),
+            body: "nobody will act on this push".into(),
+            message_id: None,
+        }))
+        .await
+        .expect("send");
+    assert_ne!(sent.is_error, Some(true), "{sent:?}");
+
+    // The push is written to the wire (the adapter polls every second) and the client does nothing
+    // with it. Then several more poll periods pass.
+    let push = bob
+        .notification(CHANNEL_METHOD, Duration::from_secs(10))
+        .await;
+    let message_id = push["params"]["meta"]["message_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    let listed = tool_json(
+        &bob.request("tools/call", json!({"name": "list", "arguments": {}}))
+            .await,
+    );
+    let row = role_row(&listed, "bob@acct");
+    let pending = &row["pending"];
+    assert_eq!(
+        pending["queued"].as_u64().unwrap() + pending["leased"].as_u64().unwrap(),
+        1,
+        "the message is still bob's: {row}"
+    );
+    assert_eq!(pending["dead"], 0, "{row}");
+    assert!(
+        row["last_ack_at"].is_null(),
+        "the adapter acked for it: {row}"
+    );
+
+    // Control: the receiver's own ack removes it and is recorded.
+    let acked = tool_json(
+        &bob.request(
+            "tools/call",
+            json!({"name": "ack", "arguments": {"message_id": message_id}}),
+        )
+        .await,
+    );
+    assert_eq!(acked["outcome"], "removed", "{acked}");
+    let listed = tool_json(
+        &bob.request("tools/call", json!({"name": "list", "arguments": {}}))
+            .await,
+    );
+    let row = role_row(&listed, "bob@acct");
+    assert_eq!(row["pending"]["queued"], 0, "{row}");
+    assert_eq!(row["pending"]["leased"], 0, "{row}");
+    assert!(!row["last_ack_at"].is_null(), "the ack is recorded: {row}");
 }
