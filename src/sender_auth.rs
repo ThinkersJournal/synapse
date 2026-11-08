@@ -405,6 +405,23 @@ impl TrustStore {
         validate_chain(&chain, &lookup, self, now).map_err(|_| UnverifiableReason::InvalidChain)
     }
 
+    /// The account key id the message's chain names as its root, for the trust book (ROADMAP row 33):
+    /// what a holder would pin. It parses the chain within the store's own size and link bounds and
+    /// checks nothing else, no signature and no pin, so it is safe to call for a stranger's message
+    /// and its answer is only a claim. `None` for a message with no chain or an unparseable or
+    /// oversized one.
+    pub fn chain_root_key_id(&self, message: &SecureMessage) -> Option<String> {
+        let chain_text = message.metadata.get(certificate::CHAIN_KEY)?;
+        if chain_text.len() > self.max_chain_bytes {
+            return None;
+        }
+        let chain = chain_from_pem(chain_text).ok()?;
+        if chain.len() > self.max_chain_links {
+            return None;
+        }
+        chain.last().map(|root| root.issuer_key_id.clone())
+    }
+
     /// The verified chain summary a certificate chain WOULD grant if the sender proved possession
     /// of the leaf's private key -- it does NOT check the message's own signature, so it can
     /// return `Some` for a message whose signature `verify` would reject. Never present its

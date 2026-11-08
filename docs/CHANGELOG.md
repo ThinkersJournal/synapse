@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.234): `TransportManager` records knocks into the trust book and loads its pins (ROADMAP row 33, slice 1b)
+
+`TransportManagerBuilder::trust_book(book)`: `build` gives the trust store every account key the holder pinned (a book that cannot be read pins nothing, logged; fail closed), and a first contact whose chain names a root nobody pinned (`UnknownIssuer`, the only knock a holder can act on) is written to the book with the account key id the chain named (`TrustStore::chain_root_key_id`: a parse within the store's size and link bounds, no signature work, only a claim). Nothing else is written: not unsigned, not a bad signature, not a chain that fails its own rules. Writes are bounded: a repeat of the same knock inside 60 s is not written again, one source IP causes at most 10 writes per 5 minutes, one poll writes at most 16, and the book itself keeps 256. `TransportManager::reload_trust_book()` adds the pins made since start (`synapse trust pin` writes the book) and never loads a knock, so a knock alone still grants nothing. Tests over real UDP in `tests/trust_book_manager.rs`. The daemon is unchanged: it takes no cross-daemon mail yet.
+
 ### Changed (rc.233): ROADMAP row 20 corrected (documentation only)
 
 Row 20 (#49, QUIC pool eviction) said `evict` had no production caller. It has had one since rc.176: slice 1 (`Transport::on_verification_failure`, the manager's call after its guards drop) is rc.175 (#280), slice 2 (QUIC evicts the pooled connection, once per address per cooldown) is rc.176 (#281), and #49 is closed. The row and the design note's status line now say so; only the optional slice 3 (a survey of the other transports) remains, and the PM ruled 2026-11-07 that it waits until a second transport shows the problem.
