@@ -508,6 +508,16 @@ fn racing_init_account_has_exactly_one_winner_per_home() {
     }
 }
 
+/// Write a keystore file by hand the way the keystore does: owner-only on Unix, which it checks.
+fn write_private(path: &Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
 /// A new sub-agent's public keys: any fresh signing key, a fixed sealing key.
 fn sub_agent_keys() -> (ed25519_dalek::SigningKey, synapse::keystore::RolePublicKeys) {
     let key = ed25519_dalek::SigningKey::from_bytes(
@@ -708,7 +718,10 @@ fn a_sub_agent_home_installs_its_chain_and_loads_it() {
     let abroad = foreign_store
         .delegate("pm", "worker", loose_keys, &[Permission::Send], t0(), hours)
         .unwrap();
-    std::fs::write(loose.path().join("roles/worker/cert.pem"), &abroad).unwrap();
+    write_private(
+        &loose.path().join("roles/worker/cert.pem"),
+        abroad.as_bytes(),
+    );
     let only = Keystore::open_role_only(loose.path()).unwrap();
     let read = only.role("worker", t0());
     assert!(matches!(read, Err(KeystoreError::Corrupt(_))), "{read:?}");
@@ -716,7 +729,10 @@ fn a_sub_agent_home_installs_its_chain_and_loads_it() {
     let foreign_leaf = foreign_store
         .issue_role_certificate("worker", loose_keys, t0(), chrono::Duration::days(1))
         .unwrap();
-    std::fs::write(loose.path().join("roles/worker/cert.pem"), &foreign_leaf).unwrap();
+    write_private(
+        &loose.path().join("roles/worker/cert.pem"),
+        foreign_leaf.as_bytes(),
+    );
     let read = only.role("worker", t0());
     assert!(matches!(read, Err(KeystoreError::Corrupt(_))), "{read:?}");
     // ...while this home's own chain reads back through the role-only view.
