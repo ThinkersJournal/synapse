@@ -652,11 +652,12 @@ dependencies = [
 
 [[package]]
 name = "configurant"
-version = "0.6.3"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c16bb5114f240235b24da16bf2fc539f5e3008bba694ea488ff20d16d7d41db"
+checksum = "0d74e0463d2a71f61262b040f5335203bd10f9bcce23635b2da515336918cfe8"
 dependencies = [
  "clap",
+ "redactant",
  "serde",
  "sha2 0.11.1",
  "thiserror 2.0.21",
@@ -3066,6 +3067,17 @@ checksum = "76009fbe0614077fc1a2ce255e3a1881a2e3a3527097d5dc6d8212c585e7e38b"
 dependencies = [
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "redactant"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26e5a2fb57f4e1eed680c232514d51b7a544504eacf565bb6183e3debda00368"
+dependencies = [
+ "hmac",
+ "sha2 0.11.1",
+ "zeroize",
 ]
 
 [[package]]

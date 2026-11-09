@@ -28,7 +28,7 @@ base64 = "0.23"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 ring = "0.17"
 uuid = { version = "1.6", features = ["v4"] }
-configurant = "0.6"
+configurant = "0.7"
 synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.235", optional = true }
 
 [features]
