@@ -1,3 +1,0 @@
-Fixed: cargo audit ignores RUSTSEC-2026-0459 until 2026-12-09
-
-Adds RUSTSEC-2026-0459 (libsqlite3-sys 0.37.0, fix needs 0.39.0) to .cargo/audit.toml with its reason, dependency path and expiry. Exposed only when a SQLite file is opened whose sibling -wal was written by a less trusted party. The path is sqlx-sqlite 0.9.0 via persistant-sqlx; sqlx 0.9 caps libsqlite3-sys, and the cap lift is merged upstream (transact-rs/sqlx#4502) but unreleased. Remove the entry when a sqlx release with the fix is in Cargo.lock. This repository has no deny.toml, so audit.toml is the only config. Same call as auth-framework #436.
