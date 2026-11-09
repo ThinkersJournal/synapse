@@ -9,4 +9,13 @@
 # RUSTSEC-2023-0071 (rsa, no fix) was ignored here while jsonwebtoken's `rust_crypto` backend pulled
 # `rsa`. jsonwebtoken now uses `aws_lc_rs` (already in the tree via rustls, the board-104 tracked
 # non-Rust exception), so `cargo tree --workspace -i rsa` is empty and the ignore is gone.
-ignore = []
+#
+# RUSTSEC-2026-0459 (libsqlite3-sys 0.37.0, fix >=0.39.0; medium 6.8; CVE-2026-119375): IGNORED UNTIL 2026-12-09
+# (PM ruling 2026-11-09, the same call as auth-framework #436). Exposed only when a SQLite file is opened
+# whose sibling `-wal` was written by a less trusted party; synapsed opens only its own owner-only home.
+# Path: libsqlite3-sys <- sqlx-sqlite 0.9.0 <- sqlx 0.9.0 <- persistant-sqlx 0.16.8 <- persistant <-
+# synapse-mailbox-persistant <- synapsed, synapsectl (`cargo tree --workspace --all-features -i libsqlite3-sys`,
+# 2026-11-09). sqlx 0.9 caps libsqlite3-sys below 0.39; the cap lift is merged upstream
+# (transact-rs/sqlx#4502) and unreleased. REMOVE this entry when a sqlx release with the fix is in Cargo.lock;
+# review on 2026-12-09 at the latest.
+ignore = ["RUSTSEC-2026-0459"]
