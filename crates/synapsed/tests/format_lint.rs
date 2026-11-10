@@ -203,3 +203,70 @@ async fn a_message_that_is_not_a_v1_header_is_warned_counted_and_still_queued() 
     );
     assert_eq!(counters(&d, &a, "a").await, (4, 3));
 }
+
+async fn send_with_mode(
+    d: &Running,
+    token: &str,
+    id: &str,
+    text: &str,
+    mode: &str,
+) -> (u16, Value) {
+    call(
+        d,
+        Some(token),
+        "/v1/send",
+        Some(json!({
+            "to": "b@acct", "message_id": id, "mode": mode,
+            "body_b64": B64.encode(text.as_bytes()),
+        })),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_declared_mode_decides_how_the_body_is_checked() {
+    let d = start(&[]).await;
+    let a = claim(&d, "a").await;
+    let _b = claim(&d, "b").await;
+
+    // Declared L0: prose is accepted without a warning and without a count.
+    let (status, reply) = send_with_mode(&d, &a, "d1", "hello there", "L0").await;
+    assert_eq!((status, reply["outcome"].as_str()), (200, Some("queued")));
+    assert!(reply.get("warning").is_none(), "{reply}");
+
+    // Declared L1: a good message is queued, silently.
+    let good = "[READY] synapse#1 head=abc merge=CLEAN checks=3/3 red=0 threads=0 codacy=- sourcery=- files=2";
+    let (status, reply) = send_with_mode(&d, &a, "d2", good, "L1:message-formats/1").await;
+    assert_eq!((status, reply["outcome"].as_str()), (200, Some("queued")));
+    assert!(reply.get("warning").is_none(), "{reply}");
+    assert_eq!(counters(&d, &a, "a").await, (2, 0));
+
+    // Declared L1 and not that format: refused, names the rule, never echoes, and is not queued.
+    for (id, text, needle) in [
+        ("d3", "hello there", "must start with [TYPE]"),
+        ("d4", "[READY] synapse#1 head=abc", "missing the key"),
+        (
+            "d5",
+            "[READY] synapse#1 secret-word head=abc",
+            "has no key=",
+        ),
+    ] {
+        let (status, reply) = send_with_mode(&d, &a, id, text, "L1:message-formats/1").await;
+        assert_eq!(status, 422, "{reply}");
+        assert_eq!(reply["error"], "not_message_format", "{reply}");
+        let why = reply["message"].as_str().unwrap_or("");
+        assert!(why.contains(needle), "{needle}: {reply}");
+        assert!(!why.contains("secret-word"), "{reply}");
+    }
+    assert_eq!(
+        counters(&d, &a, "a").await,
+        (2, 0),
+        "refusals are not submissions"
+    );
+
+    // A mode the daemon does not know is refused, not guessed; no mode keeps the soft lint.
+    let (status, reply) = send_with_mode(&d, &a, "d6", good, "L2").await;
+    assert_eq!(status, 400, "{reply}");
+    let none = submit(&d, &a, "d7", "hello there").await;
+    assert!(none["warning"].is_string(), "{none}");
+}

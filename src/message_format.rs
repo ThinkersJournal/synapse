@@ -390,6 +390,52 @@ pub fn render(header: &Header) -> String {
     out
 }
 
+/// How a sender says its message body is written (ROADMAP row 41 P2, PM ruling 2026-11-10: a
+/// declared mode on the daemon send path; optional, so today's lanes are unchanged).
+///
+/// `L0` is free prose and is never checked. `L1:message-formats/1` promises a MESSAGE-FORMATS v1
+/// message, which the daemon then decodes strictly ([`decode`]) and refuses when it does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Free prose.
+    L0,
+    /// A MESSAGE-FORMATS v1 message.
+    L1MessageFormats1,
+}
+
+/// A mode string that is none of [`Mode::parse`]'s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnknownMode;
+
+impl fmt::Display for UnknownMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("mode must be L0 or L1:message-formats/1")
+    }
+}
+
+impl Mode {
+    /// The mode a sender names. Exactly `L0` or `L1:message-formats/1`.
+    ///
+    /// # Errors
+    /// [`UnknownMode`] for anything else, so a newer mode is refused, never guessed.
+    pub fn parse(text: &str) -> Result<Mode, UnknownMode> {
+        match text {
+            "L0" => Ok(Mode::L0),
+            "L1:message-formats/1" => Ok(Mode::L1MessageFormats1),
+            _ => Err(UnknownMode),
+        }
+    }
+
+    /// The name [`Mode::parse`] reads back.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::L0 => "L0",
+            Mode::L1MessageFormats1 => "L1:message-formats/1",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,5 +557,15 @@ mod tests {
     fn parse_header_does_not_require_every_key() {
         assert!(parse_header("[READY] synapse#1").is_ok());
         assert!(decode("[READY] synapse#1").is_err());
+    }
+
+    #[test]
+    fn a_mode_is_read_exactly_and_named_back() {
+        for m in [Mode::L0, Mode::L1MessageFormats1] {
+            assert_eq!(Mode::parse(m.name()), Ok(m));
+        }
+        for bad in ["", "l0", "L1", "L1:message-formats/2", "L0 ", "L2"] {
+            assert_eq!(Mode::parse(bad), Err(UnknownMode), "{bad:?}");
+        }
     }
 }

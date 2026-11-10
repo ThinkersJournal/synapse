@@ -299,7 +299,7 @@ impl SynapseMcpServer {
         let inner = self.inner.clone();
         let body = encode_body(body.as_bytes());
         tokio::task::spawn_blocking(move || {
-            inner.call(|d, role| send_call(d, role, to, &message_id, &body))
+            inner.call(|d, role| send_call(d, role, to, &message_id, &body, None))
         })
         .await
         .map_err(|_| "the call task failed".to_string())?
@@ -330,6 +330,10 @@ pub struct SendArgs {
     /// Your own id for this message. Resending with the same id is a duplicate, not a second copy.
     #[serde(default)]
     pub message_id: Option<String>,
+    /// How the body is written: `L0` (free prose, the default) or `L1:message-formats/1` (a
+    /// MESSAGE-FORMATS v1 message, which the daemon checks and refuses when it is not one).
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 /// Arguments of the `fetch` tool.
@@ -585,6 +589,7 @@ fn send_call(
     to: String,
     id: &str,
     body_b64: &str,
+    mode: Option<&str>,
 ) -> Result<Value, MailError> {
     let to = if to.contains('@') {
         to
@@ -595,11 +600,11 @@ fn send_call(
             None => to,
         }
     };
-    daemon.call(
-        role,
-        "/v1/send",
-        Some(&json!({"to": to, "message_id": id, "body_b64": body_b64})),
-    )
+    let mut request = json!({"to": to, "message_id": id, "body_b64": body_b64});
+    if let Some(mode) = mode {
+        request["mode"] = Value::String(mode.to_string());
+    }
+    daemon.call(role, "/v1/send", Some(&request))
 }
 
 #[tool_router(server_handler, vis = "pub")]
@@ -614,7 +619,8 @@ impl SynapseMcpServer {
         let id = args.message_id.unwrap_or_else(unique_id);
         let to = args.to;
         let body = encode_body(args.body.as_bytes());
-        self.daemon(move |daemon, role| send_call(daemon, role, to, &id, &body))
+        let mode = args.mode;
+        self.daemon(move |daemon, role| send_call(daemon, role, to, &id, &body, mode.as_deref()))
             .await
     }
 

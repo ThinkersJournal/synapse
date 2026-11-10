@@ -76,6 +76,10 @@ enum Command {
         /// A message id of your own, for idempotent resends (default: a fresh UUID).
         #[arg(long)]
         id: Option<String>,
+        /// How the body is written: `L0` (free prose) or `L1:message-formats/1` (the daemon checks
+        /// it and refuses a message that is not one). Default: undeclared, the soft lint.
+        #[arg(long)]
+        mode: Option<String>,
         message: Option<String>,
     },
     /// Fetch waiting messages, one JSON object per line. Each stays leased until acked.
@@ -1196,6 +1200,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
             role,
             to,
             id,
+            mode,
             message,
         } => {
             check_role(&role)?;
@@ -1220,11 +1225,11 @@ fn run(cli: Cli) -> Result<(), MailError> {
             // Chosen here, not by the daemon, so resending with `--id` is a duplicate, not a copy.
             let id = id.unwrap_or_else(synapsed_client::short_message_id);
             let daemon = connect(&home, &role)?;
-            let reply = daemon.call(
-                &role.role,
-                "/v1/send",
-                Some(&json!({"to": to, "message_id": id, "body_b64": encode_body(&body)})),
-            )?;
+            let mut request = json!({"to": to, "message_id": id, "body_b64": encode_body(&body)});
+            if let Some(mode) = mode {
+                request["mode"] = json!(mode);
+            }
+            let reply = daemon.call(&role.role, "/v1/send", Some(&request))?;
             let field = |name: &str| printable(reply[name].as_str().unwrap_or(""));
             println!("message id: {}", field("message_id"));
             println!("outcome: {}", field("outcome"));

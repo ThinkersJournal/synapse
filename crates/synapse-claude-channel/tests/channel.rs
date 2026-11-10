@@ -124,6 +124,7 @@ async fn send(from: &SynapseMcpServer, to: &str, body: &str) {
             to: to.to_string(),
             body: body.to_string(),
             message_id: None,
+            mode: None,
         }))
         .await
         .expect("send");

@@ -1,0 +1,5 @@
+Added: a declared `mode` on the daemon send path (`L0`, or `L1:message-formats/1`)
+
+ROADMAP row 41, slice P2a (PM ruling 2026-11-10: option B). `/v1/send` takes an optional `mode`. `L0` is free prose and is not checked, so no warning and no lint count. `L1:message-formats/1` promises a MESSAGE-FORMATS v1 message: the daemon decodes it strictly with the P1 decoder and refuses a message that is not one (422 `not_message_format`, naming the rule and showing the shape, never echoing the message); a refused message is not queued or counted. Any other mode is refused (400), not guessed. With no `mode` nothing changes: the soft lint still warns and counts, so today's lanes are unaffected. `synapse send --mode` and the MCP `send` tool's new optional `mode` argument set it (`synapse_mcp_server::SendArgs` gains a field).
+
+Not in this slice: carrying the mode to the receiver and showing it in the channel tag (P2b), a capability block, and a mandatory mode (waits for P4's second schema). The mode is not stored with the message yet. No size saving is claimed.
