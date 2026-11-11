@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.239): the L1 decoder for MESSAGE-FORMATS v1, and a send warning that names the rule
+
+ROADMAP row 41, slice P1 (design sections 7.2 and 7.3). New `synapse::message_format`: `decode` parses a lane message by the grammar and refuses an unknown type, a bad or unknown version, a missing subject, a missing required key, a word without `key=`, an empty value, a `|` in a value, or a later line that is not `note:`; `render` turns an accepted message into prose by fixed rules (same input, same text); `parse_header` is the structure-only entry point. Every refusal is a `FormatError` with a stable `code()` and a sentence that names the broken rule and shows the shape the type wants (for example `[ASK] <subject> to= options= recommend= blocks=`), and never repeats anything from the message. Extra keys after the listed ones are accepted, as MESSAGE-FORMATS says.
+
+The daemon's soft lint now uses the decoder, so the `warning` on a `/v1/send` reply (and `synapse send`) says which rule the first line broke instead of "missing first field" (the common cause is `[ASK] topic=x ...`, where the subject must be a bare word). New: a `|` in a value is now warned, as the adopted rule says. Still soft: the message is queued, only the first line is checked, and a missing key or a version this decoder does not read is not warned (the decoder's `decode` reports those).
+
+No wire change and no size saving is claimed (design 7.4). Tests: unit tests per rule, a corpus of 32 real lane messages from the last two days (`tests/data/message_corpus.txt`: 13 accepted, 19 refused with the recorded rule, including the headers this lane and the PM sent that were warned), and the daemon's integration test for the warning text.
+
 ### Docs (rc.238): state.redb through PersistAnt, design note
 
 Adds docs/superpowers/specs/2026-11-09-state-redb-via-persistant.md: the exact terms a PersistAnt-backed state Backend needs (atomic multi-key transaction, read-your-writes, snapshot reads, ordered scans, owner-only file, one process per file, durability Machine), what PersistAnt 0.16.8 already offers (batch with Require, ordered_scan_values), the gaps and asks for the PersistAnt lane, migration and order of work. Docs only, no code change; slice C1 stays at 2026-11-30.
