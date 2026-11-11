@@ -1,0 +1,35 @@
+# Real lane messages from the synapse lane session, 2026-11-08 and 2026-11-09 (first lines; a \n is a line break).
+# Format: <expected> TAB <message>. Expected is ok or err:<code> (the FormatError code, from decode).
+# Note text is shortened; nothing here is a secret.
+ok	[MERGED] synapse#347 main=42d2a319 branch=chore/configurant-0.7 checked=forge next=-\nnote: automatic, from the gate sweep; pick your next ROADMAP row
+ok	[NOTICE] docker-hub-credential affects=synapse when=now action=none\nnote: thanks, that settles it
+ok	[NOTICE] sign-your-notes affects=all-lanes when=now action=sign-github-posts
+ok	[NOTICE] synapse#349-merged-merge-main-into-348 affects=synapse when=now action=merge-main-push-tell-me-head
+ok	[TASK] synapse do=state-redb-design-note scope=docs deliver=[READY] stop=[ASK] from=PM\nnote: go
+ok	[TASK] synapse do=ai-to-ai-p1-decoder scope=ROADMAP-row-41,P1-then-P2 deliver=[READY] stop=[ASK]-if-a-ruling-is-needed from=PM
+ok	[FINDING] state-redb-via-persistant ref=persistant@main-cddaabc(0.16.13)+synapse-spec@23e21e06 by=persistant status=answers basis=read-code-and-matrix-not-run\nnote: G1 confirmed
+ok	[FINDING] state-redb-persistant-answers ref=23e21e06 by=persistant status=open basis=relayed
+ok	[STATUS] lane=synapse at=2026-11-09 board=- doing=waiting-348-merge next=A2b-on-rc-announce waiting=pm-merge-348,auth-framework-rc id-from=issue-sweep\nnote: issues open=2
+ok	[READY] synapse#349 head=a9b7ee52 merge=mergeable checks=required-green red=0 threads=0 codacy=- sourcery=- files=2\nnote: RUSTSEC ignore
+ok	[READY] synapse#348 head=65e3563e merge=origin-main-72bb3281-merged-clean checks=rerunning red=0 threads=0 codacy=- sourcery=- files=2
+ok	[HOLD] synapse#349 head=a9b7ee52 why=security-audit-red-on-main-lockfile need=pm-decision
+ok	[ASK] kv-kind-for-synapse-state-store to=persistant options=confirm-batch-Require-as-txn,plan-kv.txn recommend=confirm-batch-Require blocks=synapse-state.redb-retirement
+err:missing-subject	[ASK] topic=docker-hub-push-credential to=synapse options=tell-me-where-it-lives recommend=name-only blocks=releaseant-A5
+err:missing-subject	[ASK] topic=persistant-inventory to=PM options=A-keep-redb-until-slice-C,B-pull-slice-C-forward recommend=B+C blocks=-
+err:missing-subject	[ASK] topic=kv-kind-for-synapse-state-store to=persistant options=confirm-batch-Require-as-txn,plan-kv.txn recommend=confirm-batch-Require blocks=synapse-state.redb-retirement
+err:missing-subject	[ASK] topic=redb-to-persistant-plan to=PM options=hold-C1-to-2026-11-30,run-storage-use-on-live-home-then-pull-C1 recommend=hold-C1-and-write-state-design-note blocks=C1-early
+err:missing-subject	[FINDING] topic=docker-hub-push-credential ref=synapse@c3184e52 by=synapse status=names-only basis=gh-secret-list+config.json-keys
+err:missing-subject	[HOLD] repo=synapse#349 head=a9b7ee52 why=security-audit-red-on-main-lockfile need=pm-decision
+err:missing-subject	[READY] repo=synapse#347 head=2541a080 merge=clean checks=all-green red=0 threads=0 codacy=- sourcery=- files=3
+err:missing-subject	[NOTICE] topic=synapse#348-head-65e3563e affects=PM when=now action=none
+err:pipe-in-value	[ASK] persistant-inventory to=PM options=A-keep-redb|B-pull-slice-C-forward recommend=B blocks=-
+err:missing-key	[HOLD] synapse#348 head=01b6db76 why=audit-red
+err:missing-key	[STATUS] lane=synapse at=2026-11-09 board=- doing=idle
+err:no-type	Check PR #349 (chore/ignore-rustsec-2026-0459) CI via gh.
+err:word-without-key	[READY] synapse#348 head=65e3563e all checks green
+err:unexpected-subject	[STATUS] synapse lane=synapse at=2026-11-09 board=- doing=idle next=- waiting=- id-from=x
+err:not-a-note	[NOTICE] t affects=a when=b action=c\nfree text on the second line
+err:unknown-type	[REPORT] synapse#1 head=abc
+err:bad-version	[READY vtwo] synapse#1 head=abc
+err:unknown-version	[READY v2] synapse#1 head=abc merge=CLEAN checks=1/1 red=- threads=0 codacy=ok sourcery=skipped files=a
+err:empty-value	[HOLD] synapse#1 head= why=a need=b

@@ -212,6 +212,7 @@ pub mod email_server;
 pub mod identity;
 pub mod keystore;
 pub mod mailbox;
+pub mod message_format;
 pub mod monitoring;
 pub mod network_scope;
 pub mod replay;

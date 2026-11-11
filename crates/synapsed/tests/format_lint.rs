@@ -166,14 +166,28 @@ async fn a_message_that_is_not_a_v1_header_is_warned_counted_and_still_queued() 
     )
     .await;
     let warning = bad["warning"].as_str().expect("a warning");
-    assert!(warning.contains("a word without key="), "{warning}");
+    assert!(warning.contains("has no key="), "{warning}");
     assert!(
         !warning.contains("merged"),
         "never echoes the message: {warning}"
     );
+    // The reply says which rule was broken and shows the shape, so the sender can fix it at once.
+    let ask = submit(
+        &d,
+        &a,
+        "m4",
+        "[ASK] topic=x to=pm options=a,b recommend=a blocks=-",
+    )
+    .await;
+    let warning = ask["warning"].as_str().expect("a warning");
+    assert!(
+        warning.contains("needs a bare subject word right after the tag")
+            && warning.contains("[ASK] <subject> to= options= recommend= blocks="),
+        "{warning}"
+    );
     let prose = submit(&d, &a, "m3", "hello there").await;
     assert!(prose["warning"].is_string(), "{prose}");
-    assert_eq!(counters(&d, &a, "a").await, (3, 2));
+    assert_eq!(counters(&d, &a, "a").await, (4, 3));
 
     // A resend of the same id is a duplicate: not queued again, not counted again.
     let (status, again) = call(
@@ -187,5 +201,5 @@ async fn a_message_that_is_not_a_v1_header_is_warned_counted_and_still_queued() 
         (status, again["outcome"].as_str()),
         (200, Some("duplicate"))
     );
-    assert_eq!(counters(&d, &a, "a").await, (3, 2));
+    assert_eq!(counters(&d, &a, "a").await, (4, 3));
 }
