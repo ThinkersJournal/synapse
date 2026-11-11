@@ -36,6 +36,7 @@ macro_rules! cases {
 
 cases!(
     enqueue_then_fetch_leases_and_hides,
+    a_declared_mode_rides_with_the_message_and_survives_a_re_lease,
     an_expired_lease_redelivers_in_order,
     ack_removes_for_good_and_a_resend_is_a_duplicate,
     a_duplicate_while_queued_is_not_queued_twice,

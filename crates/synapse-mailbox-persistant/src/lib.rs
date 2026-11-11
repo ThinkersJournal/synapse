@@ -352,6 +352,8 @@ struct Meta {
     lease: Option<Lease>,
     attempts: u32,
     body_len: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
 }
 
 impl Meta {
@@ -362,6 +364,7 @@ impl Meta {
                 to: self.to,
                 from: self.from,
                 body,
+                mode: self.mode,
             },
             seq: self.seq,
             enqueued_at: self.enqueued_at,
@@ -720,6 +723,7 @@ impl<K: KvBackend + Send + Sync + 'static> MailTxn for Tx<'_, K> {
             lease: stored.lease.clone(),
             attempts: stored.attempts,
             body_len,
+            mode: stored.envelope.mode.clone(),
         };
         let raw = serde_json::to_vec(&meta).map_err(|e| se("encode", e))?;
         let qkey = self.qkey(role, seq);
@@ -986,6 +990,26 @@ mod tests {
             ]
             .concat()
         );
+    }
+
+    /// A Meta row written before ROADMAP row 41 P2b carries no `mode`: it reads as none and
+    /// writes back byte for byte, and a declared mode is kept.
+    #[test]
+    fn a_meta_row_written_before_the_mode_field_still_reads() {
+        let old = r#"{"message_id":"a/1","to":"b@acct","from":"a@acct","seq":1,"enqueued_at":"2026-10-02T12:00:00Z","lease":null,"attempts":0,"body_len":2}"#;
+        let meta: Meta = serde_json::from_str(old).unwrap();
+        assert_eq!(meta.mode, None);
+        assert_eq!(
+            serde_json::to_string(&meta).unwrap(),
+            old,
+            "None is not written"
+        );
+        let stored = meta.with_body(b"hi".to_vec());
+        assert_eq!(stored.envelope.mode, None);
+        let with: Meta =
+            serde_json::from_str(&old.replace(r#""body_len":2"#, r#""body_len":2,"mode":"L0""#))
+                .unwrap();
+        assert_eq!(with.with_body(vec![]).envelope.mode.as_deref(), Some("L0"));
     }
 
     fn timed_out() -> Result<u8, String> {
