@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
 """Windows side of the WSL pilot link: Hyper-V socket -> the daemon's 127.0.0.1 port.
 
 Listens on AF_HYPERV (no TCP listener) for ONE service GUID and pipes each connection to

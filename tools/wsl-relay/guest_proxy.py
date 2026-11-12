@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
 """Linux side of the WSL pilot link: per-lane Unix socket -> host over AF_VSOCK (CID 2).
 
 Run OUTSIDE the sandbox as the proxy user; bind-mount the socket into the sandbox, where a
