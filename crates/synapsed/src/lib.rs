@@ -1549,10 +1549,8 @@ fn claim_inner(
         for peer in &shared.default_peers {
             let peer = format!("{peer}@{}", shared.account);
             if let Err(e) = shared.access.add_default_pair(&grant.global_id, &peer, now) {
-                eprintln!(
-                    "synapsed: default rights of {} with {peer} not written: {e}",
-                    grant.global_id
-                );
+                // No role or account name in the line: both are caller-supplied text.
+                eprintln!("synapsed: a new lane's default rights were not written: {e}");
             }
         }
     }
