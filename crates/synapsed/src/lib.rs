@@ -1569,6 +1569,10 @@ struct SendBody {
     #[serde(default)]
     message_id: Option<String>,
     body_b64: String,
+    /// How the body is written: `L0` (prose) or `L1:message-formats/1`. Absent keeps today's
+    /// behaviour (the soft lint); see `synapse::message_format::Mode`.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 async fn send(
@@ -1600,7 +1604,29 @@ async fn send(
     let body_bytes = B64
         .decode(&body.body_b64)
         .map_err(|_| malformed("body_b64"))?;
-    let lint = format_lint::warning(&body_bytes);
+    // A declared L1 body is decoded strictly and refused when it is not that format; a declared L0
+    // body is prose and is not linted; with no mode the soft lint runs as before.
+    let lint = match body
+        .mode
+        .as_deref()
+        .map(synapse::message_format::Mode::parse)
+    {
+        None => format_lint::warning(&body_bytes),
+        Some(Err(e)) => return Err(malformed(&e.to_string())),
+        Some(Ok(synapse::message_format::Mode::L0)) => None,
+        Some(Ok(synapse::message_format::Mode::L1MessageFormats1)) => {
+            let text = std::str::from_utf8(&body_bytes)
+                .map_err(|_| malformed("mode L1:message-formats/1 needs a UTF-8 text body"))?;
+            if let Err(e) = synapse::message_format::decode(text) {
+                return Err(ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "not_message_format",
+                    format!("declared L1:message-formats/1 but {e}"),
+                ));
+            }
+            None
+        }
+    };
     let envelope = Envelope {
         message_id: message_id.clone(),
         to: body.to,
