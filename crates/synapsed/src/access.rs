@@ -224,6 +224,10 @@ pub struct Grant {
     /// Written by the one-time upgrade; reports can list what is still legacy.
     #[serde(default)]
     pub legacy: bool,
+    /// Written when a role first claimed, from the operator's `access.default_peers`; reports can list
+    /// them and the account holder can narrow or revoke them like any other grant.
+    #[serde(default)]
+    pub provisioned: bool,
     /// Names this grant for `revoke`. A grant written before ids existed gets a stable one from
     /// its content when the file is loaded.
     #[serde(default)]
@@ -440,6 +444,7 @@ impl Access {
                                 actions: vec![Action::See, Action::Send],
                                 objects: objects.clone(),
                                 legacy: true,
+                                provisioned: false,
                                 id: String::new(),
                                 issued_by: None,
                                 owner_edit: false,
@@ -499,6 +504,44 @@ impl Access {
             return Err(format!("{ACCESS_FILE} not written: {e}"));
         }
         Ok(id)
+    }
+
+    /// A new lane's default rights (`access.default_peers`): `role` and `peer` may each see and
+    /// message the other. Written by the daemon at the role's first claim, tagged `provisioned`,
+    /// in one write; a failed write leaves nothing added. A role is never paired with itself.
+    pub fn add_default_pair(
+        &self,
+        role: &str,
+        peer: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), String> {
+        if role == peer {
+            return Ok(());
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return Err("access state poisoned".into());
+        };
+        let before = state.grants.len();
+        for (to, about) in [(role, peer), (peer, role)] {
+            state.grants.push(Grant {
+                principal: to.to_string(),
+                actions: vec![Action::See, Action::Send],
+                objects: vec![agent_object(about)],
+                legacy: false,
+                provisioned: true,
+                id: uuid::Uuid::new_v4().simple().to_string(),
+                issued_by: None,
+                owner_edit: false,
+                issued_at: Some(now),
+                expires_at: None,
+                sensitive: false,
+            });
+        }
+        if let Err(e) = write_file(&self.path, &state) {
+            state.grants.truncate(before);
+            return Err(format!("{ACCESS_FILE} not written: {e}"));
+        }
+        Ok(())
     }
 
     /// The grant with this id, if there is one.
@@ -786,6 +829,7 @@ mod tests {
             actions: vec![action],
             objects: vec![object.into()],
             legacy: false,
+            provisioned: false,
             id: String::new(),
             issued_by: issued_by.map(str::to_string),
             owner_edit: false,

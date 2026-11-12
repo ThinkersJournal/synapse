@@ -71,3 +71,11 @@ type = "list"
 default = []
 env = "SYNAPSE_ALERT_ROLES"
 description = "roles that receive security alerts as mail"
+
+[[value]]
+key = "access.default_peers"
+type = "list"
+default = ["pm"]
+env = "SYNAPSE_DEFAULT_PEERS"
+restart = true
+description = "roles (on this account) that a new lane may see and message, and be seen and messaged by, from its first claim; a lane that already claimed is not touched; an empty list leaves a new lane deny-all"

@@ -57,6 +57,10 @@ fn seed(home: &tempfile::TempDir, body: &Value) {
 }
 
 async fn start(home: tempfile::TempDir) -> Running {
+    start_with_peers(home, &[]).await
+}
+
+async fn start_with_peers(home: tempfile::TempDir, peers: &[&str]) -> Running {
     let cfg = DaemonConfig {
         home: home.path().to_path_buf(),
         addr: "127.0.0.1:0".parse().unwrap(),
@@ -65,7 +69,8 @@ async fn start(home: tempfile::TempDir) -> Running {
     let daemon = Daemon::open(&cfg)
         .expect("open daemon")
         .with_redelivery_gaps(vec![chrono::Duration::milliseconds(300); 3])
-        .with_redelivery_check(Duration::from_millis(50));
+        .with_redelivery_check(Duration::from_millis(50))
+        .with_default_peers(peers.iter().map(|p| (*p).to_string()).collect());
     let started_at = daemon.started_at();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -605,4 +610,64 @@ async fn a_sub_agent_claims_from_its_own_home_and_receives_its_creators_mail() {
     let got = fetch(&d, &worker).await;
     assert_eq!(got.len(), 1, "the sub-agent receives the mail");
     assert_eq!(got[0]["from"], "pm@acct");
+}
+
+fn grants_in_file(d: &Running) -> Vec<Value> {
+    let text = std::fs::read_to_string(d.home.path().join("access.json")).unwrap();
+    let v: Value = serde_json::from_str(&text).unwrap();
+    v["grants"].as_array().unwrap().clone()
+}
+
+/// A new lane gets see+send with each configured peer, both ways, at its first claim and with nobody else.
+#[tokio::test]
+async fn a_new_lane_gets_default_rights_with_the_peer_at_its_first_claim() {
+    let d = start_with_peers(new_home(&[]), &["pm"]).await;
+    let pm = claim(&d, "pm").await;
+    let x = claim(&d, "x").await;
+    let y = claim(&d, "y").await;
+    assert_eq!(visible(&d, &x).await, ["pm@acct", "x@acct"]);
+    assert_eq!(send(&d, &x, "pm@acct", "report").await.0, 200);
+    assert_eq!(send(&d, &pm, "x@acct", "wake").await.0, 200);
+    assert_eq!(fetch(&d, &x).await.len(), 1, "the pm's mail reached x");
+    // Still deny-all toward every other lane.
+    let (status, reply) = send(&d, &x, "y@acct", "hi").await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (404, Some("unknown_recipient"))
+    );
+    assert_eq!(visible(&d, &y).await, ["pm@acct", "y@acct"]);
+    // pm is not paired with itself: no grant of pm over pm.
+    let own = grants_in_file(&d)
+        .into_iter()
+        .filter(|g| g["principal"] == "pm@acct" && g["objects"] == json!(["agent:pm@acct"]))
+        .count();
+    assert_eq!(own, 0);
+}
+
+/// With no peers configured a new lane stays deny-all (the library default).
+#[tokio::test]
+async fn without_default_peers_a_new_lane_stays_deny_all() {
+    let d = start(new_home(&[])).await;
+    let _pm = claim(&d, "pm").await;
+    let x = claim(&d, "x").await;
+    assert_eq!(visible(&d, &x).await, ["x@acct"]);
+}
+
+/// Only the first claim writes them: a later claim of the same role adds nothing, so an account
+/// holder's revoke sticks, and a lane that existed before is not touched.
+#[tokio::test]
+async fn a_second_claim_writes_no_default_rights() {
+    let d = start_with_peers(new_home(&[]), &["pm"]).await;
+    let _pm = claim(&d, "pm").await;
+    let _x = claim(&d, "x").await;
+    let before = grants_in_file(&d).len();
+    assert_eq!(before, 2, "x<->pm, both ways");
+    let _x2 = claim(&d, "x").await;
+    assert_eq!(grants_in_file(&d).len(), before);
+    assert!(
+        grants_in_file(&d)
+            .iter()
+            .all(|g| g["provisioned"] == json!(true)),
+        "tagged provisioned"
+    );
 }

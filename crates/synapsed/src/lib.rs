@@ -256,6 +256,9 @@ struct Shared {
     stats_dirty: std::sync::atomic::AtomicBool,
     /// This daemon's account name: it serves `<role>@<account>` only.
     account: String,
+    /// Roles (on this account) every NEW lane may see and message, and be seen and messaged by, from
+    /// its first claim (`access.default_peers`). Empty: a new lane is deny-all, as the access design says.
+    default_peers: Vec<String>,
     account_key_id: String,
     account_key: [u8; 32],
     /// Random per daemon start, hex. Claims must be signed for it (review I3); it is published only
@@ -758,6 +761,7 @@ impl Daemon {
                 stats_since: loaded.1,
                 stats_dirty: std::sync::atomic::AtomicBool::new(false),
                 account: summary.account,
+                default_peers: Vec::new(),
                 account_key_id: summary.key_id,
                 account_key: keystore.account_public_key(),
                 instance_id,
@@ -815,6 +819,15 @@ impl Daemon {
             roles,
             fallback,
         });
+        self
+    }
+
+    /// Roles a new lane gets see+send with, both ways, at its first claim (the operator's
+    /// `access.default_peers`; the ruling is the PM role only). Roles that already claimed are not
+    /// touched. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_default_peers(mut self, peers: Vec<String>) -> Daemon {
+        self.shared.default_peers = peers;
         self
     }
 
@@ -1527,6 +1540,21 @@ fn claim_inner(
             .record_creator(&grant.global_id, &req.chain[1].subject_global_id)
     {
         eprintln!("synapsed: creator of {} not recorded: {e}", grant.global_id);
+    }
+
+    // A role's very first claim (epoch 1) writes its default rights; a later claim never does, so an
+    // account holder's revoke of one sticks. Not written on failure: the lane is deny-all, as before.
+    if grant.epoch == 1 {
+        let now = Utc::now();
+        for peer in &shared.default_peers {
+            let peer = format!("{peer}@{}", shared.account);
+            if let Err(e) = shared.access.add_default_pair(&grant.global_id, &peer, now) {
+                eprintln!(
+                    "synapsed: default rights of {} with {peer} not written: {e}",
+                    grant.global_id
+                );
+            }
+        }
     }
 
     let token = random_bytes::<32>().ok_or_else(|| {
@@ -3415,6 +3443,7 @@ async fn grant_create(
         actions: body.actions.clone(),
         objects: body.objects.clone(),
         legacy: false,
+        provisioned: false,
         id: String::new(),
         issued_by: (!holder).then(|| session.global_id.clone()),
         owner_edit,
