@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.242): WSL2 pilot design note, the Hyper-V socket relay spike, and the two-daemons-over-email feasibility note
+
+Docs and a spike under `tools/wsl-relay/`; no daemon, crate or manifest change.
+
+`docs/WSL-PILOT-DESIGN.md` designs running lanes inside WSL2 against the Windows pilot daemon: the relay over a Hyper-V
+socket (the WSL VM id is found by the relay itself), the certificate problem (P1/P2), and how a lane is launched
+there (the prompt goes before the variadic channels flag). `tools/wsl-relay/` holds the spike code, the lane usage
+doc, an MCP config and `proxies-up.sh`. `docs/EMAIL_BRIDGE_DESIGN.md` is a feasibility note on two Synapse daemons
+exchanging mail over email. Nothing here is wired into the build or CI; the spike is not a supported feature.
+
 ### Added (rc.241): the declared `mode` is stored with the message and shown to the receiver
 
 ROADMAP row 41, slice P2b (PM ruling 2026-11-11: option A with conditions). The mode a sender declared on `/v1/send` (P2a) is now kept on the mailbox `Envelope`, in both stores (redb and the PersistAnt store, so SQLite, PostgreSQL and MySQL too), and comes back on every delivery. `/v1/fetch` gains a `mode` field on a message that declared one, the MCP `fetch` tool shows it, and the Claude Code channel tag gains a `mode` attribute (escaped like every `meta` value). A message with no declared mode has no `mode` field anywhere, so today's lanes see no change on the wire. The sender's claim is still verified at send (an `L1` body is decoded before it is queued); the receiver is told what was declared and checked, not asked to trust it.
