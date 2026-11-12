@@ -1,7 +1,0 @@
-Added: the declared `mode` is stored with the message and shown to the receiver
-
-ROADMAP row 41, slice P2b (PM ruling 2026-11-11: option A with conditions). The mode a sender declared on `/v1/send` (P2a) is now kept on the mailbox `Envelope`, in both stores (redb and the PersistAnt store, so SQLite, PostgreSQL and MySQL too), and comes back on every delivery. `/v1/fetch` gains a `mode` field on a message that declared one, the MCP `fetch` tool shows it, and the Claude Code channel tag gains a `mode` attribute (escaped like every `meta` value). A message with no declared mode has no `mode` field anywhere, so today's lanes see no change on the wire. The sender's claim is still verified at send (an `L1` body is decoded before it is queued); the receiver is told what was declared and checked, not asked to trust it.
-
-Storage format: the new field is optional with a serde default, so every row and envelope written before this release still reads (as no mode), nothing is rewritten, and a message without a mode is written byte for byte as before. Tests: a pre-change row decodes in each store's own decoder, and one conformance case (run against the memory, redb, SQLite, PostgreSQL and MySQL stores) shows the mode surviving enqueue, fetch and a re-lease.
-
-Downgrade: an older build reads a store this one wrote (neither store rejects unknown fields) and delivers every message intact, but it does not know `mode`: it shows none, and any message it re-leases is rewritten without it. Nothing else is lost, and no migration or format stamp changes.
