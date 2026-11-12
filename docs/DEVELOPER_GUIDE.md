@@ -7,7 +7,7 @@ approval API; about 670 lines) was replaced in rc.100 because most of its method
 
 ## Build and test
 
-Rust 2024 edition, minimum Rust 1.95. These are the commands CI runs (`Build and Test` job, ubuntu); run them
+Rust 2024 edition, minimum Rust 1.98. These are the commands CI runs (`Build and Test` job, ubuntu); run them
 from a clean checkout:
 
 ```bash

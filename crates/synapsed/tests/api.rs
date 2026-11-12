@@ -3,6 +3,8 @@
 //! claims prove the role key, Host-header check, no CORS, Bearer on every authenticated route,
 //! constant-time token handling, and no token or key material in responses.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -52,6 +54,7 @@ fn config(home: &std::path::Path) -> DaemonConfig {
 /// `SYNAPSE_TEST_STORE=sqlite` (with `--features sqlite-store`) runs this whole suite against the
 /// PersistAnt SQLite store; unset, against redb.
 fn open_daemon(cfg: &DaemonConfig) -> Result<Daemon, DaemonError> {
+    common::allow_all(&cfg.home);
     #[cfg(feature = "sqlite-store")]
     if std::env::var("SYNAPSE_TEST_STORE").as_deref() == Ok("sqlite") {
         return Daemon::open_with(cfg, synapsed::StoreKind::Sqlite);
@@ -68,9 +71,25 @@ async fn start_with(security: Option<SecurityConfig>) -> Running {
 }
 
 async fn start_daemon(security: Option<SecurityConfig>, pause: Option<Pause>) -> Running {
+    start_daemon_with(security, pause, None).await
+}
+
+/// A daemon whose sessions expire after `ttl` of disuse.
+async fn start_with_session_ttl(ttl: chrono::Duration) -> Running {
+    start_daemon_with(None, None, Some(ttl)).await
+}
+
+async fn start_daemon_with(
+    security: Option<SecurityConfig>,
+    pause: Option<Pause>,
+    session_ttl: Option<chrono::Duration>,
+) -> Running {
     let home = tempfile::tempdir().unwrap();
     Keystore::init_account(home.path(), "acct").expect("init account");
     let mut daemon = open_daemon(&config(home.path())).expect("open daemon");
+    if let Some(ttl) = session_ttl {
+        daemon = daemon.with_session_ttl(ttl);
+    }
     if let Some(security) = security {
         daemon = daemon.with_security(security);
     }
@@ -181,6 +200,85 @@ async fn post(d: &Running, path: &str, token: Option<&str>, body: Value) -> (u16
     (status, value, text)
 }
 
+/// ROADMAP row 37(b), PM ruling 2026-10-25: a session expires after a period of disuse. The window
+/// slides (every authenticated call renews it), expiry is a 401 `session_expired` that is NOT counted
+/// as an attack, a session that was superseded still answers 409 first (so its holder is told what
+/// happened and does not re-claim blindly), and a fresh claim works.
+#[tokio::test]
+async fn an_idle_session_expires_and_use_slides_the_window() {
+    let d = start_with_session_ttl(chrono::Duration::milliseconds(800)).await;
+    let (token, epoch) = claim(&d, "alpha").await;
+
+    // Used every 400 ms for two seconds, well past the 800 ms window: it never expires.
+    for round in 0..5 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let (status, _, text) = post(&d, "/v1/heartbeat", Some(&token), json!({})).await;
+        assert_eq!(status, 200, "round {round}: a used session slides: {text}");
+    }
+
+    // Idle past the window: expired, and named as such.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let (status, reply, text) = post(&d, "/v1/heartbeat", Some(&token), json!({})).await;
+    assert_eq!(status, 401, "{text}");
+    assert_eq!(reply["error"], "session_expired", "{text}");
+    let events =
+        std::fs::read_to_string(d.home.path().join(SECURITY_EVENTS_FILE)).unwrap_or_default();
+    assert!(
+        !events.contains("auth_failure"),
+        "an expiry is not an attack: {events}"
+    );
+
+    // Claim again: a new epoch and a working token. The old token is now SUPERSEDED, which outranks
+    // expired: its holder is told someone else holds the role.
+    let (fresh, fresh_epoch) = claim_fresh(&d, "alpha").await;
+    assert!(fresh_epoch > epoch);
+    let (status, _, text) = post(&d, "/v1/heartbeat", Some(&fresh), json!({})).await;
+    assert_eq!(status, 200, "{text}");
+    let (status, reply, text) = post(&d, "/v1/heartbeat", Some(&token), json!({})).await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (409, Some("superseded")),
+        "{text}"
+    );
+    d.stop().await;
+}
+
+/// ROADMAP row 37(a): handlers take their body (`Bytes`) before `authed()` runs, so an unauthenticated
+/// caller's body is read first. What bounds that is axum's default body limit (2 MiB). This pins the
+/// bound: a body past it is refused 413 without ever reaching auth, and one inside it still gets the
+/// plain 401. If a future axum changes the default, or someone lifts it, this fails. The server may
+/// answer 413 or close the connection mid-upload (Windows reports that as an aborted connection):
+/// both mean the body was not accepted; what must not happen is the 401 a read-through would give.
+#[tokio::test]
+async fn an_unauthenticated_body_is_bounded_before_auth() {
+    let d = start().await;
+    let send = |len: usize| {
+        client()
+            .post(d.url("/v1/send"))
+            .header("content-type", "application/json")
+            .body(vec![b' '; len])
+            .send()
+    };
+    let small = send(1024).await.unwrap();
+    assert_eq!(
+        small.status().as_u16(),
+        401,
+        "inside the limit: auth refuses it"
+    );
+    match send(3 * 1024 * 1024).await {
+        Ok(big) => assert_eq!(
+            big.status().as_u16(),
+            413,
+            "past the default limit: refused before auth"
+        ),
+        Err(e) => assert!(
+            e.is_request() || e.is_connect(),
+            "the connection was closed on the oversize body: {e}"
+        ),
+    }
+    d.stop().await;
+}
+
 #[tokio::test]
 async fn health_answers_without_a_token() {
     let d = start().await;
@@ -193,6 +291,10 @@ async fn health_answers_without_a_token() {
         .await
         .unwrap();
     assert_eq!(reply["ok"], true);
+    assert_eq!(
+        reply["mailbox"], "ok",
+        "the mailbox's own state, beside the liveness answer"
+    );
     assert!(reply["started_at"].is_string());
     assert!(reply.get("proof").is_none(), "no challenge, no proof");
     d.stop().await;
@@ -1369,7 +1471,7 @@ async fn stats_count_sent_acked_redelivered_and_expired_per_role() {
     let (s, stats, _) = get_stats(&d, Some(&alpha)).await;
     assert_eq!(s, 200, "{stats}");
     assert_eq!(counters(&stats, "beta@acct"), [0, 0, 0, 0], "fresh daemon");
-    assert_eq!(stats["scope"], "process");
+    assert_eq!(stats["scope"], "home");
     assert!(stats["since"].is_string(), "{stats}");
 
     let m1 = send_to(&d, &alpha, "beta@acct", b"SECRET-ONE").await;
@@ -1417,6 +1519,84 @@ async fn stats_count_sent_acked_redelivered_and_expired_per_role() {
     for leak in ["SECRET", "body", "message_id", &m1, &beta, &beta2] {
         assert!(!text.contains(leak), "stats leaked {leak:?}: {text}");
     }
+    d.stop().await;
+}
+
+/// Stop `d` cleanly and start a new daemon on the same home.
+async fn restart(mut d: Running) -> Running {
+    if let Some(tx) = d.stop.take() {
+        let _ = tx.send(());
+    }
+    if let Some(task) = d.task.take() {
+        let _ = task.await;
+    }
+    let _ = std::fs::remove_file(d.home.path().join("synapsed.json"));
+    let daemon = open_daemon(&config(d.home.path())).expect("reopen daemon");
+    let started_at = daemon.started_at();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(daemon.serve(listener, async move {
+        let _ = rx.await;
+    }));
+    let announce = d.home.path().join("synapsed.json");
+    for _ in 0..200 {
+        if announce.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    d.addr = addr;
+    d.started_at = started_at;
+    d.stop = Some(tx);
+    d.task = Some(task);
+    d
+}
+
+fn role_field(stats: &Value, role: &str, field: &str) -> u64 {
+    stats["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["global_id"] == role)
+        .unwrap_or_else(|| panic!("{role} not in {stats}"))[field]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{field} missing in {stats}"))
+}
+
+/// The counters outlive the daemon: `sent` (to the recipient) and `submitted` (by the sender) are
+/// the same after a clean restart, and `since` keeps the original start of counting while
+/// `daemon_started` moves. The control is the fresh home, which starts at zero.
+#[tokio::test]
+async fn stats_count_per_sender_and_survive_a_restart() {
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (_beta, _) = claim(&d, "beta").await;
+    send_to(&d, &alpha, "beta@acct", b"one").await;
+    send_to(&d, &alpha, "beta@acct", b"two").await;
+    let (_, before, _) = get_stats(&d, Some(&alpha)).await;
+    assert_eq!(
+        role_field(&before, "alpha@acct", "submitted"),
+        2,
+        "{before}"
+    );
+    assert_eq!(role_field(&before, "alpha@acct", "sent"), 0);
+    assert_eq!(role_field(&before, "beta@acct", "sent"), 2);
+    assert_eq!(role_field(&before, "beta@acct", "submitted"), 0);
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let d = restart(d).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (s, after, _) = get_stats(&d, Some(&alpha)).await;
+    assert_eq!(s, 200, "{after}");
+    assert_eq!(role_field(&after, "alpha@acct", "submitted"), 2, "{after}");
+    assert_eq!(role_field(&after, "beta@acct", "sent"), 2, "{after}");
+    assert_eq!(after["since"], before["since"], "counting did not restart");
+    assert_ne!(after["daemon_started"], before["daemon_started"]);
+
+    send_to(&d, &alpha, "beta@acct", b"three").await;
+    let (_, more, _) = get_stats(&d, Some(&alpha)).await;
+    assert_eq!(role_field(&more, "beta@acct", "sent"), 3, "{more}");
     d.stop().await;
 }
 

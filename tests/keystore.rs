@@ -208,7 +208,7 @@ fn a_fresh_certificate_validates_against_the_account_key() {
         .map(Permission::as_str)
         .collect();
     names.sort();
-    assert_eq!(names, ["ack", "request-ack", "send"]);
+    assert_eq!(names, ["ack", "request-ack", "send", "state-write"]);
     assert_eq!(role.not_before, t0());
     assert_eq!(role.not_after, t0() + Duration::hours(24));
     assert_eq!(
@@ -506,4 +506,255 @@ fn racing_init_account_has_exactly_one_winner_per_home() {
         }
         Keystore::open(dir.path()).expect("the winner's account opens");
     }
+}
+
+/// Write a keystore file by hand the way the keystore does: owner-only on Unix, which it checks.
+fn write_private(path: &Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// A new sub-agent's public keys: any fresh signing key, a fixed sealing key.
+fn sub_agent_keys() -> (ed25519_dalek::SigningKey, synapse::keystore::RolePublicKeys) {
+    let key = ed25519_dalek::SigningKey::from_bytes(
+        uuid::Uuid::new_v4()
+            .as_bytes()
+            .repeat(2)
+            .as_slice()
+            .try_into()
+            .unwrap(),
+    );
+    let keys = synapse::keystore::RolePublicKeys {
+        signing: key.verifying_key().to_bytes(),
+        sealing: [7; 32],
+    };
+    (key, keys)
+}
+
+/// A3: only a role holding `role-admin` gets a delegation budget in its certificate.
+#[test]
+fn only_a_role_admin_gets_a_delegation_budget() {
+    use synapse::certificate::Permission;
+    let (_dir, store) = store_with_account();
+    assert_eq!(store.role("pm", t0()).unwrap().chain[0].may_delegate, 0);
+    store.grant("pm", &Permission::RoleAdmin).unwrap();
+    store.grant("dev", &Permission::StateReadAll).unwrap();
+    assert_eq!(
+        store.role("pm", t0()).unwrap().chain[0].may_delegate,
+        synapse::keystore::ROLE_DELEGATION,
+        "role-admin: the certificate is re-issued with a budget"
+    );
+    assert_eq!(
+        store.role("dev", t0()).unwrap().chain[0].may_delegate,
+        0,
+        "control: another grant gives no budget"
+    );
+}
+
+/// A3: the certificate a role-admin issues for a sub-agent chains to the account, narrows the id,
+/// takes one off the budget and cannot hold what its creator lacks.
+#[test]
+fn a_delegated_certificate_cannot_widen_its_parent() {
+    use synapse::certificate::{ChainError, Permission};
+    let (dir, store) = store_with_account();
+    store.grant("pm", &Permission::RoleAdmin).unwrap();
+    let pm = store.role("pm", t0()).unwrap();
+    let (_worker_key, keys) = sub_agent_keys();
+    let hours = chrono::Duration::hours(1);
+
+    // A subset of pm's permissions: issued, and the whole chain validates.
+    let pem = store
+        .delegate("pm", "worker", keys, &[Permission::Send], t0(), hours)
+        .unwrap();
+    let chain = synapse::certificate::chain_from_pem(&pem).unwrap();
+    assert_eq!(chain.len(), 2, "the leaf, then pm's own certificate");
+    assert_eq!(chain[0].subject_global_id, "worker.pm@acct");
+    assert_eq!(chain[0].may_delegate, 1, "one less than pm's 2");
+    validates(&store, &chain, t0()).expect("a narrower permission set chains");
+
+    // More than pm holds: refused at issue.
+    let wider = [Permission::Send, Permission::StateAdmin];
+    assert!(pm.permissions.contains(&Permission::Send));
+    assert!(!pm.permissions.contains(&Permission::StateAdmin));
+    assert!(matches!(
+        store.delegate("pm", "worker", keys, &wider, t0(), hours),
+        Err(KeystoreError::DelegationRefused(_))
+    ));
+
+    // And a certificate forged with pm's own key to be wider is refused by the chain rules.
+    let pem = std::fs::read_to_string(dir.path().join("roles").join("pm").join("signing.key.pem"))
+        .unwrap();
+    let pm_key = {
+        use ed25519_dalek::pkcs8::DecodePrivateKey;
+        ed25519_dalek::SigningKey::from_pkcs8_pem(&pem).unwrap()
+    };
+    let mut forged = chain[0].clone();
+    forged.permissions.push(Permission::StateAdmin);
+    let forged = synapse::certificate::AgentCertificate::sign(forged, &pm_key);
+    let forged_chain = [forged, chain[1].clone()];
+    assert_eq!(
+        validates(&store, &forged_chain, t0()).unwrap_err(),
+        ChainError::PermissionWidened
+    );
+}
+
+/// A3: a role without the budget, and a name that is not a label, issue nothing.
+#[test]
+fn a_role_without_a_budget_cannot_delegate() {
+    use synapse::certificate::Permission;
+    let (_dir, store) = store_with_account();
+    store.grant("pm", &Permission::RoleAdmin).unwrap();
+    let (_key, keys) = sub_agent_keys();
+    let hours = chrono::Duration::hours(1);
+    assert!(matches!(
+        store.delegate("dev", "worker", keys, &[Permission::Send], t0(), hours),
+        Err(KeystoreError::DelegationRefused(_))
+    ));
+    assert!(matches!(
+        store.delegate("pm", "a.b", keys, &[Permission::Send], t0(), hours),
+        Err(KeystoreError::InvalidName)
+    ));
+    // Control: pm, with the budget, may.
+    assert!(
+        store
+            .delegate("pm", "worker", keys, &[Permission::Send], t0(), hours)
+            .is_ok()
+    );
+}
+
+/// A3 (b): a sub-agent's own home installs the chain its creator issued and loads it back as
+/// `worker.pm@acct`; a chain for other keys, or for another account, is refused.
+#[test]
+fn a_sub_agent_home_installs_its_chain_and_loads_it() {
+    use synapse::certificate::Permission;
+    let (_dir, store) = store_with_account();
+    store.grant("pm", &Permission::RoleAdmin).unwrap();
+    let sub_home = tempfile::tempdir().unwrap();
+    let keys = Keystore::init_role(sub_home.path(), "acct", "worker").unwrap();
+    let hours = chrono::Duration::hours(1);
+    let pem = store
+        .delegate("pm", "worker", keys, &[Permission::Send], t0(), hours)
+        .unwrap();
+
+    Keystore::install_role_certificate(sub_home.path(), "worker", &pem).expect("its own chain");
+    let identity = synapse::keystore::load_role(sub_home.path(), "worker", t0()).unwrap();
+    assert_eq!(identity.global_id, "worker.pm@acct");
+    assert_eq!(identity.chain.len(), 2, "its certificate, then pm's");
+
+    // A chain issued for someone else's keys is not this home's.
+    let other_home = tempfile::tempdir().unwrap();
+    let other_keys = Keystore::init_role(other_home.path(), "acct", "worker").unwrap();
+    let others = store
+        .delegate("pm", "worker", other_keys, &[Permission::Send], t0(), hours)
+        .unwrap();
+    assert!(matches!(
+        Keystore::install_role_certificate(sub_home.path(), "worker", &others),
+        Err(KeystoreError::Corrupt(_))
+    ));
+
+    // A leaf whose id does not narrow its creator's (forged with pm's own key), and a chain longer
+    // than a role-admin's budget allows, are not a sub-agent's chain either.
+    let chain = synapse::certificate::chain_from_pem(&pem).unwrap();
+    let pm_key = {
+        use ed25519_dalek::pkcs8::DecodePrivateKey;
+        let text =
+            std::fs::read_to_string(_dir.path().join("roles").join("pm").join("signing.key.pem"))
+                .unwrap();
+        ed25519_dalek::SigningKey::from_pkcs8_pem(&text).unwrap()
+    };
+    let mut renamed = chain[0].clone();
+    renamed.subject_global_id = "worker.root@acct".to_string();
+    let renamed = synapse::certificate::AgentCertificate::sign(renamed, &pm_key);
+    let wrong_id = synapse::certificate::chain_to_pem(&[renamed, chain[1].clone()]);
+    assert!(matches!(
+        Keystore::install_role_certificate(sub_home.path(), "worker", &wrong_id),
+        Err(KeystoreError::Corrupt(_))
+    ));
+    // Keys that differ in only one half are not this home's either (forged with pm's key).
+    for (signing_differs, label) in [(true, "signing"), (false, "sealing")] {
+        let mut half = chain[0].clone();
+        if signing_differs {
+            half.subject_signing_key = other_keys.signing;
+        } else {
+            half.subject_sealing_key = other_keys.sealing;
+        }
+        let half = synapse::certificate::AgentCertificate::sign(half, &pm_key);
+        let pem = synapse::certificate::chain_to_pem(&[half, chain[1].clone()]);
+        assert!(
+            matches!(
+                Keystore::install_role_certificate(sub_home.path(), "worker", &pem),
+                Err(KeystoreError::Corrupt(_))
+            ),
+            "only the {label} key differs"
+        );
+    }
+    let too_long = synapse::certificate::chain_to_pem(&[
+        chain[0].clone(),
+        chain[1].clone(),
+        chain[1].clone(),
+        chain[1].clone(),
+    ]);
+    assert!(matches!(
+        Keystore::install_role_certificate(sub_home.path(), "worker", &too_long),
+        Err(KeystoreError::Corrupt(_))
+    ));
+
+    // A foreign chain put on disk by hand is not read back as this home's role either. The home
+    // makes its own keys (so they are as private as the platform wants); only the certificate is
+    // written by hand.
+    let loose = tempfile::tempdir().unwrap();
+    let loose_keys = Keystore::init_role(loose.path(), "acct", "worker").unwrap();
+    let (_foreign_dir, foreign_store) = {
+        let dir = tempfile::tempdir().unwrap();
+        Keystore::init_account(dir.path(), "other").unwrap();
+        let store = Keystore::open(dir.path()).unwrap();
+        store.grant("pm", &Permission::RoleAdmin).unwrap();
+        (dir, store)
+    };
+    let abroad = foreign_store
+        .delegate("pm", "worker", loose_keys, &[Permission::Send], t0(), hours)
+        .unwrap();
+    write_private(
+        &loose.path().join("roles/worker/cert.pem"),
+        abroad.as_bytes(),
+    );
+    let only = Keystore::open_role_only(loose.path()).unwrap();
+    let read = only.role("worker", t0());
+    assert!(matches!(read, Err(KeystoreError::Corrupt(_))), "{read:?}");
+    // A one-link certificate of another account for this home's keys is refused too.
+    let foreign_leaf = foreign_store
+        .issue_role_certificate("worker", loose_keys, t0(), chrono::Duration::days(1))
+        .unwrap();
+    write_private(
+        &loose.path().join("roles/worker/cert.pem"),
+        foreign_leaf.as_bytes(),
+    );
+    let read = only.role("worker", t0());
+    assert!(matches!(read, Err(KeystoreError::Corrupt(_))), "{read:?}");
+    // ...while this home's own chain reads back through the role-only view.
+    let mine = Keystore::open_role_only(sub_home.path()).unwrap();
+    assert_eq!(
+        mine.role("worker", t0()).unwrap().global_id,
+        "worker.pm@acct"
+    );
+
+    // A chain from another account is not this home's account.
+    let (_dir2, foreign) = {
+        let dir = tempfile::tempdir().unwrap();
+        Keystore::init_account(dir.path(), "other").unwrap();
+        let store = Keystore::open(dir.path()).unwrap();
+        (dir, store)
+    };
+    foreign.grant("pm", &Permission::RoleAdmin).unwrap();
+    let from_abroad = foreign
+        .delegate("pm", "worker", keys, &[Permission::Send], t0(), hours)
+        .unwrap();
+    assert!(matches!(
+        Keystore::install_role_certificate(sub_home.path(), "worker", &from_abroad),
+        Err(KeystoreError::Corrupt(_))
+    ));
 }

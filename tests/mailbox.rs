@@ -12,6 +12,7 @@ macro_rules! cases {
 
 cases!(
     enqueue_then_fetch_leases_and_hides,
+    a_declared_mode_rides_with_the_message_and_survives_a_re_lease,
     an_expired_lease_redelivers_in_order,
     ack_removes_for_good_and_a_resend_is_a_duplicate,
     a_duplicate_while_queued_is_not_queued_twice,
@@ -24,6 +25,7 @@ cases!(
     a_lease_outside_the_range_is_refused,
     mail_waits_for_a_role_that_has_not_claimed_yet,
     claims_are_written_through_the_store,
+    role_liveness_is_written_through_the_store,
     depths_count_queued_and_leased_per_role,
     an_expired_or_superseded_lease_counts_as_queued,
     fetch_excluding_skips_the_named_messages_and_leaves_them_unleased,
@@ -32,6 +34,11 @@ cases!(
     a_message_leased_max_deliveries_times_goes_dead_and_is_kept,
     a_full_dead_set_keeps_the_message_queued,
     a_dead_message_can_be_requeued,
+    redelivery_backs_off_then_goes_dead_and_names_the_sender,
+    a_polling_reader_also_reports_the_exhausted_message,
+    an_ack_at_the_second_attempt_ends_the_schedule_with_no_notice,
+    a_restart_mid_schedule_gets_the_message_again,
+    a_dead_message_is_delivered_again_when_the_role_next_claims,
 );
 
 /// MemoryStore's transaction contract: a closure that changes state and then fails leaves the
@@ -115,8 +122,9 @@ fn a_failed_claim_write_poisons_and_a_reopen_continues_from_the_store() {
         "persisted normally"
     );
 
-    // Control: before the failure, depths are readable.
+    // Control: before the failure, depths are readable and the mailbox says it is healthy.
     assert!(mb.depths(later).unwrap().contains_key("lane@acct"));
+    assert!(!mb.is_poisoned());
 
     // The next store write fails: the claim is granted in memory but not recorded.
     store.fail_next.store(true, Ordering::SeqCst);
@@ -124,6 +132,10 @@ fn a_failed_claim_write_poisons_and_a_reopen_continues_from_the_store() {
     assert!(
         matches!(ids.try_claim(&mut mb, "lane", at), Err(MailError::Store(_))),
         "the store write failed"
+    );
+    assert!(
+        mb.is_poisoned(),
+        "a failed write poisons, and the mailbox can say so"
     );
     for result in [
         mb.enqueue(suite::env("m", "lane@acct", b"x"), at)
@@ -162,7 +174,7 @@ fn malformed_envelopes_are_refused() {
         ("", "m1", "peer@acct"),
         ("nobody", "m1", "peer@acct"),
         ("a@b@c", "m1", "peer@acct"),
-        ("bad.label@acct", "m1", "peer@acct"),
+        ("bad..label@acct", "m1", "peer@acct"), // an empty level (a single dot is a sub-agent, A3)
         ("lane@acct", "", "peer@acct"),
         ("lane@acct", long.as_str(), "peer@acct"),
         ("lane@acct", "m1", long.as_str()),
@@ -173,6 +185,7 @@ fn malformed_envelopes_are_refused() {
             to: to.into(),
             from: from.into(),
             body: vec![],
+            mode: None,
         };
         assert_eq!(
             mb.enqueue(env, suite::t0()),

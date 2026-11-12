@@ -33,6 +33,23 @@ pub enum Permission {
     Send,
     RequestAck,
     Ack,
+    /// Shared state: create records and patch those the role is a party to (every role by default).
+    StateWrite,
+    /// Shared state: read every record (the PM and the export role). Grants no write.
+    StateReadAll,
+    /// Shared state: read and patch any record, change owners, patch terminal records.
+    StateAdmin,
+    /// Shared state: write derived facts. Held only by the checker role.
+    StateDerive,
+    /// Role liveness: retire and revive roles (`/v1/roles/retire`, `/v1/roles/revive`). Held only
+    /// by the PM role.
+    RoleAdmin,
+    /// Daemon control: stop the daemon cleanly (`/v1/daemon/shutdown`). Held only by the PM role.
+    DaemonAdmin,
+    /// Rooms: create rooms under the account (`docs/ROOMS_DESIGN.md` section 6).
+    RoomCreate,
+    /// Rooms: moderate any room of the account. Held rarely.
+    RoomAdmin,
     /// A consumer-defined grant. Always begins `x-`; Synapse carries it and never interprets it.
     Extension(String),
 }
@@ -44,6 +61,14 @@ impl Permission {
             Permission::Send => "send".to_string(),
             Permission::RequestAck => "request-ack".to_string(),
             Permission::Ack => "ack".to_string(),
+            Permission::StateWrite => "state-write".to_string(),
+            Permission::StateReadAll => "state-read-all".to_string(),
+            Permission::StateAdmin => "state-admin".to_string(),
+            Permission::StateDerive => "state-derive".to_string(),
+            Permission::RoleAdmin => "role-admin".to_string(),
+            Permission::DaemonAdmin => "daemon-admin".to_string(),
+            Permission::RoomCreate => "room-create".to_string(),
+            Permission::RoomAdmin => "room-admin".to_string(),
             Permission::Extension(text) => text.clone(),
         }
     }
@@ -56,6 +81,14 @@ impl Permission {
             "send" => Some(Permission::Send),
             "request-ack" => Some(Permission::RequestAck),
             "ack" => Some(Permission::Ack),
+            "state-write" => Some(Permission::StateWrite),
+            "state-read-all" => Some(Permission::StateReadAll),
+            "state-admin" => Some(Permission::StateAdmin),
+            "state-derive" => Some(Permission::StateDerive),
+            "role-admin" => Some(Permission::RoleAdmin),
+            "daemon-admin" => Some(Permission::DaemonAdmin),
+            "room-create" => Some(Permission::RoomCreate),
+            "room-admin" => Some(Permission::RoomAdmin),
             other if other.starts_with("x-") => Some(Permission::Extension(other.to_string())),
             _ => None,
         }

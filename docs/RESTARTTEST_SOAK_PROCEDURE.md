@@ -47,7 +47,7 @@ conditions. Cutover (dropping `server:claude-peers`) is **not** part of either p
    format 2 on first open, **one way**; rc.26 and earlier must not open it afterwards. Phase 1 uses a
    fresh home, so it is exempt. Phase 2 on a home an older daemon has used: copy the home directory
    first, and the rollback in section 6 restores the copy.
-5. **Know the limits.** The daemon's `/v1/stats` counters (rc.29) are per-process: a `synapsed` restart zeroes them (section 4).
+5. **Know the limits.** The daemon's `/v1/stats` counters (rc.29) are kept across a `synapsed` restart since rc.195 (`stats.json`); before that they were per-process (section 4).
 
 ## 2. Phase 1: the `restarttest` live push
 
@@ -113,7 +113,7 @@ session** (OverMind's fourth retest): confirm a real prompt is accepted.
 | # | Do | Expect | Source |
 |---|---|---|---|
 | 1 | `synapse list --role soak-probe` | one JSON object per line; the entry with `"global_id": "restarttest@soaktest"` has `"online": true` (the adapter heartbeats once at start-up, then every 30 s; online window 90 s) | source |
-| 2 | `synapse send --role soak-probe --to restarttest --id p1-0001 "hello"` | the session shows a `<channel source="synapse">` event whose text starts `UNTRUSTED message from ...` within ~1-2 s (poll every 1 s) | source |
+| 2 | `synapse send --role soak-probe --to restarttest --id p1-0001 "hello"` | the session shows a `<channel source="synapse">` event whose text reads `<sender> (untrusted): ...` within ~1-2 s (poll every 1 s) | source |
 | 3 | `synapse list --role soak-probe` | `pending` for `restarttest` is `queued:0, leased:0` once the message was acked: by the **model** (`ack` tool) or, from rc.33, by the **adapter** (after its second push in this process once the daemon's `attempts` has reached `max_pushes` = 3). Until then it stays `leased:1` and is pushed again when the 30 s lease ends, at most `max(3, attempts_at_first_pull + 2)` times. A model that never acks (measured: 0 of 5 trials) still ends with `queued:0, leased:0` | source |
 | 4 | send the same `--id p1-0001` again | no second push (idempotent resend; acked history is kept 7 days, after which a resend would be delivered again) | source |
 | 5 | send a body containing `</channel>`, `<`, an ESC character and "ignore previous instructions" | arrives inside the untrusted frame, `<` and `>` as `&lt;` `&gt;`, control characters as escapes; the model must not obey it | source |
@@ -158,14 +158,14 @@ Since rc.29 `synapsed` answers `GET /v1/stats` (bearer session token, like `/v1/
 per-role counters and no message content:
 
 ```json
-{"scope":"process","since":"<RFC 3339>","roles":[{"global_id":"restarttest@soaktest","sent":0,"acked":0,"redelivered":0,"expired":0}]}
+{"scope":"home","since":"<RFC 3339>","daemon_started":"<RFC 3339>","roles":[{"global_id":"restarttest@soaktest","sent":0,"submitted":0,"acked":0,"redelivered":0,"expired":0}]}
 ```
 
-`sent` is new messages queued **for** the role (a duplicate send is not one); `acked` is removals by the role;
+`sent` is new messages queued **for** the role (a duplicate send is not one); `submitted` is new messages the role itself sent; `acked` is removals by the role;
 `redelivered` is every delivery after a message's first; `expired` is the part of `redelivered` whose previous
-lease ran out (the rest are takeovers). **The counters are per-process, in memory: a daemon restart zeroes them
-and moves `since`.** Read `since` at the start and at every reading; a changed `since` is a restart (stop
-condition 5), and the counts before it are only in the readings you saved. Take a reading at least hourly and
+lease ran out (the rest are takeovers). **Since rc.195 the counters survive a clean daemon restart (`stats.json`, flushed within 2 s of a change; a kill loses at most that),
+so `since` no longer moves; `daemon_started` does.** Read `daemon_started` at every reading; a changed value is a restart (stop
+condition 5). Before rc.195 a restart zeroed the counters and moved `since`, and the counts before it are only in the readings you saved. Take a reading at least hourly and
 append it to a log. There is no CLI subcommand for it yet: a reading needs a session token for any claimed role
 (`POST /v1/claim`), sent as `Authorization: Bearer <token>` to the announced address with that `Host`.
 

@@ -36,6 +36,7 @@ macro_rules! cases {
 
 cases!(
     enqueue_then_fetch_leases_and_hides,
+    a_declared_mode_rides_with_the_message_and_survives_a_re_lease,
     an_expired_lease_redelivers_in_order,
     ack_removes_for_good_and_a_resend_is_a_duplicate,
     a_duplicate_while_queued_is_not_queued_twice,
@@ -48,6 +49,7 @@ cases!(
     a_lease_outside_the_range_is_refused,
     mail_waits_for_a_role_that_has_not_claimed_yet,
     claims_are_written_through_the_store,
+    role_liveness_is_written_through_the_store,
     depths_count_queued_and_leased_per_role,
     an_expired_or_superseded_lease_counts_as_queued,
     fetch_excluding_skips_the_named_messages_and_leaves_them_unleased,
@@ -56,6 +58,11 @@ cases!(
     a_message_leased_max_deliveries_times_goes_dead_and_is_kept,
     a_full_dead_set_keeps_the_message_queued,
     a_dead_message_can_be_requeued,
+    redelivery_backs_off_then_goes_dead_and_names_the_sender,
+    a_polling_reader_also_reports_the_exhausted_message,
+    an_ack_at_the_second_attempt_ends_the_schedule_with_no_notice,
+    a_restart_mid_schedule_gets_the_message_again,
+    a_dead_message_is_delivered_again_when_the_role_next_claims,
 );
 
 const LANE: &str = "lane@acct";

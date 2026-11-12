@@ -24,6 +24,8 @@ pub struct SynapseImapServer {
     auth_handler: Arc<dyn super::smtp_server::AuthHandler + Send + Sync>,
     /// The login guard and the event sink (hardening P7).
     security: EmailSecurity,
+    /// Messages sent in FETCH responses (see [`SynapseImapServer::fetch_counter`]).
+    fetched: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +99,16 @@ impl SynapseImapServer {
             clients: Arc::new(Mutex::new(HashMap::new())),
             auth_handler,
             security: EmailSecurity::default(),
+            fetched: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// How many messages this server has put on the wire in FETCH responses, across all connections
+    /// and clones of it. A poll that fetched nothing new leaves it unchanged, which is how a test
+    /// proves a poll's cost does not grow with the mailbox.
+    #[must_use]
+    pub fn fetch_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        Arc::clone(&self.fetched)
     }
 
     /// Replaces the login guard's tuning for IMAP `LOGIN` (hardening P7). The limits apply with or
@@ -301,27 +312,47 @@ impl SynapseImapServer {
                     format!("* {} EXISTS\r\n", message_count),
                     "* 0 RECENT\r\n".to_string(),
                     "* OK [UIDVALIDITY 1] UIDs valid\r\n".to_string(),
-                    "* OK [UIDNEXT 1] Predicted next UID\r\n".to_string(),
+                    // The store is append-only, so a message's UID is its sequence number and the
+                    // next UID is one past the last.
+                    format!(
+                        "* OK [UIDNEXT {}] Predicted next UID\r\n",
+                        message_count + 1
+                    ),
                     "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n".to_string(),
                     "* OK [PERMANENTFLAGS (\\Deleted \\Seen \\*)] Limited\r\n".to_string(),
                 ];
                 responses.push(format!("{tag} OK [READ-WRITE] SELECT completed\r\n"));
                 Ok(responses)
             }
-            "FETCH" => {
+            "FETCH" | "UID" => {
                 if session.state != ImapState::Selected {
                     return Ok(vec![format!("{} NO Not in selected state\r\n", tag)]);
                 }
 
-                if parts.len() < 4 {
+                // `UID FETCH <set> <items>` carries its sub-command first. UIDs are sequence numbers
+                // here (append-only store), so the two forms differ only in what the reply names.
+                let by_uid = cmd == "UID";
+                let args: &[&str] = if by_uid {
+                    if !parts
+                        .get(2)
+                        .is_some_and(|p| p.eq_ignore_ascii_case("FETCH"))
+                    {
+                        return Ok(vec![format!("{tag} BAD UID supports only FETCH\r\n")]);
+                    }
+                    &parts[3..]
+                } else {
+                    &parts[2..]
+                };
+                if args.len() < 2 {
                     return Ok(vec![format!(
                         "{} BAD FETCH requires sequence set and items\r\n",
                         tag
                     )]);
                 }
 
-                let sequence_set = parts[2];
-                let items = parts[3..].join(" ");
+                let sequence_set = args[0];
+                let items = args[1..].join(" ");
+                let with_uid = by_uid || items.to_uppercase().contains("UID");
 
                 // Get messages for this user
                 let messages = {
@@ -334,22 +365,15 @@ impl SynapseImapServer {
                 };
 
                 let mut responses = Vec::new();
-
-                // Parse sequence set (simplified - just handle "1:*" and single numbers)
-                let seq_nums: Vec<usize> = if sequence_set == "1:*" {
-                    (1..=messages.len()).collect()
-                } else if let Ok(num) = sequence_set.parse::<usize>() {
-                    if num > 0 && num <= messages.len() {
-                        vec![num]
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    Vec::new()
-                };
+                let seq_nums = expand_set(sequence_set, messages.len());
 
                 for seq_num in seq_nums {
                     if let Some(message) = messages.get(seq_num - 1) {
+                        let uid = if with_uid {
+                            format!("UID {seq_num} ")
+                        } else {
+                            String::new()
+                        };
                         if items.contains("RFC822") || items.contains("BODY[]") {
                             let email_content = self.format_as_email(message)?;
                             // IMAP literal syntax (RFC 3501 §9): after the declared byte count,
@@ -360,20 +384,28 @@ impl SynapseImapServer {
                             // strict client (this task's `async-imap`) reads exactly `len` bytes
                             // of literal and then finds a stray `\r\n` where `)` must be, which
                             // fails to parse.
+                            self.fetched
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             responses.push(format!(
-                                "* {} FETCH (RFC822 {{{}}}\r\n{}",
+                                "* {} FETCH ({}RFC822 {{{}}}\r\n{}",
                                 seq_num,
+                                uid,
                                 email_content.len(),
                                 email_content
                             ));
                             responses.push(")\r\n".to_string());
                         } else if items.contains("FLAGS") {
-                            responses.push(format!("* {seq_num} FETCH (FLAGS ())\r\n"));
+                            responses.push(format!("* {seq_num} FETCH ({uid}FLAGS ())\r\n"));
+                        } else if with_uid {
+                            responses.push(format!("* {seq_num} FETCH (UID {seq_num})\r\n"));
                         }
                     }
                 }
 
-                responses.push(format!("{tag} OK FETCH completed\r\n"));
+                responses.push(format!(
+                    "{tag} OK {} completed\r\n",
+                    if by_uid { "UID FETCH" } else { "FETCH" }
+                ));
                 Ok(responses)
             }
             "IDLE" => {
@@ -433,6 +465,38 @@ impl SynapseImapServer {
     }
 }
 
+/// A message-number set (`5`, `2:4`, `7:*`, `1,3:5`) as the sequence numbers it names in a mailbox of
+/// `max` messages, ascending. `*` is the largest number, so `n:*` with `n` past the end names the last
+/// message, as real servers answer (RFC 3501 §6.4.8); a client asking for "everything after `n`"
+/// must drop what it already has.
+fn expand_set(set: &str, max: usize) -> Vec<usize> {
+    let number = |text: &str| -> Option<usize> {
+        if text == "*" {
+            Some(max)
+        } else {
+            text.parse().ok()
+        }
+    };
+    let mut out = Vec::new();
+    for part in set.split(',') {
+        let (lo, hi) = match part.split_once(':') {
+            Some((a, b)) => (number(a), number(b)),
+            None => (number(part), number(part)),
+        };
+        let (Some(lo), Some(hi)) = (lo, hi) else {
+            continue;
+        };
+        let (lo, hi) = (lo.min(hi), lo.max(hi));
+        for n in lo.max(1)..=hi.min(max) {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
 impl Clone for SynapseImapServer {
     fn clone(&self) -> Self {
         Self {
@@ -441,6 +505,7 @@ impl Clone for SynapseImapServer {
             clients: Arc::clone(&self.clients),
             auth_handler: Arc::clone(&self.auth_handler),
             security: self.security.clone(),
+            fetched: Arc::clone(&self.fetched),
         }
     }
 }

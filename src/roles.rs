@@ -146,6 +146,8 @@ pub enum ClaimError {
     ChainTooLong,
     /// The role is at the last representable epoch; no newer one can be granted.
     EpochExhausted,
+    /// A room already has this name (roles and rooms share one namespace per account).
+    RoomNameTaken,
 }
 
 impl fmt::Display for ClaimError {
@@ -158,6 +160,7 @@ impl fmt::Display for ClaimError {
             ClaimError::NoSigningKey => write!(f, "no signing key is loaded for the role"),
             ClaimError::ChainTooLong => write!(f, "the certificate chain is too long"),
             ClaimError::EpochExhausted => write!(f, "the role has no epochs left"),
+            ClaimError::RoomNameTaken => write!(f, "a room already has this name"),
         }
     }
 }
@@ -199,12 +202,24 @@ impl fmt::Display for InvalidState {
 
 impl std::error::Error for InvalidState {}
 
-/// One role's persisted state: its current epoch and when it was claimed.
+/// One role's persisted state: its current epoch and when it was claimed, when it was last seen
+/// (written at most hourly, so a restarted daemon still knows) and when it was retired.
+/// Design: `docs/ROLE_LIVENESS_DESIGN.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleRecord {
     pub epoch: u64,
     pub claimed_at: DateTime<Utc>,
+    /// The last time a session of the role was seen; absent in state written before liveness.
+    #[serde(default)]
+    pub last_seen: Option<DateTime<Utc>>,
+    /// Set when the role was idle past the retire ttl; cleared by the role's next claim. A retired
+    /// role keeps its epoch, certificate binding and queued mail.
+    #[serde(default)]
+    pub retired_at: Option<DateTime<Utc>>,
 }
+
+/// How much newer a sighting must be than the recorded one to be worth writing down.
+const SEEN_GRANULARITY: chrono::Duration = chrono::Duration::hours(1);
 
 /// Everything that must survive a restart (spec rule 6): every role's epoch, so a restarted table
 /// never reissues an old one. The replay record is deliberately absent; see [`Roles::restore`].
@@ -277,6 +292,8 @@ impl Roles {
             RoleRecord {
                 epoch,
                 claimed_at: now,
+                last_seen: None,
+                retired_at: None,
             },
         );
         Ok(Grant {
@@ -320,6 +337,61 @@ impl Roles {
             roles: state.roles,
             claims: ReplayGuard::new(ReplayConfig::default(), now),
         })
+    }
+
+    /// Record that a session of `global_id` was seen at `seen`. Returns whether the record changed,
+    /// which is only so when `seen` is at least an hour past the recorded sighting, so the caller
+    /// writes the table out rarely. An unknown role is ignored.
+    pub fn note_seen(&mut self, global_id: &str, seen: DateTime<Utc>) -> bool {
+        let Some(record) = self.roles.get_mut(global_id) else {
+            return false;
+        };
+        if record
+            .last_seen
+            .is_some_and(|recorded| seen - recorded < SEEN_GRANULARITY)
+        {
+            return false;
+        }
+        record.last_seen = Some(seen);
+        true
+    }
+
+    /// Retire `global_id` now, whatever its idle time. Returns whether the role exists; retiring
+    /// a retired role leaves its first `retired_at`.
+    pub fn retire(&mut self, global_id: &str, now: DateTime<Utc>) -> bool {
+        let Some(record) = self.roles.get_mut(global_id) else {
+            return false;
+        };
+        record.retired_at.get_or_insert(now);
+        true
+    }
+
+    /// Bring a retired role back: clear `retired_at` and start its idle clock at `now`. Returns
+    /// whether the role exists. A role that was not retired only has its clock restarted.
+    pub fn revive(&mut self, global_id: &str, now: DateTime<Utc>) -> bool {
+        let Some(record) = self.roles.get_mut(global_id) else {
+            return false;
+        };
+        record.retired_at = None;
+        record.last_seen = Some(now);
+        true
+    }
+
+    /// Retire every role whose last activity (`last_seen`, else `claimed_at`) is more than `ttl`
+    /// before `now` and that is not already retired. Returns the ids retired. Nothing else about
+    /// a role changes: its epoch stays, so a returning session claims as usual.
+    pub fn retire_idle(&mut self, now: DateTime<Utc>, ttl: chrono::Duration) -> Vec<String> {
+        let mut retired = Vec::new();
+        for (global_id, record) in &mut self.roles {
+            let active = record
+                .last_seen
+                .map_or(record.claimed_at, |seen| seen.max(record.claimed_at));
+            if record.retired_at.is_none() && now - active > ttl {
+                record.retired_at = Some(now);
+                retired.push(global_id.clone());
+            }
+        }
+        retired
     }
 
     #[must_use]

@@ -8,12 +8,15 @@
 //!
 //! Home: `SYNAPSE_HOME` (else the platform default, as for `synapse id`). Address: `SYNAPSE_ADDR`
 //! (default `127.0.0.1:7920`), loopback only. Logs never carry tokens or key material.
+//! The address, the store pin, `SYNAPSE_LAUNCHER_ROLES` and `SYNAPSE_ALERT_ROLES` are read through
+//! ConfigurAnt (`synapsed::settings`): the environment as always, and the same values from an
+//! optional `<home>/synapsed.toml`, the environment winning.
 //! Launch signals (`GET /v1/waiting`, lane launch on message) are OFF unless `SYNAPSE_LAUNCHER_ROLES`
 //! names the role(s), comma separated, that may read them (for example `agentlife-launcher`).
 //! Security alerts go as mail to the roles in `SYNAPSE_ALERT_ROLES` (comma separated), from
 //! `daemon:alerts@<account>`; unset, nothing changes.
-//! The mailbox store, in order: `SYNAPSE_MAILBOX_STORE` (deprecated pin: `redb`, or `sqlite` in a
-//! build with `--features sqlite-store`); else the PersistAnt provider recorded in
+//! The mailbox store (`synapsed::select_store`), in order: `SYNAPSE_MAILBOX_STORE` (deprecated pin:
+//! `redb`, or `sqlite` in a build with `--features sqlite-store`); else the PersistAnt provider recorded in
 //! `<home>/mailbox-store.json` (`synapsectl storage list` shows what this build offers, `storage use`
 //! records one); else, on a home with no mailbox file and in a `sqlite-store` build, the first
 //! provider PersistAnt lists for the mailbox's needs, which is then recorded; else redb. A different
@@ -21,15 +24,43 @@
 //! Security events (failed bearers and claims, over-budget requests) go to
 //! `<home>/security-events.jsonl`, owner-only; they never carry a token, nonce or signature.
 
-use std::net::SocketAddr;
 use std::process::ExitCode;
 
-use synapsed::{Daemon, DaemonConfig, StoreKind};
+use synapsed::{Daemon, DaemonConfig};
 
-const DEFAULT_ADDR: &str = "127.0.0.1:7920";
+const USAGE: &str = "usage: synapsed (no arguments; configured by SYNAPSE_HOME, <home>/synapsed.toml and SYNAPSE_* in the environment)";
+
+/// The first argument that is neither one of `known` nor the value after one.
+fn unknown_arg(known: &[&str]) -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if known.contains(&a.as_str()) {
+            args.next();
+        } else {
+            return Some(a);
+        }
+    }
+    None
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Before anything else: a help or version query opens no home, store or port.
+    match std::env::args().nth(1).as_deref() {
+        Some("--version" | "-V") => {
+            println!("synapsed {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        Some("--help" | "-h") => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
+    if let Some(bad) = unknown_arg(&[]) {
+        eprintln!("synapsed: unknown argument {bad:?}; {USAGE}");
+        return ExitCode::from(2);
+    }
     let home = match synapse::keystore::default_home() {
         Ok(home) => home,
         Err(e) => {
@@ -37,52 +68,39 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let addr: SocketAddr = match std::env::var("SYNAPSE_ADDR")
-        .unwrap_or_else(|_| DEFAULT_ADDR.to_string())
-        .parse()
-    {
-        Ok(addr) => addr,
-        Err(_) => {
-            eprintln!("synapsed: SYNAPSE_ADDR is not an address");
+    let file = match std::fs::read_to_string(home.join(synapsed::settings::FILE_NAME)) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            eprintln!("synapsed: {}: {}", synapsed::settings::FILE_NAME, e.kind());
             return ExitCode::from(2);
         }
     };
-    let config = DaemonConfig {
-        home,
-        addr,
-        sweep_every: std::time::Duration::from_secs(3600),
-    };
-    #[cfg(feature = "sqlite-store")]
-    let named = match named_choice(&config.home) {
-        Ok(choice) => choice,
+    let settings = match synapsed::settings::load(&std::env::vars().collect(), file.as_deref()) {
+        Ok(settings) => settings,
         Err(e) => {
             eprintln!("synapsed: {e}");
             return ExitCode::from(2);
         }
     };
-    let kind = match std::env::var("SYNAPSE_MAILBOX_STORE").as_deref() {
-        Err(_) | Ok("" | "redb") => StoreKind::Redb,
-        #[cfg(feature = "sqlite-store")]
-        Ok("sqlite") => StoreKind::Sqlite,
-        Ok(other) => {
-            eprintln!(
-                "synapsed: SYNAPSE_MAILBOX_STORE={other:?} is not available in this build                  (redb{})",
-                if cfg!(feature = "sqlite-store") {
-                    ", sqlite"
-                } else {
-                    "; sqlite needs --features sqlite-store"
-                }
-            );
+    let addr = settings.addr;
+    let config = DaemonConfig {
+        home,
+        addr,
+        sweep_every: std::time::Duration::from_secs(3600),
+    };
+    let selection = match synapsed::select_store(
+        &config.home,
+        settings.store_pin.as_deref(),
+        settings.store_pin_from_env,
+    ) {
+        Ok(selection) => selection,
+        Err(e) => {
+            eprintln!("synapsed: {e}");
             return ExitCode::from(2);
         }
     };
-    #[cfg(feature = "sqlite-store")]
-    let opened = match &named {
-        Some(choice) => Daemon::open_named(&config, choice),
-        None => Daemon::open_with(&config, kind),
-    };
-    #[cfg(not(feature = "sqlite-store"))]
-    let opened = Daemon::open_with(&config, kind);
+    let opened = Daemon::open_selected(&config, &selection);
     let daemon = match opened {
         Ok(daemon) => daemon,
         Err(e) => {
@@ -90,33 +108,26 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let launcher_roles: Vec<String> = std::env::var("SYNAPSE_LAUNCHER_ROLES")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|r| !r.is_empty())
-        .map(str::to_string)
-        .collect();
-    if let Some(bad) = launcher_roles
-        .iter()
-        .find(|r| !synapse::keystore::valid_name(r))
-    {
-        eprintln!("synapsed: SYNAPSE_LAUNCHER_ROLES: {bad:?} is not a role name");
-        return ExitCode::from(2);
-    }
-    let alert_roles = match role_list("SYNAPSE_ALERT_ROLES") {
-        Ok(roles) => roles,
-        Err(bad) => {
-            eprintln!("synapsed: SYNAPSE_ALERT_ROLES: {bad:?} is not a role name");
-            return ExitCode::from(2);
-        }
-    };
     let daemon = daemon
-        .with_alert_roles(alert_roles)
+        .with_role_ttl_days(settings.role_ttl_days)
+        .with_session_ttl_hours(settings.session_ttl_hours)
+        .with_redelivery_gaps(
+            settings
+                .redelivery_gaps_secs
+                .iter()
+                .map(|s| chrono::Duration::seconds(i64::try_from(*s).unwrap_or(i64::MAX)))
+                .collect(),
+        )
+        .with_alert_roles(settings.alert_roles.clone())
+        .with_launch_senders(settings.launch_senders.clone())
         .with_launcher(synapsed::LauncherConfig {
-            roles: launcher_roles,
+            roles: settings.launcher_roles.clone(),
             ..synapsed::LauncherConfig::default()
         });
+    tokio::spawn(reload_launch_senders(
+        daemon.launch_senders(),
+        settings.launch_senders.clone(),
+    ));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(e) => {
@@ -132,44 +143,6 @@ async fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
-}
-
-/// The PersistAnt provider to serve the mailbox from, or `None` for the pinned/default store.
-/// `SYNAPSE_MAILBOX_STORE` (deprecated) wins; then the recorded choice; then, on a home with no
-/// mailbox file, the first provider PersistAnt lists for the mailbox's needs, recorded so the next
-/// start opens the same one.
-#[cfg(feature = "sqlite-store")]
-fn named_choice(
-    home: &std::path::Path,
-) -> Result<Option<synapse_mailbox_persistant::needs::StoreChoice>, String> {
-    use synapse_mailbox_persistant::needs::{StoreChoice, listing};
-    if std::env::var("SYNAPSE_MAILBOX_STORE").is_ok_and(|v| !v.is_empty()) {
-        eprintln!(
-            "synapsed: SYNAPSE_MAILBOX_STORE is deprecated; record a store with `synapse storage use`"
-        );
-        return Ok(None);
-    }
-    if let Some(choice) = StoreChoice::read(home).map_err(|e| e.to_string())? {
-        return Ok(Some(choice));
-    }
-    if home.join("mailbox.redb").exists() || home.join("mailbox.sqlite").exists() {
-        return Ok(None);
-    }
-    let Ok(listed) = listing(&synapse::mailbox::MailboxNeeds::MAILBOX) else {
-        return Ok(None);
-    };
-    // A server needs a URL only the operator has, so a fresh home is given the best file store.
-    let Some(top) = synapse_mailbox_persistant::needs::first_file_store(&listed) else {
-        return Ok(None);
-    };
-    let choice = StoreChoice::new(top.id, None).map_err(|e| e.to_string())?;
-    choice.write(home).map_err(|e| e.to_string())?;
-    eprintln!(
-        "synapsed: fresh home; recorded mailbox store {:?} in {}",
-        choice.id,
-        synapse_mailbox_persistant::needs::CHOICE_FILE
-    );
-    Ok(Some(choice))
 }
 
 /// Resolves on the first stop request. A handler that cannot be installed just never fires.
@@ -208,17 +181,28 @@ async fn shutdown_signal() {
     }
 }
 
-/// The comma-separated role names in `var` (none when unset), or the first that is not a name.
-fn role_list(var: &str) -> Result<Vec<String>, String> {
-    let roles: Vec<String> = std::env::var(var)
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|r| !r.is_empty())
-        .map(str::to_string)
-        .collect();
-    match roles.iter().find(|r| !synapse::keystore::valid_name(r)) {
-        Some(bad) => Err(bad.clone()),
-        None => Ok(roles),
+/// Re-read `SYNAPSE_LAUNCH_SENDERS` and `synapsed.toml` every few seconds, so a changed allowlist
+/// applies on the next poll without a restart. A file that does not read or parse keeps the last
+/// good list. (The environment cannot change in a running process; the file is what moves.)
+async fn reload_launch_senders(handle: synapsed::LaunchSenders, mut current: Vec<String>) {
+    let Ok(home) = synapse::keystore::default_home() else {
+        return;
+    };
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let file = match std::fs::read_to_string(home.join(synapsed::settings::FILE_NAME)) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => continue,
+        };
+        let Ok(settings) = synapsed::settings::load(&std::env::vars().collect(), file.as_deref())
+        else {
+            continue;
+        };
+        if settings.launch_senders != current {
+            handle.set(settings.launch_senders.clone());
+            current = settings.launch_senders;
+            eprintln!("synapsed: launch.senders reloaded");
+        }
     }
 }

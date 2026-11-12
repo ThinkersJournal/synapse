@@ -24,7 +24,13 @@
 //!   a legitimate caller is not slowed by anyone else's failures; there is no lockout anywhere.
 
 #[cfg(feature = "sqlite-store")]
+pub mod access;
 mod migration;
+
+pub mod format_lint;
+mod select;
+pub mod settings;
+mod state_api;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -33,6 +39,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use access::Authorizer;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Request, State};
@@ -43,14 +50,14 @@ use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use synapse::certificate::{RevocationLookup, chain_from_pem};
 use synapse::keystore::{Keystore, KeystoreError};
 use synapse::mailbox::{
-    Acked, Depth, DurabilityClass, Enqueued, Envelope, MailConfig, MailError, MailStore, MailTxn,
-    Mailbox, RedbStore, StoreError,
+    Acked, Depth, DurabilityClass, Enqueued, Envelope, Exhausted, MailConfig, MailError, MailStore,
+    MailTxn, Mailbox, RedbStore, StoreError,
 };
 use synapse::roles::{ClaimRequest, RolesState};
 use synapse::security_events::{
@@ -60,7 +67,8 @@ use synapse::security_events::{
 use synapse_security::{AlertSink, AlertTransport, FanoutSink, FileSink};
 
 pub mod launch;
-pub use launch::LauncherConfig;
+pub use launch::{LaunchSenders, LauncherConfig};
+pub use select::{Selection, select_store};
 
 /// Where and how the daemon runs.
 #[derive(Debug, Clone)]
@@ -156,6 +164,8 @@ pub enum DaemonError {
     Security(String),
     /// The redb mailbox could not be moved to the SQLite store, or it is not known which holds the mail.
     Migration(String),
+    /// `access.json` could not be read or written.
+    Access(String),
 }
 
 impl fmt::Display for DaemonError {
@@ -171,14 +181,33 @@ impl fmt::Display for DaemonError {
             DaemonError::Mail(e) => write!(f, "{e}"),
             DaemonError::Security(e) => write!(f, "security event file: {e}"),
             DaemonError::Migration(e) => write!(f, "mailbox migration: {e}"),
+            DaemonError::Access(e) => write!(f, "access control: {e}"),
         }
     }
 }
 
 impl std::error::Error for DaemonError {}
 
+/// The shared-state store under the home.
+const STATE_FILE: &str = "state.redb";
+/// The `/v1/stats` counters, kept across restarts: written when they change (at most every
+/// `STATS_FLUSH`) and at a clean shutdown, so a kill loses at most the last interval.
+const STATS_FILE: &str = "stats.json";
+/// How often exhausted messages are looked for (the default of `redelivery_check`).
+const REDELIVERY_CHECK: std::time::Duration = std::time::Duration::from_secs(30);
+/// The sender of the daemon's own notices (`[UNACKED]`); a notice about one of these is never sent,
+/// so a notice that itself goes unacked cannot start a loop.
+const NOTICE_SENDER: &str = "synapsed";
+const STATS_FLUSH: std::time::Duration = std::time::Duration::from_secs(2);
 /// How recently a role must have been heard from to count as online.
 const ONLINE_WINDOW: chrono::Duration = chrono::Duration::seconds(90);
+/// A role idle this many days is retired (hidden from `list`, kept) unless `synapsed.toml` says
+/// otherwise: docs/ROLE_LIVENESS_DESIGN.md, the PM's ruling of 2026-10-24.
+const DEFAULT_ROLE_TTL_DAYS: i64 = 30;
+/// A session unused this many hours expires (PM ruling 2026-10-25, ROADMAP row 37b): every
+/// authenticated call renews it, and an expired one answers 401 `session_expired`, after which the
+/// client claims the role again. `[session] ttl_hours` in `synapsed.toml` changes it.
+const DEFAULT_SESSION_TTL_HOURS: i64 = 24;
 const MAX_FETCH: usize = 100;
 /// The longest client-chosen message id; the stored id is `<sender>/<client id>` (review I1).
 const MAX_CLIENT_ID: usize = 100;
@@ -194,6 +223,11 @@ const KEEP_SUPERSEDED: u64 = 8;
 struct Session {
     global_id: String,
     epoch: u64,
+    /// The verified leaf certificate's grants at claim time.
+    permissions: Vec<synapse::certificate::Permission>,
+    /// When a call last used this session (the claim, until the first call): the sliding window the
+    /// session ttl is measured from.
+    last_used: DateTime<Utc>,
 }
 
 struct Presence {
@@ -209,10 +243,17 @@ struct Shared {
     mailbox: Mutex<Mailbox<DaemonStore>>,
     /// SHA-256(token) -> session.
     sessions: Mutex<HashMap<[u8; 32], Session>>,
+    /// Shared state between lanes (`state.redb`); interior-locked, so no `Mutex` here.
+    state: synapse::state::StateEngine<synapse::state::RedbBackend>,
+    /// Woken after a state write, so its notices go out at once rather than on the retry tick.
+    state_nudge: tokio::sync::Notify,
     presence: Mutex<HashMap<String, Presence>>,
-    /// Cumulative per-role counters for `/v1/stats`. In memory: a restart zeroes them, and the
-    /// answer says so (`scope`, `since`).
+    /// Cumulative per-role counters for `/v1/stats`, loaded from and flushed to `stats.json` in the
+    /// home, so a restart keeps them (`since` is when counting began, `daemon_started` this run).
     stats: Mutex<HashMap<String, RoleCounters>>,
+    stats_since: DateTime<Utc>,
+    /// Set by `count`, cleared by the flusher that writes the file.
+    stats_dirty: std::sync::atomic::AtomicBool,
     /// This daemon's account name: it serves `<role>@<account>` only.
     account: String,
     account_key_id: String,
@@ -224,15 +265,65 @@ struct Shared {
     home: PathBuf,
     started_at: DateTime<Utc>,
     sweep_every: std::time::Duration,
+    /// How often to look for messages whose redeliveries ran out (see `Mailbox::dead_exhausted`).
+    redelivery_check: std::time::Duration,
     security: Security,
     pause: Pause,
+    /// Fired by `/v1/daemon/shutdown`; `serve` stops gracefully when it does.
+    stop: tokio::sync::Notify,
     /// Who may read launch signals, and their timing (feature off while `roles` is empty).
     launcher: LauncherConfig,
+    /// Authenticated senders whose pending mail counts toward a launch signal; read on every poll.
+    /// Empty counts nothing (fail closed), so launch needs both this and `launcher.roles`.
+    launch_senders: LaunchSenders,
     /// Per-role launch state; in memory.
     launches: Mutex<launch::Table>,
+    /// Who may see and message whom; `<home>/access.json`.
+    access: access::Access,
     /// How recently a role must have been heard from to count as online.
     online_window: chrono::Duration,
+    /// Size and rate ceilings for a post to a room (docs/ROOMS_DESIGN.md section 10).
+    room_limits: RoomLimits,
+    /// Recent accepted posts per `room|sender` and per `room`, for the rate limits; in memory.
+    room_rate: Mutex<HashMap<String, std::collections::VecDeque<DateTime<Utc>>>>,
+    /// Room copies that ran out of deliveries, waiting out [`ROOM_NOTICE_GRACE`] so one post
+    /// earns its sender one notice, not one per member; in memory.
+    room_unacked: Mutex<RoomUnacked>,
+    /// A role idle longer than this is retired by the sweep.
+    role_ttl: chrono::Duration,
+    /// A session unused longer than this is expired (401 `session_expired`).
+    session_ttl: chrono::Duration,
 }
+
+/// Ceilings for a post to a room (docs/ROOMS_DESIGN.md section 10): a room is chat, and every
+/// member pays tokens to read each post.
+#[derive(Debug, Clone, Copy)]
+pub struct RoomLimits {
+    /// The largest post body, in bytes.
+    pub max_body_bytes: usize,
+    /// Posts one sender may make to one room per minute.
+    pub per_sender_per_min: usize,
+    /// Posts one room takes per minute, from everyone.
+    pub per_room_per_min: usize,
+}
+
+impl Default for RoomLimits {
+    fn default() -> Self {
+        RoomLimits {
+            max_body_bytes: 4096,
+            per_sender_per_min: 6,
+            per_room_per_min: 30,
+        }
+    }
+}
+
+/// Copies of a room post that ran out of deliveries, per (sender, sender/client id, room): how
+/// many, and when the first did.
+type RoomUnacked = BTreeMap<(String, String, String), (u32, DateTime<Utc>)>;
+
+/// How long copies of one room post may keep running out of deliveries before the sender is told,
+/// once, how many did.
+const ROOM_NOTICE_GRACE: chrono::Duration = chrono::Duration::seconds(2);
 
 /// How the daemon waits out an owed failure delay before answering. The default sleeps on the tokio
 /// clock; tests inject one that records the delay instead, so they assert *which* answers were held
@@ -458,6 +549,7 @@ fn queue_alert(shared: &Shared, roles: &[String], fallback: &Arc<dyn SecuritySin
             to: format!("{role}@{}", shared.account),
             from: format!("{ALERT_SENDER}@{}", shared.account),
             body: body.clone(),
+            mode: None,
         };
         let result = match shared.mailbox.lock() {
             Ok(mut mailbox) => mailbox.enqueue(envelope, now).map(|_| ()),
@@ -474,6 +566,69 @@ fn queue_alert(shared: &Shared, roles: &[String], fallback: &Arc<dyn SecuritySin
                 None,
                 &format!("alert mail not queued: {error}"),
             ));
+        }
+    }
+}
+
+/// The sender of shared-state change notices (see [`synapse::state::Notice`]). Like
+/// [`ALERT_SENDER`], not a valid role name, so no role can claim it.
+const STATE_SENDER: &str = "daemon:state";
+/// Notices handed to the mailbox per pass.
+const NOTICE_BATCH: usize = 100;
+/// How often derived changes (a fact flipped, a record went stale) are looked for.
+const DERIVED_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long an undelivered notice (a full queue, say) waits before the next pass.
+const NOTICE_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One pass over the undelivered notices: each becomes mail from `daemon:state@<account>` and is
+/// then marked delivered. The message id is fixed per (record, revision, party), so a crash between
+/// the two steps re-enqueues the same message, which the mailbox drops as a duplicate. A notice that
+/// cannot be queued stays, and does not hold up the ones behind it. True if the pass was full and
+/// clean, so another may be waiting.
+fn deliver_state_notices_once(shared: &Shared) -> bool {
+    use synapse::state::StateStore;
+    let Ok(notices) = shared.state.pending_notices(NOTICE_BATCH) else {
+        return false;
+    };
+    let mut clean = true;
+    let full = notices.len() == NOTICE_BATCH;
+    for notice in notices {
+        let envelope = Envelope {
+            message_id: notice.message_id(),
+            to: format!("{}@{}", notice.to, shared.account),
+            from: format!("{STATE_SENDER}@{}", shared.account),
+            body: notice.body().into_bytes(),
+            mode: None,
+        };
+        let queued = match shared.mailbox.lock() {
+            Ok(mut mailbox) => mailbox.enqueue(envelope, Utc::now()).is_ok(),
+            Err(_) => false,
+        };
+        if queued && shared.state.notice_delivered(notice.seq).is_ok() {
+            continue;
+        }
+        clean = false;
+    }
+    clean && full
+}
+
+async fn deliver_state_notices(shared: Arc<Shared>) {
+    let mut tick = tokio::time::interval(NOTICE_RETRY);
+    let mut refreshed = tokio::time::Instant::now();
+    loop {
+        // What is derived about a record (a fact flipped, it went stale) changes with time and
+        // with the checker's reports; look for changes once a minute and after each report.
+        if refreshed.elapsed() >= DERIVED_EVERY {
+            use synapse::state::StateStore;
+            let _ = shared.state.refresh_derived(Utc::now());
+            refreshed = tokio::time::Instant::now();
+        }
+        if deliver_state_notices_once(&shared) {
+            continue;
+        }
+        tokio::select! {
+            () = shared.state_nudge.notified() => {}
+            _ = tick.tick() => {}
         }
     }
 }
@@ -508,6 +663,15 @@ impl Daemon {
     /// second daemon on the same home (redb's file lock).
     pub fn open(cfg: &DaemonConfig) -> Result<Daemon, DaemonError> {
         Self::open_with(cfg, StoreKind::default())
+    }
+
+    /// As [`Daemon::open`], serving the mailbox from what [`select_store`] chose.
+    pub fn open_selected(cfg: &DaemonConfig, selection: &Selection) -> Result<Daemon, DaemonError> {
+        match selection {
+            Selection::Kind(kind) => Self::open_with(cfg, *kind),
+            #[cfg(feature = "sqlite-store")]
+            Selection::Named(choice) => Self::open_named(cfg, choice),
+        }
     }
 
     /// As [`Daemon::open`], serving the mailbox from `kind`.
@@ -565,18 +729,34 @@ impl Daemon {
         )
         .map_err(|e| DaemonError::Security(e.to_string()))?;
         let started_at = Utc::now();
-        let mailbox =
+        let mut mailbox =
             Mailbox::open(store, MailConfig::default(), started_at).map_err(DaemonError::Mail)?;
+        // The daemon's own notices are delivered once (a stale `[UNACKED]` must not come back).
+        mailbox
+            .set_single_delivery_sender(format!("{NOTICE_SENDER}@{}", keystore.account().account));
         let instance = random_bytes::<16>().ok_or(DaemonError::NoRandomness)?;
         let instance_id = hex(&instance);
         let summary = keystore.account();
+        let loaded = load_stats(&cfg.home, started_at);
+        // Slice A1: the roles in the table at the first start with this file are the ones that get
+        // the one-time `legacy` grants; every role first claimed later starts with none.
+        let existing: Vec<String> = mailbox.roles_snapshot().roles.keys().cloned().collect();
+        let access =
+            access::Access::open(&cfg.home, &existing, started_at).map_err(DaemonError::Access)?;
         Ok(Daemon {
             alerts: None,
             shared: Shared {
                 mailbox: Mutex::new(mailbox),
+                state: synapse::state::StateEngine::new(
+                    synapse::state::RedbBackend::open(&cfg.home.join(STATE_FILE))
+                        .map_err(|e| DaemonError::Store(StoreError(e.to_string())))?,
+                ),
+                state_nudge: tokio::sync::Notify::new(),
                 sessions: Mutex::new(HashMap::new()),
                 presence: Mutex::new(HashMap::new()),
-                stats: Mutex::new(HashMap::new()),
+                stats: Mutex::new(loaded.0),
+                stats_since: loaded.1,
+                stats_dirty: std::sync::atomic::AtomicBool::new(false),
                 account: summary.account,
                 account_key_id: summary.key_id,
                 account_key: keystore.account_public_key(),
@@ -585,11 +765,20 @@ impl Daemon {
                 home: cfg.home.clone(),
                 started_at,
                 sweep_every: cfg.sweep_every,
+                redelivery_check: REDELIVERY_CHECK,
                 security: Security::new(SecurityConfig::default(), Arc::new(sink)),
                 pause: sleep_pause(),
+                stop: tokio::sync::Notify::new(),
                 launcher: LauncherConfig::default(),
+                launch_senders: LaunchSenders::default(),
                 launches: Mutex::new(launch::Table::new(started_at)),
+                access,
                 online_window: ONLINE_WINDOW,
+                room_limits: RoomLimits::default(),
+                room_rate: Mutex::new(HashMap::new()),
+                room_unacked: Mutex::new(BTreeMap::new()),
+                role_ttl: chrono::Duration::days(DEFAULT_ROLE_TTL_DAYS),
+                session_ttl: chrono::Duration::hours(DEFAULT_SESSION_TTL_HOURS),
             },
         })
     }
@@ -646,11 +835,77 @@ impl Daemon {
         self
     }
 
+    /// Sets which senders' mail may raise a launch signal: each entry is `role` (this account) or
+    /// `role@account`. Empty, the default, raises none. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_launch_senders(self, senders: Vec<String>) -> Daemon {
+        self.shared.launch_senders.set(senders);
+        self
+    }
+
+    /// A handle on the sender allowlist, so a caller can change it while the daemon runs; the next
+    /// `GET /v1/waiting` poll sees the change.
+    #[must_use]
+    pub fn launch_senders(&self) -> LaunchSenders {
+        self.shared.launch_senders.clone()
+    }
+
+    /// Sets how long a session may go unused before it expires (default 24 hours). Tests use a short
+    /// one; `with_session_ttl_hours` is the configured form. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_session_ttl(mut self, ttl: chrono::Duration) -> Daemon {
+        self.shared.session_ttl = ttl;
+        self
+    }
+
+    /// [`Daemon::with_session_ttl`] in whole hours (at least 1). Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_session_ttl_hours(self, hours: u32) -> Daemon {
+        self.with_session_ttl(chrono::Duration::hours(i64::from(hours.max(1))))
+    }
+
+    /// Sets the redelivery back-off: how long an unacked message stays hidden after each delivery.
+    /// The count of gaps is also how many deliveries it gets before it is set aside as dead and its
+    /// sender is told; empty turns the back-off off. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_redelivery_gaps(mut self, gaps: Vec<chrono::Duration>) -> Daemon {
+        self.shared
+            .mailbox
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_redelivery_gaps(gaps);
+        self
+    }
+
+    /// How often exhausted messages are looked for and their senders told (default 30 s). Call after
+    /// `open`, before `serve`.
+    #[must_use]
+    pub fn with_redelivery_check(mut self, every: std::time::Duration) -> Daemon {
+        self.shared.redelivery_check = every;
+        self
+    }
+
+    /// Sets how many days idle retires a role (default 30, at least 1). Call after `open`, before
+    /// `serve`.
+    #[must_use]
+    pub fn with_role_ttl_days(mut self, days: u32) -> Daemon {
+        self.shared.role_ttl = chrono::Duration::days(i64::from(days.max(1)));
+        self
+    }
+
     /// Replaces how recently a role must have been heard from to count as online (default 90 s).
     /// Tests shorten it; production keeps the default. Call after `open`, before `serve`.
     #[must_use]
     pub fn with_online_window(mut self, window: chrono::Duration) -> Daemon {
         self.shared.online_window = window;
+        self
+    }
+
+    /// Replaces the size and rate ceilings for room posts. Tests shrink them; production keeps
+    /// the defaults. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_room_limits(mut self, limits: RoomLimits) -> Daemon {
+        self.shared.room_limits = limits;
         self
     }
 
@@ -678,6 +933,13 @@ impl Daemon {
         let alerts = self.alerts;
         let shared = Arc::new(self.shared);
         let pause = shared.pause.clone();
+        let stop_shared = shared.clone();
+        let shutdown = async move {
+            tokio::select! {
+                () = shutdown => {}
+                () = stop_shared.stop.notified() => {}
+            }
+        };
         write_announce(&shared.home, bound, &shared.instance_id)?;
         // Removed however `serve` ends: shutdown, error or unwind (#74). A kill runs no code, which
         // is why clients rely on the health proof, not on the file's absence.
@@ -692,14 +954,54 @@ impl Daemon {
                 tick.tick().await; // the first tick is immediate
                 loop {
                     tick.tick().await;
+                    let now = Utc::now();
+                    // Presence lives in memory; copy what the table needs out before taking the
+                    // mailbox lock, so the two locks are never held together.
+                    let seen: Vec<(String, DateTime<Utc>)> = shared
+                        .presence
+                        .lock()
+                        .map(|p| p.iter().map(|(id, p)| (id.clone(), p.last_seen)).collect())
+                        .unwrap_or_default();
                     if let Ok(mut mb) = shared.mailbox.lock() {
-                        let _ = mb.sweep(Utc::now());
+                        let _ = mb.sweep(now);
+                        match mb.maintain_roles(&seen, now, shared.role_ttl) {
+                            Ok(retired) => {
+                                for role in retired {
+                                    eprintln!(
+                                        "synapsed: retired {role}: idle for more than {} days",
+                                        shared.role_ttl.num_days()
+                                    );
+                                }
+                            }
+                            Err(e) => eprintln!("synapsed: role liveness not written: {e}"),
+                        }
                     }
                 }
             })
         };
         let alert_task =
             alerts.map(|delivery| tokio::spawn(deliver_alerts(shared.clone(), delivery)));
+        let notice_task = tokio::spawn(deliver_state_notices(shared.clone()));
+        let redelivery_task = {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(shared.redelivery_check);
+                loop {
+                    tick.tick().await;
+                    report_exhausted(&shared);
+                }
+            })
+        };
+        let stats_task = {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(STATS_FLUSH);
+                loop {
+                    tick.tick().await;
+                    flush_stats(&shared);
+                }
+            })
+        };
         let app = Router::new()
             .route(
                 "/v1/health",
@@ -717,6 +1019,29 @@ impl Daemon {
             .route("/v1/waiting", get(waiting))
             .route("/v1/launch-result", post(launch_result))
             .route("/v1/launch-clear", post(launch_clear))
+            .route("/v1/daemon/shutdown", post(daemon_shutdown))
+            .route("/v1/roles/retire", post(role_retire))
+            .route("/v1/roles/revive", post(role_revive))
+            .route("/v1/rooms", get(rooms_list))
+            .route("/v1/rooms/create", post(room_create))
+            .route("/v1/rooms/delete", post(room_delete))
+            .route("/v1/rooms/policy", post(room_policy))
+            .route("/v1/rooms/invite", post(room_invite))
+            .route("/v1/rooms/join", post(room_join))
+            .route("/v1/rooms/leave", post(room_leave))
+            .route("/v1/rooms/remove", post(room_remove))
+            .route("/v1/rooms/ban", post(room_ban))
+            .route("/v1/rooms/members", get(room_members))
+            .route("/v1/access/grant", post(grant_create))
+            .route("/v1/access/revoke", post(grant_revoke))
+            .route("/v1/access/grants", get(grants_list))
+            .route("/v1/state/create", post(state_api::create))
+            .route("/v1/state/get", get(state_api::get))
+            .route("/v1/state/list", get(state_api::list))
+            .route("/v1/state/patch", post(state_api::patch))
+            .route("/v1/state/history", get(state_api::history))
+            .route("/v1/state/facts", post(state_api::facts))
+            .route("/v1/state/wanted", get(state_api::wanted))
             // Inside `host_guard`, so a 421 is neither counted nor delayed.
             .layer(middleware::from_fn(move |req: Request, next: Next| {
                 delay_failures(pause.clone(), req, next)
@@ -724,11 +1049,15 @@ impl Daemon {
             .layer(middleware::from_fn(move |req: Request, next: Next| {
                 host_guard(bound, req, next)
             }))
-            .with_state(shared);
+            .with_state(shared.clone());
         let result = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown)
             .await;
         sweeper.abort();
+        notice_task.abort();
+        redelivery_task.abort();
+        stats_task.abort();
+        flush_stats(&shared);
         if let Some(task) = alert_task {
             task.abort();
         }
@@ -826,6 +1155,32 @@ impl From<MailError> for ApiError {
             MailError::NotFound => ApiError::new(StatusCode::NOT_FOUND, "not_found", e),
             MailError::NotYourLease => ApiError::new(StatusCode::FORBIDDEN, "not_your_lease", e),
             MailError::Claim(c) => ApiError::new(StatusCode::FORBIDDEN, "claim_refused", c),
+            MailError::Room(r) => match r {
+                synapse::rooms::RoomError::BadName => {
+                    ApiError::new(StatusCode::BAD_REQUEST, "malformed", e)
+                }
+                synapse::rooms::RoomError::NameTaken => {
+                    ApiError::new(StatusCode::CONFLICT, "name_taken", e)
+                }
+                synapse::rooms::RoomError::RoomCap => {
+                    ApiError::new(StatusCode::TOO_MANY_REQUESTS, "room_cap", e)
+                }
+                synapse::rooms::RoomError::Unknown => {
+                    ApiError::new(StatusCode::NOT_FOUND, "unknown_room", e)
+                }
+                synapse::rooms::RoomError::NotModerator => {
+                    ApiError::new(StatusCode::FORBIDDEN, "not_moderator", e)
+                }
+                synapse::rooms::RoomError::JoinRefused => {
+                    ApiError::new(StatusCode::FORBIDDEN, "join_refused", e)
+                }
+                synapse::rooms::RoomError::RoomFull => {
+                    ApiError::new(StatusCode::TOO_MANY_REQUESTS, "room_full", e)
+                }
+                synapse::rooms::RoomError::NotMember => {
+                    ApiError::new(StatusCode::FORBIDDEN, "not_a_member", e)
+                }
+            },
             MailError::InvalidState(_)
             | MailError::Store(_)
             | MailError::Poisoned
@@ -964,6 +1319,18 @@ fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
 
 /// The caller's session: Bearer token, looked up by its hash, then checked against the role's
 /// current epoch. Every authenticated call also counts as presence.
+/// The caller as the access rules see it. TEMPORARY: a session holding `role-admin` counts as the
+/// account holder, because nothing else marks one yet. Remove when grants carry that authority
+/// (docs/ACCESS_CONTROL_DESIGN.md 3.3, slice A2).
+fn principal_of(session: &Session) -> access::Principal<'_> {
+    access::Principal {
+        id: &session.global_id,
+        account_holder: session
+            .permissions
+            .contains(&synapse::certificate::Permission::RoleAdmin),
+    }
+}
+
 fn authed(shared: &Shared, headers: &HeaderMap) -> Result<Session, ApiError> {
     // Row 1: every 401 is counted and recorded before it is sent. A 409 `superseded` is not.
     let unauthorized = || {
@@ -987,12 +1354,26 @@ fn authed(shared: &Shared, headers: &HeaderMap) -> Result<Session, ApiError> {
         .and_then(|v| v.strip_prefix("Bearer "))
         .and_then(unhex::<32>)
         .ok_or_else(unauthorized)?;
+    let hash = token_hash(&token);
     let session = locked(&shared.sessions)?
-        .get(&token_hash(&token))
+        .get(&hash)
         .cloned()
         .ok_or_else(unauthorized)?;
+    // Superseded outranks expired: a holder that lost the role must be told so (409), not invited
+    // to claim it back. Only a current-epoch session can be merely expired.
     locked(&shared.mailbox)?.check(&session.global_id, session.epoch)?;
     let now = Utc::now();
+    if now - session.last_used > shared.session_ttl {
+        // Not counted as a bearer failure and not an event: an idle session is not an attack.
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "session_expired",
+            "this session was idle longer than the session ttl: claim the role again",
+        ));
+    }
+    if let Some(live) = locked(&shared.sessions)?.get_mut(&hash) {
+        live.last_used = now;
+    }
     let mut presence = locked(&shared.presence)?;
     let entry = presence
         .entry(session.global_id.clone())
@@ -1013,8 +1394,11 @@ async fn health(
     bound: SocketAddr,
     uri: Uri,
 ) -> Result<Response, ApiError> {
+    // `ok` answers "is a synapsed here"; a non-ok reply reads as a squat to clients, which then start
+    // another daemon. The mailbox's own state is a separate field (ROADMAP row 37c).
     let mut reply = json!({
         "ok": true,
+        "mailbox": mailbox_state(&shared.mailbox),
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": shared.started_at.to_rfc3339(),
     });
@@ -1037,6 +1421,19 @@ async fn health(
         return Ok(delayed(axum::Json(reply).into_response(), delay));
     }
     Ok(axum::Json(reply).into_response())
+}
+
+/// The mailbox as `/v1/health` reports it: `ok`; `poisoned` (a failed write left memory and store
+/// disagreeing, every call refuses until a restart); `unavailable` (the lock itself is poisoned);
+/// `busy` (a handler holds it right now). Never waits for the lock: a health check that hangs behind
+/// a stuck store write would read as a dead daemon.
+fn mailbox_state<S: MailStore>(mailbox: &Mutex<Mailbox<S>>) -> &'static str {
+    match mailbox.try_lock() {
+        Ok(mb) if mb.is_poisoned() => "poisoned",
+        Ok(_) => "ok",
+        Err(std::sync::TryLockError::WouldBlock) => "busy",
+        Err(std::sync::TryLockError::Poisoned(_)) => "unavailable",
+    }
 }
 
 #[derive(Deserialize)]
@@ -1119,6 +1516,19 @@ fn claim_inner(
     let lookup = move |kid: &str| (kid == key_id).then_some(key);
     let grant = locked(&shared.mailbox)?.claim(&req, &lookup, &NoRevocations, Utc::now())?;
 
+    // Board 388: a sub-agent first claimed with a parent in its chain is visible to that parent and
+    // the account holder only. The leaf's direct issuer is chain[1]; a chain of one was issued by
+    // the account key itself (provisioned directly) and has no creator. Not recorded on a failed
+    // write: no creator means no extra visibility, so this fails closed.
+    if grant.superseded.is_none()
+        && req.chain.len() >= 2
+        && let Err(e) = shared
+            .access
+            .record_creator(&grant.global_id, &req.chain[1].subject_global_id)
+    {
+        eprintln!("synapsed: creator of {} not recorded: {e}", grant.global_id);
+    }
+
     let token = random_bytes::<32>().ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1137,6 +1547,12 @@ fn claim_inner(
             Session {
                 global_id: grant.global_id.clone(),
                 epoch: grant.epoch,
+                permissions: req
+                    .chain
+                    .first()
+                    .map(|c| c.permissions.clone())
+                    .unwrap_or_default(),
+                last_used: Utc::now(),
             },
         );
     }
@@ -1155,6 +1571,10 @@ struct SendBody {
     #[serde(default)]
     message_id: Option<String>,
     body_b64: String,
+    /// How the body is written: `L0` (prose) or `L1:message-formats/1`. Absent keeps today's
+    /// behaviour (the soft lint); see `synapse::message_format::Mode`.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 async fn send(
@@ -1171,6 +1591,9 @@ async fn send(
             if id.is_empty()
                 || id.len() > MAX_CLIENT_ID
                 || id.contains('/')
+                // `#` marks a room copy's id (`<sender>/<id>#<room>`): a direct message cannot
+                // claim to come from a room.
+                || id.contains('#')
                 || id.chars().any(char::is_control)
             {
                 return Err(malformed("message_id"));
@@ -1180,26 +1603,104 @@ async fn send(
         None => uuid::Uuid::new_v4().to_string(),
     };
     let message_id = format!("{}/{client_id}", session.global_id);
+    let body_bytes = B64
+        .decode(&body.body_b64)
+        .map_err(|_| malformed("body_b64"))?;
+    // A declared L1 body is decoded strictly and refused when it is not that format; a declared L0
+    // body is prose and is not linted; with no mode the soft lint runs as before.
+    let lint = match body
+        .mode
+        .as_deref()
+        .map(synapse::message_format::Mode::parse)
+    {
+        None => format_lint::warning(&body_bytes),
+        Some(Err(e)) => return Err(malformed(&e.to_string())),
+        Some(Ok(synapse::message_format::Mode::L0)) => None,
+        Some(Ok(synapse::message_format::Mode::L1MessageFormats1)) => {
+            let text = std::str::from_utf8(&body_bytes)
+                .map_err(|_| malformed("mode L1:message-formats/1 needs a UTF-8 text body"))?;
+            if let Err(e) = synapse::message_format::decode(text) {
+                return Err(ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "not_message_format",
+                    format!("declared L1:message-formats/1 but {e}"),
+                ));
+            }
+            None
+        }
+    };
+    let declared_mode = body.mode.clone();
     let envelope = Envelope {
         message_id: message_id.clone(),
         to: body.to,
         from: session.global_id.clone(),
-        body: B64
-            .decode(&body.body_b64)
-            .map_err(|_| malformed("body_b64"))?,
+        body: body_bytes,
+        mode: declared_mode,
     };
+    // A post to a room fans out to its members (docs/ROOMS_DESIGN.md section 9). Presence is read
+    // before the mailbox lock is taken, so the two locks are never held in the other order.
+    let is_room = locked(&shared.mailbox)?
+        .rooms_snapshot()
+        .rooms
+        .contains_key(&envelope.to);
+    if is_room {
+        let seen: HashMap<String, DateTime<Utc>> = locked(&shared.presence)?
+            .iter()
+            .map(|(id, p)| (id.clone(), p.last_seen))
+            .collect();
+        let mut mailbox = locked(&shared.mailbox)?;
+        mailbox.check(&session.global_id, session.epoch)?;
+        if let Some(mut reply) = post_to_room(&shared, &session, &mut mailbox, &envelope, &seen)? {
+            drop(mailbox);
+            if let Some(warning) = lint {
+                reply["warning"] = Value::String(warning);
+            }
+            return Ok(axum::Json(reply).into_response());
+        }
+    }
     let (to, outcome) = {
         let mut mailbox = locked(&shared.mailbox)?;
         // Review M5: re-check the sender's epoch under the same lock as the enqueue.
         mailbox.check(&session.global_id, session.epoch)?;
         // Review I2: serve this daemon's account and roles that have claimed at least once, so no
         // role can fill the disk with queues for recipients that can never read them.
-        let known = envelope
+        let roles = mailbox.roles_snapshot();
+        let in_account = envelope
             .to
             .split_once('@')
-            .is_some_and(|(_, account)| account == shared.account)
-            && mailbox.roles_snapshot().roles.contains_key(&envelope.to);
-        if !known {
+            .is_some_and(|(_, account)| account == shared.account);
+        // A role the sender may not see is answered exactly as an absent one (no existence oracle),
+        // so this runs before the retired check below and before the unknown-recipient budget.
+        let principal = principal_of(&session);
+        let target = access::agent_object(&envelope.to);
+        let sees = |shared: &Shared| {
+            shared
+                .access
+                .decide(
+                    principal,
+                    access::Action::See,
+                    &target,
+                    access::Freshness::Cached,
+                )
+                .allowed()
+        };
+        let record = roles
+            .roles
+            .get(&envelope.to)
+            .filter(|_| in_account && sees(&shared));
+        // A retired role is known, not abused: refuse with its own error and no budget charge.
+        // Mail already queued for it is kept (docs/ROLE_LIVENESS_DESIGN.md).
+        if record.is_some_and(|r| r.retired_at.is_some()) {
+            return Err(ApiError::new(
+                StatusCode::GONE,
+                "recipient_retired",
+                format!(
+                    "{} is retired: it comes back when it claims its role, or when a role-admin revives it",
+                    shown_role(&envelope.to)
+                ),
+            ));
+        }
+        if record.is_none() {
             // Row 4: counted per sending role; recorded only once over budget.
             let delay = shared.security.over_budget(
                 &shared.security.misuse,
@@ -1211,9 +1712,34 @@ async fn send(
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
                 "unknown_recipient",
-                "no such role on this daemon",
+                format!(
+                    "no such role on this daemon: {} (give role@account)",
+                    shown_role(&envelope.to)
+                ),
             )
             .after(delay));
+        }
+        // Seen but not sendable: the sender already knows the role exists, so say what is missing.
+        if !shared
+            .access
+            .decide(
+                principal,
+                access::Action::Send,
+                &target,
+                access::Freshness::Cached,
+            )
+            .allowed()
+        {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                format!(
+                    "{} may not message {}: it lacks {}",
+                    shown_role(&session.global_id),
+                    shown_role(&envelope.to),
+                    access::Action::Send.name()
+                ),
+            ));
         }
         let to = envelope.to.clone();
         let outcome = mailbox.enqueue(envelope, Utc::now())?;
@@ -1221,12 +1747,258 @@ async fn send(
     };
     if outcome == Enqueued::Queued {
         count(&shared, &to, |c| c.sent += 1);
+        count(&shared, &session.global_id, |c| {
+            c.submitted += 1;
+            c.lint_warnings += u64::from(lint.is_some());
+        });
     }
-    Ok(axum::Json(json!({
+    let mut reply = json!({
         "message_id": message_id,
         "outcome": match outcome { Enqueued::Queued => "queued", Enqueued::Duplicate => "duplicate" },
-    }))
-    .into_response())
+    });
+    if let Some(warning) = lint {
+        reply["warning"] = Value::String(warning);
+    }
+    Ok(axum::Json(reply).into_response())
+}
+
+/// One post to a room, under the mailbox lock: who may post, who receives, one copy each.
+/// `Ok(None)` when `envelope.to` is not a room after all. A member posts unless muted; anyone
+/// else needs the `synapse:post` grant and is not made a member by it. The copy goes to every
+/// other member that is claimed, not retired and online now; the reply says how many were
+/// reached and how many were not, by reason, never which (docs/ROOMS_DESIGN.md sections 6a, 9).
+fn post_to_room(
+    shared: &Shared,
+    session: &Session,
+    mailbox: &mut Mailbox<DaemonStore>,
+    envelope: &Envelope,
+    seen: &HashMap<String, DateTime<Utc>>,
+) -> Result<Option<Value>, ApiError> {
+    let rooms = mailbox.rooms_snapshot();
+    let Some(room) = rooms.rooms.get(&envelope.to) else {
+        return Ok(None);
+    };
+    let me = session.global_id.as_str();
+    let object = format!("room:{}", envelope.to);
+    match room.members.get(me) {
+        Some(member) if !member.can_send => {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "muted",
+                format!(
+                    "{} is muted in {}",
+                    shown_role(me),
+                    shown_role(&envelope.to)
+                ),
+            ));
+        }
+        Some(_) => {}
+        None => {
+            let may_post = shared
+                .access
+                .decide(
+                    principal_of(session),
+                    access::Action::Post,
+                    &object,
+                    access::Freshness::Cached,
+                )
+                .allowed();
+            if !may_post {
+                if see_room(shared, session, &envelope.to, room) {
+                    return Err(ApiError::new(
+                        StatusCode::FORBIDDEN,
+                        "not_a_member",
+                        format!(
+                            "{} is not a member of {} and lacks {}",
+                            shown_role(me),
+                            shown_role(&envelope.to),
+                            access::Action::Post.name()
+                        ),
+                    ));
+                }
+                // A room the sender may not see is answered as an absent role, same budget.
+                let delay = shared.security.over_budget(
+                    &shared.security.misuse,
+                    me,
+                    "synapsed/recipient",
+                    me,
+                    "unknown_recipient",
+                );
+                return Err(ApiError::new(
+                    StatusCode::NOT_FOUND,
+                    "unknown_recipient",
+                    format!(
+                        "no such role on this daemon: {} (give role@account)",
+                        shown_role(&envelope.to)
+                    ),
+                )
+                .after(delay));
+            }
+        }
+    }
+    // A room is chat: a bounded body, and a bounded rate per sender and per room.
+    let limits = shared.room_limits;
+    if envelope.body.len() > limits.max_body_bytes {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "room_body_too_large",
+            format!("a room post is at most {} bytes", limits.max_body_bytes),
+        ));
+    }
+    room_rate_check(shared, &envelope.to, me, Utc::now())?;
+    // One id per post and room, so a resend of the same client id dedupes per member.
+    let copy_id = format!("{}#{}", envelope.message_id, envelope.to);
+    if copy_id.len() > synapse::mailbox::MAX_ADDRESS_LEN {
+        return Err(malformed("message_id"));
+    }
+    let roles = mailbox.roles_snapshot();
+    let now = Utc::now();
+    let (mut offline, mut retired, mut quiet) = (0u32, 0u32, 0u32);
+    let mut copies = Vec::new();
+    for member in room.members.keys().filter(|m| m.as_str() != me) {
+        // Membership is the consent (PM, option A): no per-pair `send` check on the agent.
+        if !deliverable_to(member) {
+            continue;
+        }
+        match roles.roles.get(member) {
+            Some(record) if record.retired_at.is_none() => {}
+            _ => {
+                retired += 1;
+                continue;
+            }
+        }
+        if !seen
+            .get(member)
+            .is_some_and(|at| now - *at <= shared.online_window)
+        {
+            offline += 1;
+            continue;
+        }
+        // A member that asked for mentions only gets a post that names it.
+        let local = member
+            .split_once('@')
+            .map_or(member.as_str(), |(role, _)| role);
+        if room.members.get(member).is_some_and(|m| m.mention_only)
+            && !mentions(&envelope.body, local)
+        {
+            quiet += 1;
+            continue;
+        }
+        copies.push(Envelope {
+            message_id: copy_id.clone(),
+            to: member.clone(),
+            from: me.to_string(),
+            body: envelope.body.clone(),
+            mode: envelope.mode.clone(),
+        });
+    }
+    let outcomes = mailbox.enqueue_many(&copies, now)?;
+    let delivered = outcomes
+        .iter()
+        .filter(|o| **o == synapse::mailbox::Fanout::Queued)
+        .count();
+    let full = outcomes
+        .iter()
+        .filter(|o| **o == synapse::mailbox::Fanout::Full)
+        .count();
+    for (copy, outcome) in copies.iter().zip(&outcomes) {
+        if *outcome == synapse::mailbox::Fanout::Queued {
+            count(shared, &copy.to, |c| c.sent += 1);
+        }
+    }
+    count(shared, me, |c| c.submitted += 1);
+    Ok(Some(json!({
+        "message_id": envelope.message_id,
+        "outcome": "queued",
+        "room": {
+            "room": envelope.to,
+            "joined": room.members.len(),
+            "delivered": delivered,
+            "refused": { "offline": offline, "full": full, "retired": retired, "mention_only": quiet },
+        },
+    })))
+}
+
+/// Whether `body` names the role `local` as an `@role` token: the `@` starts a word and the name
+/// ends at a character that cannot be in a role name, so `@devops` does not name `dev`.
+fn mentions(body: &[u8], local: &str) -> bool {
+    let text = String::from_utf8_lossy(body);
+    let name_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    text.match_indices('@').any(|(at, _)| {
+        let starts_word = text[..at].chars().next_back().is_none_or(|c| !name_char(c));
+        let after = &text[at + 1..];
+        starts_word
+            && after.starts_with(local)
+            && after[local.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !name_char(c))
+    })
+}
+
+/// Record one accepted post against its sender's and its room's minute, or refuse with
+/// `429 room_rate` and how long to wait. Only accepted posts count.
+fn room_rate_check(
+    shared: &Shared,
+    room: &str,
+    sender: &str,
+    now: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    let window = chrono::Duration::seconds(60);
+    let limits = shared.room_limits;
+    let Ok(mut recent) = shared.room_rate.lock() else {
+        return Ok(()); // a poisoned counter loses a count, never the post
+    };
+    let keys = [
+        (
+            format!("{room}|{sender}"),
+            limits.per_sender_per_min,
+            "from you",
+        ),
+        (room.to_string(), limits.per_room_per_min, "to this room"),
+    ];
+    for (key, limit, who) in &keys {
+        let queue = recent.entry(key.clone()).or_default();
+        while queue.front().is_some_and(|at| now - *at >= window) {
+            queue.pop_front();
+        }
+        if queue.len() >= *limit {
+            let wait = queue
+                .front()
+                .map_or(1, |at| (*at + window - now).num_seconds().max(1));
+            return Err(ApiError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                body: json!({
+                    "error": "room_rate",
+                    "message": format!("too many posts {who} this minute ({limit}); try again in {wait} s"),
+                    "retry_after_secs": wait,
+                }),
+                delay: None,
+            });
+        }
+    }
+    for (key, _, _) in keys {
+        recent.entry(key).or_default().push_back(now);
+    }
+    recent.retain(|_, queue| !queue.is_empty());
+    Ok(())
+}
+
+/// The hook for per-recipient consent on a fan-out copy. Membership is the consent: the member
+/// joined by its own act (CireSnave's join/post ruling, 2026-11-06), so no agent-level
+/// `synapse:send` is re-checked per (sender, member) (PM ruling, 2026-11-07, option A).
+/// A later rule that must veto a copy goes here, and counts the member as refused.
+fn deliverable_to(_member: &str) -> bool {
+    true
+}
+
+/// A recipient as an error message shows it: at most a global id's length, control characters
+/// escaped, so a refusal never echoes a megabyte or a terminal escape back.
+fn shown_role(to: &str) -> String {
+    to.chars()
+        .take(129)
+        .flat_map(char::escape_default)
+        .collect()
 }
 
 #[derive(Deserialize, Default)]
@@ -1278,7 +2050,7 @@ async fn fetch(
         .into_iter()
         .map(|d| {
             let seen = senders.get(&d.envelope.from);
-            json!({
+            let mut message = json!({
                 "message_id": d.envelope.message_id,
                 "from": d.envelope.from,
                 "from_summary": seen.and_then(|p| p.summary.clone()),
@@ -1287,10 +2059,18 @@ async fn fetch(
                 "enqueued_at": d.enqueued_at.to_rfc3339(),
                 "lease_until": d.lease_until.to_rfc3339(),
                 "attempts": d.attempts,
-            })
+            });
+            if let Some(mode) = &d.envelope.mode {
+                message["mode"] = Value::String(mode.clone());
+            }
+            message
         })
         .collect();
     drop(senders);
+    if !messages.is_empty() {
+        let now = Utc::now();
+        count(&shared, &session.global_id, |c| c.last_fetch_at = Some(now));
+    }
     if redelivered > 0 {
         count(&shared, &session.global_id, |c| {
             c.redelivered += redelivered as u64;
@@ -1339,7 +2119,11 @@ async fn ack(
         Err(e) => return Err(e.into()),
     };
     if outcome == Acked::Removed {
-        count(&shared, &session.global_id, |c| c.acked += 1);
+        let now = Utc::now();
+        count(&shared, &session.global_id, |c| {
+            c.acked += 1;
+            c.last_ack_at = Some(now);
+        });
     }
     Ok(axum::Json(json!({
         "outcome": match outcome { Acked::Removed => "removed", Acked::AlreadyAcked => "already_acked" },
@@ -1470,9 +2254,11 @@ async fn list(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authed(&shared, &headers)?;
+    let session = authed(&shared, &headers)?;
     let cwd = query_param(&uri, "cwd");
     let repo = query_param(&uri, "repo");
+    let include_retired =
+        query_param(&uri, "include_retired").is_some_and(|v| v == "true" || v == "1");
     let now = Utc::now();
     // One lock hold, so every depth is counted against the epoch listed beside it.
     let (roles, depths) = {
@@ -1488,61 +2274,301 @@ async fn list(
         &launches,
         shared.online_window,
         now,
+        include_retired,
     );
+    // Only the roles the caller may see; `include_retired` follows the same filter.
+    let principal = principal_of(&session);
+    out.retain(|entry| {
+        entry["global_id"].as_str().is_some_and(|id| {
+            shared
+                .access
+                .decide(
+                    principal,
+                    access::Action::See,
+                    &access::agent_object(id),
+                    access::Freshness::Cached,
+                )
+                .allowed()
+        })
+    });
     for (key, want) in [("cwd", &cwd), ("repo", &repo)] {
         if let Some(want) = want {
             out.retain(|entry| entry[key].as_str() == Some(want.as_str()));
+        }
+    }
+    // Delivery evidence from the daemon's own counters (null until the role has fetched or acked).
+    if let Ok(counters) = shared.stats.lock() {
+        for entry in &mut out {
+            let c = entry["global_id"]
+                .as_str()
+                .and_then(|id| counters.get(id))
+                .copied()
+                .unwrap_or_default();
+            entry["last_fetch_at"] = json!(c.last_fetch_at.map(|at| at.to_rfc3339()));
+            entry["last_ack_at"] = json!(c.last_ack_at.map(|at| at.to_rfc3339()));
         }
     }
     Ok(axum::Json(json!({ "roles": out })).into_response())
 }
 
 /// What one role has been through since the daemon started. Message counts only, never content.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct RoleCounters {
     /// New messages queued for the role (a duplicate send is not one).
     sent: u64,
+    /// New messages the role itself sent (the per-sender side of `sent`; same rule for duplicates).
+    submitted: u64,
     /// Messages the role acked (an idempotent repeat is not one).
     acked: u64,
     /// Deliveries after a message's first: its lease ran out, or a takeover voided it.
     redelivered: u64,
     /// The subset of `redelivered` whose previous lease had run out; the rest are takeovers.
     expired: u64,
+    /// When a fetch last handed the role at least one message (the adapter received it). An empty
+    /// poll does not move it.
+    last_fetch_at: Option<DateTime<Utc>>,
+    /// When the role last acked a message (an idempotent repeat does not move it).
+    last_ack_at: Option<DateTime<Utc>>,
+    /// Messages for the role set aside as dead after their deliveries ran out without an ack.
+    dead_lettered: u64,
+    /// New messages the role sent whose first line was not a `MESSAGE-FORMATS` v1 header (a soft lint
+    /// that never rejects). Compare with `submitted` for the rate.
+    lint_warnings: u64,
+}
+
+/// Set aside the messages whose deliveries ran out, count them against the role they were for, and
+/// tell each sender with one short mail: `[UNACKED] to=<role> id=<message_id> age=<time>
+/// attempts=<n>`. The message is not dropped: it waits in the dead set and comes back when the role
+/// next claims. A message the daemon itself sent (an earlier notice) is set aside quietly, so
+/// there is never a notice about a notice.
+fn report_exhausted(shared: &Shared) {
+    let now = Utc::now();
+    let exhausted = match shared.mailbox.lock() {
+        Ok(mut mailbox) => match mailbox.dead_exhausted(now) {
+            Ok(list) => list,
+            Err(e) => {
+                eprintln!("synapsed: redeliveries not checked: {e}");
+                return;
+            }
+        },
+        Err(_) => return,
+    };
+    let notice_from = format!("{NOTICE_SENDER}@{}", shared.account);
+    for gone in exhausted {
+        count(shared, &gone.to, |c| c.dead_lettered += 1);
+        // A room copy is not told one by one: its sender hears once per post, after the grace.
+        if let Some((base, room)) = room_copy(&gone.message_id) {
+            if gone.from != notice_from
+                && let Ok(mut pending) = shared.room_unacked.lock()
+            {
+                let entry = pending
+                    .entry((gone.from.clone(), base.to_string(), room.to_string()))
+                    .or_insert((0, now));
+                entry.0 += 1;
+            }
+            continue;
+        }
+        let Some(notice) = unacked_notice(&gone, &shared.account, now) else {
+            continue;
+        };
+        let Ok(mut mailbox) = shared.mailbox.lock() else {
+            return;
+        };
+        if let Err(e) = mailbox.enqueue(notice, now) {
+            eprintln!("synapsed: an [UNACKED] notice was not queued: {e}");
+        }
+    }
+    flush_room_notices(shared, &notice_from, now);
+}
+
+/// `(sender/client id, room)` of a room copy's id `<sender>/<id>#<room>`.
+fn room_copy(message_id: &str) -> Option<(&str, &str)> {
+    let (base, room) = message_id.rsplit_once('#')?;
+    synapse::rooms::valid_room_id(room).then_some((base, room))
+}
+
+/// Send the one `[ROOM-UNACKED]` notice for each post whose copies stopped running out.
+fn flush_room_notices(shared: &Shared, notice_from: &str, now: DateTime<Utc>) {
+    let due: Vec<((String, String, String), u32)> = {
+        let Ok(mut pending) = shared.room_unacked.lock() else {
+            return;
+        };
+        let keys: Vec<_> = pending
+            .iter()
+            .filter(|(_, (_, first))| now - *first >= ROOM_NOTICE_GRACE)
+            .map(|(k, _)| k.clone())
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| pending.remove(&k).map(|(n, _)| (k, n)))
+            .collect()
+    };
+    for ((from, base, room), unacked) in due {
+        let id = base.split_once('/').map_or(base.as_str(), |(_, id)| id);
+        let notice = Envelope {
+            message_id: format!("{notice_from}/room-unacked-{}", uuid::Uuid::new_v4()),
+            to: from,
+            from: notice_from.to_string(),
+            body: format!("[ROOM-UNACKED] room={room} id={id} unacked={unacked}").into_bytes(),
+            mode: None,
+        };
+        let Ok(mut mailbox) = shared.mailbox.lock() else {
+            return;
+        };
+        if let Err(e) = mailbox.enqueue(notice, now) {
+            eprintln!("synapsed: a [ROOM-UNACKED] notice was not queued: {e}");
+        }
+    }
+}
+
+/// The `[UNACKED]` mail for `gone`'s sender, or `None` when `gone` was itself a notice from the
+/// daemon: a notice that goes unacked is set aside quietly, never reported, so there is no loop.
+fn unacked_notice(gone: &Exhausted, account: &str, now: DateTime<Utc>) -> Option<Envelope> {
+    let notice_from = format!("{NOTICE_SENDER}@{account}");
+    if gone.from == notice_from {
+        return None;
+    }
+    let age = (now - gone.enqueued_at).max(chrono::Duration::zero());
+    let age = if age < chrono::Duration::minutes(2) {
+        format!("{}s", age.num_seconds())
+    } else {
+        format!("{}m", age.num_minutes())
+    };
+    let role = gone.to.split_once('@').map_or(gone.to.as_str(), |(r, _)| r);
+    Some(Envelope {
+        message_id: format!("{notice_from}/unacked-{}", uuid::Uuid::new_v4()),
+        to: gone.from.clone(),
+        from: notice_from,
+        body: format!(
+            "[UNACKED] to={role} id={} age={age} attempts={}",
+            gone.message_id, gone.attempts
+        )
+        .into_bytes(),
+        mode: None,
+    })
 }
 
 fn count(shared: &Shared, role: &str, bump: impl FnOnce(&mut RoleCounters)) {
     // A poisoned counter table loses a count, never the request it was riding on.
     if let Ok(mut stats) = shared.stats.lock() {
         bump(stats.entry(role.to_string()).or_default());
+        shared
+            .stats_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
-/// `GET /v1/stats`: the soak's cumulative counters, per role. Per-process: `since` is when this
-/// daemon started counting, and a restart begins again from zero.
+#[derive(Serialize, Deserialize)]
+struct StatsFile {
+    since: DateTime<Utc>,
+    roles: HashMap<String, RoleCounters>,
+}
+
+/// The counters a previous run left in `<home>/stats.json` and when counting began. A missing file
+/// starts fresh from `now`; one that is there but unreadable does too, and says so on stderr.
+fn load_stats(
+    home: &std::path::Path,
+    now: DateTime<Utc>,
+) -> (HashMap<String, RoleCounters>, DateTime<Utc>) {
+    let path = home.join(STATS_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<StatsFile>(&text) {
+            Ok(file) => (file.roles, file.since),
+            Err(e) => {
+                eprintln!("synapsed: {STATS_FILE} is unreadable ({e}); counting from zero");
+                (HashMap::new(), now)
+            }
+        },
+        Err(_) => (HashMap::new(), now),
+    }
+}
+
+/// Write the counters if any changed since the last write: temp file then rename, owner-only on
+/// Unix (on Windows it inherits the home's ACL). A failed write leaves the flag set to retry.
+fn flush_stats(shared: &Shared) {
+    use std::sync::atomic::Ordering;
+    if !shared.stats_dirty.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let Ok(snapshot) = shared.stats.lock().map(|s| s.clone()) else {
+        return;
+    };
+    let Ok(body) = serde_json::to_vec(&StatsFile {
+        since: shared.stats_since,
+        roles: snapshot,
+    }) else {
+        return;
+    };
+    let temp = shared
+        .home
+        .join(format!(".tmp-stats-{}", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        file.write_all(&body)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, shared.home.join(STATS_FILE))
+    })();
+    if let Err(e) = written {
+        eprintln!("synapsed: {STATS_FILE} not written: {e}");
+        shared.stats_dirty.store(true, Ordering::Release);
+    }
+}
+
+/// `GET /v1/stats`: the soak's cumulative counters, per role. They survive a restart (`stats.json` in
+/// the home): `since` is when counting began, `daemon_started` when this run did. `sent` is mail
+/// queued FOR the role, `submitted` mail the role itself sent. A kill loses at most `STATS_FLUSH`.
 async fn stats(
     State(shared): State<Arc<Shared>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    authed(&shared, &headers)?;
+    let session = authed(&shared, &headers)?;
+    let principal = principal_of(&session);
     let roles = locked(&shared.mailbox)?.roles_snapshot();
     let counters = locked(&shared.stats)?;
     let out: Vec<Value> = roles
         .roles
         .keys()
+        .filter(|id| {
+            shared
+                .access
+                .decide(
+                    principal,
+                    access::Action::See,
+                    &access::agent_object(id),
+                    access::Freshness::Cached,
+                )
+                .allowed()
+        })
         .map(|global_id| {
             let c = counters.get(global_id).copied().unwrap_or_default();
             json!({
                 "global_id": global_id,
                 "sent": c.sent,
+                "submitted": c.submitted,
                 "acked": c.acked,
                 "redelivered": c.redelivered,
                 "expired": c.expired,
+                "last_fetch_at": c.last_fetch_at.map(|at| at.to_rfc3339()),
+                "last_ack_at": c.last_ack_at.map(|at| at.to_rfc3339()),
+                "dead_lettered": c.dead_lettered,
+                "lint_warnings": c.lint_warnings,
             })
         })
         .collect();
     Ok(axum::Json(json!({
-        "scope": "process",
-        "since": shared.started_at.to_rfc3339(),
+        "scope": "home",
+        "since": shared.stats_since.to_rfc3339(),
+        "daemon_started": shared.started_at.to_rfc3339(),
+        "launch_senders_set": !shared.launch_senders.is_empty(),
         "roles": out,
     }))
     .into_response())
@@ -1578,7 +2604,32 @@ fn launch_candidates(
     }
     let (roles, depths) = {
         let mailbox = locked(&shared.mailbox)?;
-        (mailbox.roles_snapshot(), mailbox.depths(now)?)
+        let roles = mailbox.roles_snapshot();
+        let depths = mailbox.depths(now)?;
+        if shared.launch_senders.is_empty() {
+            return Ok(Vec::new());
+        }
+        let account = shared.account.as_str();
+        let allowed = |from: &str| shared.launch_senders.allows(from, account);
+        // Count only the allowed senders' mail; the per-message read happens only if some role has mail.
+        let depths = if depths.values().any(|d| d.queued > 0) {
+            let by_sender = mailbox.depths_from(now, &allowed)?;
+            depths
+                .into_iter()
+                .map(|(id, d)| {
+                    let d = by_sender.get(&id).map_or(d, |q| Depth {
+                        queued: q.queued,
+                        leased: q.leased,
+                        oldest_enqueued_at: q.oldest_enqueued_at,
+                        ..d
+                    });
+                    (id, d)
+                })
+                .collect()
+        } else {
+            depths
+        };
+        (roles, depths)
     };
     let presence = locked(&shared.presence)?;
     let mut out = Vec::new();
@@ -1718,6 +2769,775 @@ async fn launch_clear(
     Ok(axum::Json(json!({ "epoch": epoch })).into_response())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoleBody {
+    role: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShutdownBody {}
+
+/// `POST /v1/daemon/shutdown {}`: stop serving cleanly, so the process exits 0 (a scheduled task
+/// that restarts on failure then leaves it stopped). Needs `daemon-admin`. In-flight requests,
+/// this reply included, finish first.
+async fn daemon_shutdown(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let session = authed(&state.0, &headers)?;
+    if !session
+        .permissions
+        .contains(&synapse::certificate::Permission::DaemonAdmin)
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "this role may not stop the daemon",
+        ));
+    }
+    let _: ShutdownBody = parse(&headers, &body)?;
+    eprintln!("synapsed: stopping on a daemon-admin request");
+    state.0.stop.notify_one();
+    Ok(axum::Json(json!({ "stopping": true })).into_response())
+}
+
+/// `POST /v1/roles/retire {role}`: retire a role now (hidden from `list`, kept). Needs
+/// `role-admin`. Retiring a retired role succeeds; an unknown role is 404.
+async fn role_retire(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    set_role_retired(state.0, headers, body, true)
+}
+
+/// `POST /v1/roles/revive {role}`: bring a retired role back. Needs `role-admin`.
+async fn role_revive(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    set_role_retired(state.0, headers, body, false)
+}
+
+fn set_role_retired(
+    shared: Arc<Shared>,
+    headers: HeaderMap,
+    body: Bytes,
+    retire: bool,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    if !session
+        .permissions
+        .contains(&synapse::certificate::Permission::RoleAdmin)
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "this role may not retire or revive roles",
+        ));
+    }
+    let body: RoleBody = parse(&headers, &body)?;
+    if !synapse::keystore::valid_name(&body.role) {
+        return Err(malformed("role"));
+    }
+    let global_id = format!("{}@{}", body.role, shared.account);
+    let found = locked(&shared.mailbox)?.set_role_retired(&global_id, retire, Utc::now())?;
+    if !found {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such role",
+        ));
+    }
+    // The role name only, as the request gave it: the account name stays out of the log (CodeQL
+    // rust/cleartext-logging flags it as sensitive).
+    eprintln!(
+        "synapsed: role {} {} by a role-admin session",
+        body.role,
+        if retire { "retired" } else { "revived" },
+    );
+    Ok(axum::Json(json!({ "role": global_id, "retired": retire })).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomBody {
+    room: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomJoinBody {
+    room: String,
+    /// Receive only the posts that name this role (`@role`). Joining again changes it.
+    #[serde(default)]
+    mention_only: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomPolicyBody {
+    room: String,
+    join_policy: synapse::rooms::JoinPolicy,
+    #[serde(default)]
+    default_send: synapse::rooms::DefaultSend,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomInviteBody {
+    room: String,
+    /// `role@account`; a foreign account's role is allowed (it joins through the room's policy).
+    invitee: String,
+}
+
+/// `(room global id, access object)` for the bare room name in a request.
+fn room_ids(shared: &Shared, room: &str) -> Result<(String, String), ApiError> {
+    if !synapse::keystore::valid_name(room) {
+        return Err(malformed("room"));
+    }
+    let global_id = format!("{room}@{}", shared.account);
+    let object = format!("room:{global_id}");
+    Ok((global_id, object))
+}
+
+/// May this session moderate any room? The account holder, or a `room-admin` certificate.
+fn room_admin(session: &Session) -> bool {
+    principal_of(session).account_holder
+        || session
+            .permissions
+            .contains(&synapse::certificate::Permission::RoomAdmin)
+}
+
+/// A refused room operation. A caller that may not see a room hears the same `404` as for a room
+/// that does not exist (board 388), never a `403` that confirms it.
+fn room_refusal(shared: &Shared, global_id: &str, session: &Session, e: MailError) -> ApiError {
+    if matches!(e, MailError::Room(synapse::rooms::RoomError::NotModerator))
+        && !room_visible_to(shared, session, global_id)
+    {
+        return unknown_room();
+    }
+    e.into()
+}
+
+fn room_allowed(
+    shared: &Shared,
+    session: &Session,
+    action: access::Action,
+    object: &str,
+) -> Result<(), ApiError> {
+    if shared
+        .access
+        .decide(
+            principal_of(session),
+            action,
+            object,
+            access::Freshness::Live,
+        )
+        .allowed()
+    {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            format!("this role lacks {}", action.name()),
+        ))
+    }
+}
+
+/// `POST /v1/rooms/create {room}`: create `room@account`. Needs `room-create` or `room-admin` on
+/// the certificate, or the account holder. The creator alone (and the account holder) sees it.
+async fn room_create(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    let may = room_admin(&session)
+        || session
+            .permissions
+            .contains(&synapse::certificate::Permission::RoomCreate);
+    if !may {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "this role may not create rooms",
+        ));
+    }
+    room_allowed(&shared, &session, access::Action::CreateRoom, &object)?;
+    let mut mailbox = locked(&shared.mailbox)?;
+    mailbox.create_room(&global_id, &session.global_id, Utc::now())?;
+    if let Err(e) = shared
+        .access
+        .record_object_creator(&object, &session.global_id)
+    {
+        // Fail closed: a room nobody could see is not left behind.
+        eprintln!("synapsed: room creator not recorded: {e}");
+        let _ = mailbox.delete_room(&global_id, &session.global_id, true);
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "store_unavailable",
+            "the room's creator could not be recorded",
+        ));
+    }
+    Ok(axum::Json(json!({ "room": global_id, "created": true })).into_response())
+}
+
+/// `POST /v1/rooms/delete {room}`: the creator, a moderator or an admin.
+async fn room_delete(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    room_allowed(&shared, &session, access::Action::ManageRoom, &object)?;
+    let result =
+        locked(&shared.mailbox)?.delete_room(&global_id, &session.global_id, room_admin(&session));
+    result.map_err(|e| room_refusal(&shared, &global_id, &session, e))?;
+    shared.access.forget_object(&object);
+    Ok(axum::Json(json!({ "room": global_id, "deleted": true })).into_response())
+}
+
+/// `POST /v1/rooms/policy {room, join_policy, default_send?}`.
+async fn room_policy(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomPolicyBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    room_allowed(&shared, &session, access::Action::ManageRoom, &object)?;
+    let result = locked(&shared.mailbox)?.set_room_policy(
+        &global_id,
+        &session.global_id,
+        room_admin(&session),
+        body.join_policy,
+        body.default_send,
+    );
+    result.map_err(|e| room_refusal(&shared, &global_id, &session, e))?;
+    Ok(axum::Json(json!({ "room": global_id, "updated": true })).into_response())
+}
+
+/// `POST /v1/rooms/invite {room, invitee}`.
+async fn room_invite(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomInviteBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    if !synapse::rooms::valid_room_id(&body.invitee) {
+        return Err(malformed("invitee"));
+    }
+    room_allowed(&shared, &session, access::Action::ManageRoom, &object)?;
+    let result = locked(&shared.mailbox)?.invite_to_room(
+        &global_id,
+        &session.global_id,
+        room_admin(&session),
+        &body.invitee,
+    );
+    result.map_err(|e| room_refusal(&shared, &global_id, &session, e))?;
+    Ok(axum::Json(json!({ "room": global_id, "invited": body.invitee })).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomMemberBody {
+    room: String,
+    /// `role@account`.
+    member: String,
+}
+
+/// May `session` see room `global_id` (held as `room`): `synapse:see` on it, or it is a member,
+/// banned, moderator, creator, invited or on its allow-list? What it may not see answers as
+/// unknown. Does not lock the mailbox.
+fn see_room(
+    shared: &Shared,
+    session: &Session,
+    global_id: &str,
+    room: &synapse::rooms::Room,
+) -> bool {
+    let object = format!("room:{global_id}");
+    if shared
+        .access
+        .decide(
+            principal_of(session),
+            access::Action::See,
+            &object,
+            access::Freshness::Cached,
+        )
+        .allowed()
+    {
+        return true;
+    }
+    let me = session.global_id.as_str();
+    room.members.contains_key(me)
+        || room.banned.contains(me)
+        || room.moderators.contains(me)
+        || room.creator == me
+        || room.invites.contains(me)
+        || matches!(&room.join_policy, synapse::rooms::JoinPolicy::AllowList(l) if l.contains(me))
+}
+
+fn room_visible_to(shared: &Shared, session: &Session, global_id: &str) -> bool {
+    shared.mailbox.lock().is_ok_and(|m| {
+        m.rooms_snapshot()
+            .rooms
+            .get(global_id)
+            .is_some_and(|r| see_room(shared, session, global_id, r))
+    })
+}
+
+fn unknown_room() -> ApiError {
+    ApiError::new(
+        StatusCode::NOT_FOUND,
+        "unknown_room",
+        synapse::rooms::RoomError::Unknown,
+    )
+}
+
+/// `POST /v1/rooms/join {room}`: the caller joins, and only the caller: the joiner is the
+/// session, never a field of the request. The room's join policy decides; a role that may not see
+/// the room hears the same `404` as for an absent one.
+async fn room_join(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomJoinBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    room_allowed(&shared, &session, access::Action::Join, &object)?;
+    // Board 388 A: a room is visible to its creator and the account holder until a rule says
+    // otherwise, so even an Open room is joined only by what may see it; anyone else is told what
+    // it is told for a room that is not there.
+    if !room_visible_to(&shared, &session, &global_id) {
+        return Err(unknown_room());
+    }
+    let result = {
+        let mut mailbox = locked(&shared.mailbox)?;
+        mailbox
+            .join_room(&global_id, &session.global_id, Utc::now())
+            .and_then(|can_send| {
+                if let Some(flag) = body.mention_only {
+                    mailbox.set_room_mention_only(&global_id, &session.global_id, flag)?;
+                }
+                Ok(can_send)
+            })
+    };
+    match result {
+        Ok(can_send) => Ok(axum::Json(
+            json!({ "room": global_id, "joined": true, "muted": !can_send }),
+        )
+        .into_response()),
+        Err(MailError::Room(synapse::rooms::RoomError::JoinRefused))
+            if !room_visible_to(&shared, &session, &global_id) =>
+        {
+            Err(unknown_room())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// `POST /v1/rooms/leave {room}`: the caller leaves (a no-op if it was not in).
+async fn room_leave(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: RoomBody = parse(&headers, &body)?;
+    let (global_id, _) = room_ids(&shared, &body.room)?;
+    if !room_visible_to(&shared, &session, &global_id) {
+        return Err(unknown_room());
+    }
+    locked(&shared.mailbox)?.leave_room(&global_id, &session.global_id)?;
+    Ok(axum::Json(json!({ "room": global_id, "left": true })).into_response())
+}
+
+/// `POST /v1/rooms/remove {room, member}` and `/ban`: the creator, a moderator or an admin.
+async fn room_remove(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    room_moderate(state.0, headers, body, false)
+}
+
+async fn room_ban(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    room_moderate(state.0, headers, body, true)
+}
+
+fn room_moderate(
+    shared: Arc<Shared>,
+    headers: HeaderMap,
+    body: Bytes,
+    ban: bool,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let body: RoomMemberBody = parse(&headers, &body)?;
+    let (global_id, object) = room_ids(&shared, &body.room)?;
+    if !synapse::rooms::valid_room_id(&body.member) {
+        return Err(malformed("member"));
+    }
+    room_allowed(&shared, &session, access::Action::ManageRoom, &object)?;
+    let admin = room_admin(&session);
+    let result = {
+        let mut mailbox = locked(&shared.mailbox)?;
+        if ban {
+            mailbox.ban_from_room(&global_id, &session.global_id, admin, &body.member)
+        } else {
+            mailbox.remove_from_room(&global_id, &session.global_id, admin, &body.member)
+        }
+    };
+    result.map_err(|e| room_refusal(&shared, &global_id, &session, e))?;
+    Ok(
+        axum::Json(json!({ "room": global_id, "member": body.member, "banned": ban }))
+            .into_response(),
+    )
+}
+
+/// `GET /v1/rooms/members?room=name`: who is in the room and who would be delivered to now
+/// (claimed, not retired, online). Visible to what may see the room, else `404`.
+async fn room_members(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let name = query_param(&uri, "room").ok_or_else(|| malformed("room"))?;
+    let (global_id, _) = room_ids(&shared, &name)?;
+    if !room_visible_to(&shared, &session, &global_id) {
+        return Err(unknown_room());
+    }
+    let (rooms, roles) = {
+        let mailbox = locked(&shared.mailbox)?;
+        (mailbox.rooms_snapshot(), mailbox.roles_snapshot())
+    };
+    let room = rooms.rooms.get(&global_id).ok_or_else(unknown_room)?;
+    let presence = locked(&shared.presence)?;
+    let now = Utc::now();
+    let members: Vec<Value> = room
+        .members
+        .iter()
+        .map(|(id, m)| {
+            let online = presence
+                .get(id)
+                .is_some_and(|p| now - p.last_seen <= shared.online_window);
+            let record = roles.roles.get(id);
+            let retired = record.is_some_and(|r| r.retired_at.is_some());
+            json!({
+                "member": id,
+                "can_send": m.can_send,
+                "online": online,
+                "retired": retired,
+                "deliverable": online && record.is_some() && !retired,
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({ "room": global_id, "members": members })).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantBody {
+    /// `role@account`, or `*` (the account holder only).
+    principal: String,
+    actions: Vec<access::Action>,
+    /// `agent:<role>@<account>` or `room:<name>@<account>` (`agent:*` for the account holder).
+    objects: Vec<String>,
+    /// The grant lapses after this many seconds; leave out for none.
+    #[serde(default)]
+    expires_secs: Option<i64>,
+    /// Ask that decisions resting on this grant be checked live.
+    #[serde(default)]
+    sensitive: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantIdBody {
+    id: String,
+}
+
+/// `agent:<id>` or `room:<id>` with a well-formed id (`agent:*` only when `wildcard`).
+fn valid_object(object: &str, wildcard: bool) -> bool {
+    if wildcard && object == "agent:*" {
+        return true;
+    }
+    object
+        .strip_prefix("agent:")
+        .or_else(|| object.strip_prefix("room:"))
+        .is_some_and(synapse::rooms::valid_room_id)
+}
+
+/// Which actions mean something for an object: agents are seen, messaged and administered; rooms
+/// are seen, joined, posted to, managed and administered.
+fn action_fits(action: access::Action, object: &str) -> bool {
+    use access::Action::{EditRule, Grant, Join, ManageRoom, Post, See, Send};
+    if object.starts_with("room:") {
+        matches!(action, See | Join | Post | ManageRoom | EditRule | Grant)
+    } else {
+        matches!(action, See | Send | EditRule | Grant)
+    }
+}
+
+fn asks(shared: &Shared, session: &Session, action: access::Action, object: &str) -> bool {
+    shared
+        .access
+        .decide(
+            principal_of(session),
+            action,
+            object,
+            access::Freshness::Live,
+        )
+        .allowed()
+}
+
+fn access_event(shared: &Shared, session: &Session, what: &str, detail: String) {
+    eprintln!(
+        "synapsed: access {what} by {}: {detail}",
+        shown_role(&session.global_id)
+    );
+    shared.security.emit(
+        SecurityEventKind::Config,
+        "synapsed/access",
+        &session.global_id,
+        &format!("{what} {detail}"),
+    );
+}
+
+/// `POST /v1/access/grant`: give a role rights over agents or rooms. The account holder may give
+/// anything. Anyone else may give rights about an object only as its owner (it holds `edit-rule`
+/// there: the creator of a room or sub-agent does) or by sharing a subset of what it holds
+/// (it holds `grant` there and each action it gives); a grant can only narrow, and it lasts only
+/// as long as its issuer's own right (docs/ACCESS_CONTROL_DESIGN.md 3.4). An object the issuer
+/// cannot see is answered as absent.
+async fn grant_create(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: GrantBody = parse(&headers, &body)?;
+    let holder = principal_of(&session).account_holder;
+    if body.actions.is_empty()
+        || body.actions.len() > 8
+        || body.objects.is_empty()
+        || body.objects.len() > 16
+    {
+        return Err(malformed(
+            "actions and objects: one to eight, one to sixteen",
+        ));
+    }
+    let principal_ok =
+        synapse::rooms::valid_room_id(&body.principal) || (holder && body.principal == "*");
+    if !principal_ok {
+        return Err(malformed("principal"));
+    }
+    if body.objects.iter().any(|o| !valid_object(o, holder)) {
+        return Err(malformed("objects"));
+    }
+    for object in &body.objects {
+        if body.actions.iter().any(|a| !action_fits(*a, object)) {
+            return Err(malformed("an action that does not fit its object"));
+        }
+    }
+    let expires_at = match body.expires_secs {
+        None => None,
+        Some(secs) if (1..=315_360_000).contains(&secs) => {
+            Some(Utc::now() + chrono::Duration::seconds(secs))
+        }
+        Some(_) => return Err(malformed("expires_secs")),
+    };
+    let mut owner_edit = false;
+    if !holder {
+        // What the issuer cannot see is answered as absent: no oracle through the grant API.
+        if body
+            .objects
+            .iter()
+            .any(|o| !asks(&shared, &session, access::Action::See, o))
+        {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "unknown_object",
+                "no such agent or room",
+            ));
+        }
+        owner_edit = body
+            .objects
+            .iter()
+            .all(|o| asks(&shared, &session, access::Action::EditRule, o));
+        let shares = || {
+            body.objects.iter().all(|o| {
+                asks(&shared, &session, access::Action::Grant, o)
+                    && body.actions.iter().all(|a| asks(&shared, &session, *a, o))
+            })
+        };
+        if !owner_edit && !shares() {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                format!(
+                    "{} may give rights over these only with {} (as their owner), or {} and each action it gives (sharing a subset)",
+                    shown_role(&session.global_id),
+                    access::Action::EditRule.name(),
+                    access::Action::Grant.name()
+                ),
+            ));
+        }
+    }
+    let now = Utc::now();
+    let grant = access::Grant {
+        principal: body.principal.clone(),
+        actions: body.actions.clone(),
+        objects: body.objects.clone(),
+        legacy: false,
+        id: String::new(),
+        issued_by: (!holder).then(|| session.global_id.clone()),
+        owner_edit,
+        issued_at: Some(now),
+        expires_at,
+        sensitive: body.sensitive,
+    };
+    let id = shared
+        .access
+        .add_grant(grant)
+        .map_err(|e| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "store_unavailable", e))?;
+    access_event(
+        &shared,
+        &session,
+        "grant",
+        format!(
+            "{id} to {} over {:?}",
+            shown_role(&body.principal),
+            body.objects
+        ),
+    );
+    Ok(
+        axum::Json(json!({ "id": id, "issued_by": (!holder).then(|| session.global_id.clone()) }))
+            .into_response(),
+    )
+}
+
+/// `POST /v1/access/revoke {id}`: the account holder, the role that issued the grant, or a role
+/// that owns every object it covers. What was delegated from the grant stops with it. A grant the
+/// caller has no hand in is answered as absent.
+async fn grant_revoke(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shared = state.0;
+    let session = authed(&shared, &headers)?;
+    let body: GrantIdBody = parse(&headers, &body)?;
+    let unknown = || ApiError::new(StatusCode::NOT_FOUND, "unknown_grant", "no such grant");
+    let grant = shared.access.grant(&body.id).ok_or_else(unknown)?;
+    let mine = principal_of(&session).account_holder
+        || grant.issued_by.as_deref() == Some(session.global_id.as_str())
+        || grant
+            .objects
+            .iter()
+            .all(|o| asks(&shared, &session, access::Action::EditRule, o));
+    if !mine {
+        return Err(unknown());
+    }
+    shared
+        .access
+        .remove_grant(&body.id)
+        .map_err(|e| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "store_unavailable", e))?;
+    access_event(&shared, &session, "revoke", body.id.clone());
+    Ok(axum::Json(json!({ "id": body.id, "revoked": true })).into_response())
+}
+
+/// `GET /v1/access/grants`: the grants the caller issued or holds; the account holder sees all.
+async fn grants_list(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let holder = principal_of(&session).account_holder;
+    let me = session.global_id.as_str();
+    let grants: Vec<Value> = shared
+        .access
+        .snapshot()
+        .grants
+        .into_iter()
+        .filter(|g| holder || g.issued_by.as_deref() == Some(me) || g.principal == me)
+        .map(|g| {
+            json!({
+                "id": g.id,
+                "principal": g.principal,
+                "actions": g.actions.iter().map(|a| a.name()).collect::<Vec<_>>(),
+                "objects": g.objects,
+                "issued_by": g.issued_by,
+                "owner_edit": g.owner_edit,
+                "legacy": g.legacy,
+                "sensitive": g.sensitive,
+                "expires_at": g.expires_at.map(|at| at.to_rfc3339()),
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({ "grants": grants })).into_response())
+}
+
+/// `GET /v1/rooms`: the rooms the caller may see (`synapse:see` on the room).
+async fn rooms_list(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let rooms = locked(&shared.mailbox)?.rooms_snapshot();
+    let principal = principal_of(&session);
+    let out: Vec<serde_json::Value> = rooms
+        .rooms
+        .iter()
+        .filter(|(id, _)| {
+            shared
+                .access
+                .decide(
+                    principal,
+                    access::Action::See,
+                    &format!("room:{id}"),
+                    access::Freshness::Cached,
+                )
+                .allowed()
+        })
+        .map(|(id, r)| {
+            json!({
+                "room": id,
+                "creator": r.creator,
+                "join_policy": r.join_policy,
+                "default_send": r.default_send,
+                "members": r.members.len(),
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({ "rooms": out })).into_response())
+}
+
 /// `list`'s entries. When the depths could not be read (a poisoned mailbox or a failed store),
 /// every `pending` is `null` and the rest is still served: presence lives in memory and is still
 /// right, and a watcher that also reads `online` here must not lose it to one unreadable field
@@ -1729,10 +3549,12 @@ fn list_entries(
     launches: &launch::Table,
     online_window: chrono::Duration,
     now: DateTime<Utc>,
+    include_retired: bool,
 ) -> Vec<Value> {
     roles
         .roles
         .iter()
+        .filter(|(_, record)| include_retired || record.retired_at.is_none())
         .map(|(global_id, record)| {
             let seen = presence.get(global_id);
             let pending = depths.map(|all| {
@@ -1747,6 +3569,7 @@ fn list_entries(
             json!({
                 "global_id": global_id,
                 "epoch": record.epoch,
+                "retired_at": record.retired_at.map(|at| at.to_rfc3339()),
                 "online": seen.is_some_and(|p| now - p.last_seen <= online_window),
                 "last_seen": seen.map(|p| p.last_seen.to_rfc3339()),
                 "summary": seen.and_then(|p| p.summary.clone()),
@@ -1764,6 +3587,32 @@ mod tests {
     use super::*;
     use synapse::roles::RoleRecord;
 
+    fn gone(from: &str) -> Exhausted {
+        Exhausted {
+            to: "b@acct".into(),
+            from: from.into(),
+            message_id: "a@acct/m1".into(),
+            enqueued_at: Utc::now() - chrono::Duration::minutes(31),
+            attempts: 4,
+        }
+    }
+
+    /// A lost message earns its sender one notice in the documented shape; a lost NOTICE earns
+    /// none. Sabotage: dropping the `NOTICE_SENDER` check makes the second assertion fail.
+    #[test]
+    fn a_lost_message_is_reported_to_its_sender_and_a_lost_notice_is_not() {
+        let notice = unacked_notice(&gone("a@acct"), "acct", Utc::now()).expect("a notice");
+        assert_eq!(
+            (notice.to.as_str(), notice.from.as_str()),
+            ("a@acct", "synapsed@acct")
+        );
+        assert_eq!(
+            String::from_utf8(notice.body).unwrap(),
+            "[UNACKED] to=b id=a@acct/m1 age=31m attempts=4"
+        );
+        assert!(unacked_notice(&gone("synapsed@acct"), "acct", Utc::now()).is_none());
+    }
+
     /// S-1: with depths, each entry carries them; without (the mailbox could not be read), every
     /// `pending` is `null` and presence is still served.
     #[test]
@@ -1776,6 +3625,8 @@ mod tests {
                 RoleRecord {
                     epoch: 4,
                     claimed_at: now,
+                    last_seen: None,
+                    retired_at: None,
                 },
             );
         }
@@ -1807,6 +3658,7 @@ mod tests {
             &launch::Table::new(now),
             ONLINE_WINDOW,
             now,
+            false,
         );
         assert_eq!(with[0]["pending"]["queued"], 2);
         assert_eq!(with[0]["pending"]["leased"], 1);
@@ -1825,6 +3677,7 @@ mod tests {
             &launch::Table::new(now),
             ONLINE_WINDOW,
             now,
+            false,
         );
         for entry in &without {
             assert!(entry["pending"].is_null(), "{entry}");
@@ -1832,6 +3685,43 @@ mod tests {
         }
         assert_eq!(without[0]["online"], true, "presence survives");
         assert_eq!(without[0]["summary"], "busy");
+    }
+
+    /// L1: a retired role is left out of `list` unless asked for, and then carries `retired_at`.
+    #[test]
+    fn retired_roles_are_hidden_unless_asked() {
+        let now = Utc::now();
+        let mut roles = RolesState::default();
+        for (role, retired_at) in [("alpha@acct", None), ("gone@acct", Some(now))] {
+            roles.roles.insert(
+                role.to_string(),
+                RoleRecord {
+                    epoch: 1,
+                    claimed_at: now,
+                    last_seen: None,
+                    retired_at,
+                },
+            );
+        }
+        let entries = |include_retired| {
+            list_entries(
+                &roles,
+                &HashMap::new(),
+                None,
+                &launch::Table::new(now),
+                ONLINE_WINDOW,
+                now,
+                include_retired,
+            )
+        };
+        let shown = entries(false);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0]["global_id"], "alpha@acct");
+        assert!(shown[0]["retired_at"].is_null());
+        let all = entries(true);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1]["global_id"], "gone@acct");
+        assert_eq!(all[1]["retired_at"], now.to_rfc3339());
     }
 
     /// P5: the defaults `synapsed` runs with are the plan's table, not `LimiterConfig::default()`
@@ -1853,6 +3743,33 @@ mod tests {
         assert_eq!(row(&c.health), (300, 10, 2_000, 4, u32::MAX));
         assert_eq!(row(&c.misuse), (20, 250, 10_000, 10_000, u32::MAX));
         assert_eq!(c.event_interval, std::time::Duration::from_secs(1));
+    }
+
+    /// ROADMAP row 37c: `/v1/health` says what state the mailbox is in without ever failing the probe
+    /// (a non-ok reply reads as a squat to clients). It never waits on the lock either.
+    #[test]
+    fn mailbox_state_reads_the_lock_without_waiting() {
+        use synapse::mailbox::MemoryStore;
+        let mailbox = Mutex::new(
+            Mailbox::open_volatile(MemoryStore::new(), MailConfig::default(), Utc::now()).unwrap(),
+        );
+        assert_eq!(mailbox_state(&mailbox), "ok");
+        {
+            let _held = mailbox.lock().unwrap();
+            assert_eq!(
+                mailbox_state(&mailbox),
+                "busy",
+                "held by a handler: reported, not waited for"
+            );
+        }
+        let poisoned = Arc::new(mailbox);
+        let holder = Arc::clone(&poisoned);
+        let _ = std::thread::spawn(move || {
+            let _guard = holder.lock().unwrap();
+            panic!("poison the mutex on purpose");
+        })
+        .join();
+        assert_eq!(mailbox_state(&poisoned), "unavailable");
     }
 
     /// #77 D2: `locked` on a poisoned mutex is 503 `store_unavailable`; on a healthy one it yields

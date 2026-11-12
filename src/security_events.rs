@@ -37,6 +37,8 @@ pub enum SecurityEventKind {
     Config,
     /// An alert could not be delivered.
     AlertFailed,
+    /// A shared-state call was refused: the role is not a party to the record or lacks the grant.
+    StateDenied,
 }
 
 /// One security-relevant occurrence. Text fields are sanitized and must never hold a secret.

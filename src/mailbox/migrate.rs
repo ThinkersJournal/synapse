@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 
 use super::{MailError, MailStore, StoreError, Stored};
 use crate::roles::RolesState;
+use crate::rooms::RoomsState;
 
 /// A mailbox's whole state, in a form two stores can be compared by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +26,7 @@ pub struct Dump {
     /// Acked history: `(role, message id)` to when.
     pub acked: BTreeMap<(String, String), DateTime<Utc>>,
     pub roles: RolesState,
+    pub rooms: RoomsState,
     /// The last sequence number handed out.
     pub seq: u64,
 }
@@ -92,6 +94,7 @@ pub fn dump<S: MailStore>(store: &S) -> Result<Dump, MailError> {
             queues,
             acked,
             roles: txn.roles().map_err(MailError::Store)?,
+            rooms: txn.rooms().map_err(MailError::Store)?,
             seq: txn.seq_counter().map_err(MailError::Store)?,
         });
         Ok(())
@@ -114,6 +117,7 @@ pub fn restore<S: MailStore>(store: &S, dump: &Dump) -> Result<(), MailError> {
             txn.record_ack(role, id, *at).map_err(MailError::Store)?;
         }
         txn.set_roles(&dump.roles).map_err(MailError::Store)?;
+        txn.set_rooms(&dump.rooms).map_err(MailError::Store)?;
         txn.set_seq_counter(dump.seq).map_err(MailError::Store)?;
         Ok(())
     })
@@ -144,6 +148,9 @@ fn first_difference(a: &Dump, b: &Dump) -> Option<String> {
     }
     if a.roles != b.roles {
         return Some("role epochs".into());
+    }
+    if a.rooms != b.rooms {
+        return Some("rooms".into());
     }
     if a.acked != b.acked {
         return Some(format!(

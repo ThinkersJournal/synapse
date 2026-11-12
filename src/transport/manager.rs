@@ -10,7 +10,7 @@ use crate::certificate;
 use crate::crypto::CryptoManager;
 use crate::delivery_ack;
 use crate::error::SynapseError;
-use crate::sender_auth::{SenderVerdict, TrustStore};
+use crate::sender_auth::{SenderVerdict, TrustStore, UnverifiableReason};
 use crate::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
     error::Result,
@@ -194,6 +194,67 @@ pub struct TransportManager {
     inbound: TokioRwLock<crate::replay::InboundState>,
     /// Security events on the receive path (hardening P6). Without a sink it records nothing.
     events: super::security::TransportEvents,
+    /// The trust book (ROADMAP row 33): where a first contact from an unpinned account is written
+    /// down as a knock, and where the holder's pins are read from. A knock grants nothing.
+    trust_book: Option<crate::keystore::trust_book::TrustBook>,
+    /// Keeps the book from being a write amplifier for a flooding source.
+    book_gate: std::sync::Mutex<BookGate>,
+}
+
+/// How long a repeat of the same knock is not written again.
+const BOOK_REPEAT_WINDOW_SECS: i64 = 60;
+/// The window over which one source IP may add [`BOOK_PER_SOURCE`] book writes.
+const BOOK_SOURCE_WINDOW_SECS: i64 = 300;
+/// Book writes one source IP may cause per window.
+const BOOK_PER_SOURCE: u32 = 10;
+/// Book writes one `receive_messages` poll may make.
+const BOOK_PER_POLL: usize = 16;
+const BOOK_GATE_KEYS: usize = 1024;
+
+/// Decides which knocks reach the trust book's files. The book itself is bounded; this bounds the
+/// disk writes a source can cause.
+#[derive(Debug)]
+struct BookGate {
+    seen: crate::replay::Bounded<()>,
+    per_source: crate::replay::Bounded<u32>,
+}
+
+impl BookGate {
+    fn new() -> Self {
+        Self {
+            seen: crate::replay::Bounded::new(
+                chrono::Duration::seconds(BOOK_REPEAT_WINDOW_SECS),
+                BOOK_GATE_KEYS,
+            ),
+            per_source: crate::replay::Bounded::new(
+                chrono::Duration::seconds(BOOK_SOURCE_WINDOW_SECS),
+                BOOK_GATE_KEYS,
+            ),
+        }
+    }
+
+    /// Whether to write this knock: not a repeat inside the window, and the source under its budget.
+    fn admit(
+        &mut self,
+        claimed: &str,
+        ip: &str,
+        account: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        self.seen.sweep(now);
+        self.per_source.sweep(now);
+        let key = format!("{claimed}|{ip}|{account}");
+        if self.seen.contains_key(&key) {
+            return false;
+        }
+        let used = self.per_source.get(ip).copied().unwrap_or(0);
+        if used >= BOOK_PER_SOURCE {
+            return false;
+        }
+        self.seen.insert(key, (), now);
+        self.per_source.insert(ip.to_string(), used + 1, now);
+        true
+    }
 }
 
 /// Unified metrics across all transports
@@ -295,6 +356,8 @@ impl TransportManager {
                 super::security::KnockLimits::default(),
                 None,
             ),
+            trust_book: None,
+            book_gate: std::sync::Mutex::new(BookGate::new()),
         }
     }
 
@@ -666,6 +729,20 @@ impl TransportManager {
         *self.trust_store.write().await = store;
     }
 
+    /// Give the live trust store every account key the holder has pinned in the trust book since
+    /// this manager started (`synapse trust pin` writes the book; nothing reads it until this runs
+    /// or the process restarts). Additive: it never removes a pin and never loads a knock. Returns
+    /// how many pins the book holds, 0 without a book.
+    pub async fn reload_trust_book(
+        &self,
+    ) -> std::result::Result<usize, crate::keystore::KeystoreError> {
+        let Some(book) = &self.trust_book else {
+            return Ok(0);
+        };
+        let mut store = self.trust_store.write().await;
+        book.load_into(&mut store)
+    }
+
     /// Offer `revocations` to the trust store, taking its write lock. Returns how many were newly
     /// stored -- `TrustStore::add_revocation` already refuses anything not signed by a pinned
     /// account key, so a relay (see [`Self::receive_messages`]) can deliver a revocation but never
@@ -727,6 +804,12 @@ impl TransportManager {
         let now = chrono::Utc::now();
         let mut delivered = Vec::with_capacity(all_messages.len());
         let mut relayed_revocations = Vec::new();
+        // `(transport, source, kind)` for each message that failed verification; the transports are
+        // told once the guards below are dropped, because a transport may take locks of its own.
+        let mut failures: Vec<(TransportType, String, VerificationFailure)> = Vec::new();
+        // `(claimed id, sender key id, account key id, source)` for each first contact from an
+        // account nobody pinned; written to the trust book once the guards are dropped.
+        let mut book_knocks: Vec<(String, String, String, String)> = Vec::new();
         for incoming in all_messages {
             let message = &incoming.message;
             let verdict = store.verify_at(message, now);
@@ -758,6 +841,41 @@ impl TransportManager {
                         &message.sender_proof.key_id,
                         now,
                     );
+                    // The one kind of knock the holder can act on: a chain whose root nobody pinned.
+                    // Anything else (unsigned, a bad signature, a sender with no chain) names no
+                    // account key to pin and is not written to the book.
+                    if self.trust_book.is_some()
+                        && book_knocks.len() < BOOK_PER_POLL
+                        && matches!(
+                            verdict,
+                            SenderVerdict::Unverifiable {
+                                reason: UnverifiableReason::UnknownIssuer
+                            }
+                        )
+                        && let Some(account) = store.chain_root_key_id(message)
+                    {
+                        book_knocks.push((
+                            message.from_global_id.clone(),
+                            message.sender_proof.key_id.clone(),
+                            account,
+                            incoming.source.clone(),
+                        ));
+                    }
+                    // A sender nobody pinned says the trust store lacks them, nothing about the
+                    // connection it came over.
+                    if !matches!(
+                        verdict,
+                        SenderVerdict::Unverifiable {
+                            reason: UnverifiableReason::UnknownSender
+                                | UnverifiableReason::UnknownIssuer
+                        }
+                    ) {
+                        failures.push((
+                            incoming.transport_type,
+                            incoming.source.clone(),
+                            VerificationFailure::Rejected,
+                        ));
+                    }
                     continue;
                 }
                 crate::replay::Admission::AdmitUnverified => crate::replay::Freshness::NotChecked,
@@ -791,6 +909,11 @@ impl TransportManager {
             if let crate::sealing::Payload::CouldNotOpen(error) = &payload {
                 self.events
                     .unopenable(&message.from_global_id, &incoming.source, *error, now);
+                failures.push((
+                    incoming.transport_type,
+                    incoming.source.clone(),
+                    VerificationFailure::Unopenable,
+                ));
             }
             // Only ever attach a chain summary when the chain it describes is the SAME one that
             // authenticated this message: `verified_chain_at` resolves any well-formed
@@ -822,8 +945,34 @@ impl TransportManager {
         drop(store);
         drop(sealing_key);
         drop(inbound);
+        if let Some(book) = &self.trust_book {
+            for (claimed, sender_key, account, source) in book_knocks {
+                let ip = super::security::source_ip(&source);
+                let write = self
+                    .book_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .admit(&claimed, &ip, &account, now);
+                if write
+                    && let Err(e) = book.record_knock(
+                        &claimed,
+                        &sender_key,
+                        Some(&account),
+                        "unknown_issuer",
+                        now,
+                    )
+                {
+                    debug!("trust book: a knock was not written: {e}");
+                }
+            }
+        }
         if !relayed_revocations.is_empty() {
             self.add_revocations(&relayed_revocations).await;
+        }
+        for (transport_type, source, kind) in failures {
+            if let Some(transport) = transports.get(&transport_type) {
+                transport.on_verification_failure(&source, kind).await;
+            }
         }
         Ok(delivered)
     }
@@ -1310,6 +1459,7 @@ pub struct TransportManagerBuilder {
     tracking_capacity: usize,
     security_sink: Option<Arc<dyn crate::security_events::SecuritySink>>,
     knock_limits: super::security::KnockLimits,
+    trust_book: Option<crate::keystore::trust_book::TrustBook>,
 }
 
 impl TransportManagerBuilder {
@@ -1324,7 +1474,16 @@ impl TransportManagerBuilder {
             tracking_capacity: 10_000,
             security_sink: None,
             knock_limits: super::security::KnockLimits::default(),
+            trust_book: None,
         }
+    }
+
+    /// Use the trust book (ROADMAP row 33): `build` gives the trust store every account key the
+    /// holder pinned in it (a book that cannot be read pins nothing, and says so in the log), and a
+    /// first contact from an unpinned account is written to it as a knock. A knock grants nothing.
+    pub fn trust_book(mut self, book: crate::keystore::trust_book::TrustBook) -> Self {
+        self.trust_book = Some(book);
+        self
     }
 
     pub fn enable_transport(mut self, transport_type: TransportType) -> Self {
@@ -1415,7 +1574,15 @@ impl TransportManagerBuilder {
         let tracking_ttl = self.tracking_ttl;
         let tracking_capacity = self.tracking_capacity;
         let mut manager = TransportManager::new(self.config);
-        manager.trust_store = TokioRwLock::new(self.trust_store);
+        let mut trust_store = self.trust_store;
+        if let Some(book) = &self.trust_book
+            && let Err(e) = book.load_into(&mut trust_store)
+        {
+            // Fail closed: no pins from a book that cannot be read, never a guess.
+            warn!("trust book: pins not loaded: {e}");
+        }
+        manager.trust_book = self.trust_book;
+        manager.trust_store = TokioRwLock::new(trust_store);
         manager.sealing_key = TokioRwLock::new(self.sealing_key);
         manager.outbound =
             TokioRwLock::new(crate::replay::Bounded::new(tracking_ttl, tracking_capacity));

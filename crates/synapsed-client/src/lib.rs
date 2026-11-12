@@ -36,12 +36,22 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use synapse::certificate::chain_to_pem;
-use synapse::keystore::{Keystore, KeystoreError, check_owner_only};
+use synapse::keystore::{KeystoreError, check_owner_only, load_role};
 use synapse::roles::sign_claim_for;
 use synapse::security_events::SecurityEventKind;
 
 /// The daemon's announce file in the home, written by `synapsed` (M5a).
 const ANNOUNCE_FILE: &str = "synapsed.json";
+/// Set (to anything but `0` or empty) when the daemon runs on the other side of a boundary this
+/// process cannot see across (a WSL guest reaching a Windows daemon through a relay): its announced
+/// pid is then another machine's, so only the pid check is skipped and the health proof decides.
+const REMOTE_DAEMON_ENV: &str = "SYNAPSE_REMOTE_DAEMON";
+/// Set (not empty, not `0`): `Daemon::connect` never starts a daemon, the lane's owner runs it.
+/// It also never starts one from a role-only home (no account key), whatever the variable says.
+const NO_AUTOSTART_ENV: &str = "SYNAPSE_NO_AUTOSTART";
+/// Where to read the daemon's announce file when it is not in the caller's own home: a lane's
+/// role-only home (from `synapse id provision`) holds its keys, never the daemon's `synapsed.json`.
+const DAEMON_HOME_ENV: &str = "SYNAPSE_DAEMON_HOME";
 /// How long a started daemon gets to announce itself and answer health.
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// A starting daemon's stderr, in the home; truncated at each start.
@@ -210,8 +220,12 @@ impl Daemon {
             }
         }
         Err(MailError::NoDaemon(match &squat.0 {
-            Some(addr) => squat_warning(addr),
-            None => "no daemon answered; start synapsed with its own environment".to_string(),
+            Some(addr) => format!(
+                "{} (announce file {})",
+                squat_warning(addr),
+                announce_path(home).display()
+            ),
+            None => no_daemon_answered(home),
         }))
     }
 
@@ -228,6 +242,20 @@ impl Daemon {
 
     /// Find this home's daemon, starting it if nothing answers.
     pub fn connect(home: &Path) -> Result<Daemon, MailError> {
+        // A remote daemon is run by its owner, on the other side: starting one here would be a
+        // second daemon with its own store. `SYNAPSE_NO_AUTOSTART` asks for the same on a local
+        // one: the owner runs it (with its store and address), and a CLI that started its own
+        // would run with the wrong environment.
+        // A role-only home (a lane's, from `id provision`) can never run a daemon: it has no account
+        // key, so one started from it would fail, or, with the lane's environment, be a second
+        // daemon beside the owner's. The owner's is the only one lanes use.
+        if remote_daemon()
+            || no_autostart()
+            || daemon_home().is_some()
+            || synapse::keystore::Keystore::is_role_only_home(home)
+        {
+            return Self::connect_existing(home);
+        }
         let http = Self::http_client()?;
         let mut squat = Squat::default();
         // Two tries, so one slow answer from a live daemon doesn't start a doomed second one.
@@ -235,6 +263,14 @@ impl Daemon {
             if let Some(found) = squat.check(home, answering(&http, home)?) {
                 return Ok(Daemon::new(http, home, found));
             }
+        }
+        // Something live holds the announced port but failed the proof. A daemon of ours that
+        // would bind that very address exits "address in use" and leaves a stray store, so say so
+        // instead of starting one; on any other address it can start and take over.
+        if let Some(addr) = &squat.0
+            && daemon_would_bind(std::env::var("SYNAPSE_ADDR").ok().as_deref(), addr)
+        {
+            return Err(MailError::NoDaemon(squat_warning(addr)));
         }
         // Started at most once per command (PM, #74).
         let (mut child, mut start_log) = spawn_daemon(home)?;
@@ -312,8 +348,7 @@ impl Daemon {
     }
 
     fn claim_session(&self, role: &str) -> Result<Cached, MailError> {
-        let store = Keystore::open(&self.home)?;
-        let identity = store.role(role, Utc::now())?;
+        let identity = load_role(&self.home, role, Utc::now())?;
         let nonce = random_bytes::<16>()?;
         // M3 refuses claims signed at or before the daemon's start.
         let signed_at = Utc::now().max(self.started_at + chrono::Duration::seconds(1));
@@ -348,9 +383,32 @@ impl Daemon {
     /// else a fresh claim. Any refusal, 401 and 409 included, is returned as an error: a 401 for
     /// this instance's session means the daemon dropped it, which happens after enough takeovers,
     /// so re-claiming then would silently steal the role back (review I1).
+    ///
+    /// One exception, and only one: a 401 `session_expired` (the daemon's session ttl ran out while
+    /// the session sat unused). Nobody took the role; the daemon answers a taken one with 409
+    /// `superseded` before it ever considers the age. So the client claims again, under the role lock,
+    /// and retries the call once.
     pub fn call(&self, role: &str, path: &str, body: Option<&Value>) -> Result<Value, MailError> {
         let session = self.session(role)?;
-        self.request(path, Some(&session.token), body)
+        match self.request(path, Some(&session.token), body) {
+            Err(MailError::Api { kind, .. }) if kind == "session_expired" => {
+                let fresh = self.reclaim_expired(role, &session.token)?;
+                self.request(path, Some(&fresh.token), body)
+            }
+            other => other,
+        }
+    }
+
+    /// Claim again after `expired_token` aged out, unless another process of ours already did (the
+    /// cached token then differs from the expired one).
+    fn reclaim_expired(&self, role: &str, expired_token: &str) -> Result<Cached, MailError> {
+        let _lock = RoleLock::acquire(&self.home, role)?;
+        match load_session(&self.home, role)?
+            .filter(|c| c.instance_id == self.instance_id && c.token != expired_token)
+        {
+            Some(already) => Ok(already),
+            None => self.claim_session(role),
+        }
     }
 
     /// `GET /v1/waiting`: the launch signals for roles with mail and no live session, as the
@@ -493,6 +551,19 @@ impl Squat {
     }
 }
 
+/// Whether a daemon started with `SYNAPSE_ADDR` = `configured` (unset: the daemon's default,
+/// `synapsed`'s `DEFAULT_ADDR`) would bind `addr`.
+fn daemon_would_bind(configured: Option<&str>, addr: &str) -> bool {
+    let configured = configured.unwrap_or("127.0.0.1:7920");
+    match (
+        configured.parse::<std::net::SocketAddr>(),
+        addr.parse::<std::net::SocketAddr>(),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 fn squat_warning(addr: &str) -> String {
     format!(
         "daemon at {} failed its proof; possible port squat; not sending credentials",
@@ -517,6 +588,60 @@ fn answering(http: &reqwest::blocking::Client, home: &Path) -> Result<Answer, Ma
 /// dead daemon is ignored, so a process that took its port gets no token (#74); a file others can
 /// reach is an error, since whoever can write it chooses where the token goes.
 fn read_announce(home: &Path) -> Result<Option<Announce>, MailError> {
+    read_announce_with(&announce_dir(home), remote_daemon())
+}
+
+/// `SYNAPSE_DAEMON_HOME`, when set to something.
+fn daemon_home() -> Option<PathBuf> {
+    std::env::var_os(DAEMON_HOME_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The directory holding the daemon's announce file: `SYNAPSE_DAEMON_HOME` if set, else `home`.
+/// Keys and sessions stay in `home` either way.
+fn announce_dir(home: &Path) -> PathBuf {
+    daemon_home().unwrap_or_else(|| home.to_path_buf())
+}
+
+fn announce_path(home: &Path) -> PathBuf {
+    announce_dir(home).join(ANNOUNCE_FILE)
+}
+
+/// Why nothing answered, naming the announce file read, so a copy gone stale at a daemon restart
+/// (or a lane home with none) is told apart from a daemon that is simply down.
+fn no_daemon_answered(home: &Path) -> String {
+    let path = announce_path(home);
+    let hint = format!(
+        "start synapsed with its own environment, or point {DAEMON_HOME_ENV} at the home it announces in"
+    );
+    if path.try_exists().unwrap_or(false) {
+        format!(
+            "no daemon answered; announce file {} does not name a running daemon (a copy goes stale at every daemon restart); {hint}",
+            path.display()
+        )
+    } else {
+        format!(
+            "no daemon answered; no announce file at {}; {hint}",
+            path.display()
+        )
+    }
+}
+
+fn remote_daemon() -> bool {
+    is_remote(std::env::var_os(REMOTE_DAEMON_ENV).as_deref())
+}
+
+fn no_autostart() -> bool {
+    is_remote(std::env::var_os(NO_AUTOSTART_ENV).as_deref())
+}
+
+fn is_remote(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// `read_announce`, with `remote` skipping the liveness check of the announced pid.
+fn read_announce_with(home: &Path, remote: bool) -> Result<Option<Announce>, MailError> {
     let path = home.join(ANNOUNCE_FILE);
     if !path.try_exists()? {
         return Ok(None);
@@ -527,10 +652,10 @@ fn read_announce(home: &Path) -> Result<Option<Announce>, MailError> {
     };
     Ok(serde_json::from_str::<Announce>(&text)
         .ok()
-        .filter(|a| daemon_alive(a.pid)))
+        .filter(|a| remote || daemon_alive(a.pid)))
 }
 
-/// Whether `pid` is a live process of this user (on Windows, a live `synapsed`). Defence in depth
+/// Whether `pid` is a live process of this user. Defence in depth
 /// in front of the health proof (#74): it skips a stale announce file without probing its port, but
 /// a reused pid passes it, which is why the proof is what decides.
 #[cfg(unix)]
@@ -547,8 +672,7 @@ fn daemon_alive(pid: u32) -> bool {
 fn daemon_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     // SAFETY: OpenProcess takes no pointers; a null result is handled.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
@@ -556,24 +680,14 @@ fn daemon_alive(pid: u32) -> bool {
         return false;
     }
     let mut code = 0u32;
-    let mut name = [0u16; 1024];
-    let mut len = name.len() as u32;
-    // SAFETY: `handle` is open until the CloseHandle below; `code`, `name` and `len` are valid for
-    // writes, and `len` is `name`'s capacity in u16s.
-    let (running, named) = unsafe {
-        (
-            GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32,
-            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, name.as_mut_ptr(), &mut len)
-                != 0,
-        )
-    };
+    // SAFETY: `handle` is open until the CloseHandle below; `code` is valid for writes.
+    let running =
+        unsafe { GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32 };
     // SAFETY: opened above and closed exactly once.
     unsafe { CloseHandle(handle) };
-    let image = String::from_utf16_lossy(&name[..len as usize]);
-    let file = Path::new(&image)
-        .file_name()
-        .map(|f| f.to_string_lossy().to_ascii_lowercase());
-    running && named && file.as_deref() == Some("synapsed.exe")
+    // Not the image name: an upgrade renames the running `synapsed.exe` aside (the only way to
+    // replace it on Windows), so a live daemon's image is `synapsed.exe.<tag>.bak` until it restarts.
+    running
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -932,6 +1046,50 @@ pub fn inbox_line(message: &Value) -> Value {
     out
 }
 
+/// A short message id for a send, e.g. `sbv3k0-7h-0`: `<start>-<pid>-<n>`, each in base 36.
+///
+/// Why it is unique where it has to be. The daemon scopes every id by the verified sender
+/// (`<role>@<account>/<id>`), so two senders can never collide; only one role's own ids must differ.
+/// Within a process `<n>` is a counter, so ids differ. Across processes of the same role, the pair
+/// `<pid>` and `<start>` (whole seconds when this process first asked for an id) differs unless two
+/// processes of one role get the same pid within the same second, and a pid is not reused while its
+/// process lives. A CLI call is one process per send, so it counts from 0 each time: two sends from
+/// one role in the same second need different pids, which concurrent processes always have, and which
+/// sequential ones almost always have. The residual case (pid reuse within a second) only turns a
+/// send into a duplicate of an earlier one, the same outcome as resending with `--id`. Ids from older
+/// builds (long, with nanoseconds, or UUIDs) are opaque to the daemon and still ack as before.
+pub fn short_message_id() -> String {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static START: OnceLock<u64> = OnceLock::new();
+    static N: AtomicU64 = AtomicU64::new(0);
+    let start = *START.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    });
+    format!(
+        "{}-{}-{}",
+        base36(start),
+        base36(u64::from(std::process::id())),
+        base36(N.fetch_add(1, Ordering::Relaxed))
+    )
+}
+
+fn base36(mut n: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if n == 0 {
+        return "0".into();
+    }
+    let mut out = Vec::new();
+    while n > 0 {
+        out.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
 /// Encode a message body for the wire.
 pub fn encode_body(body: &[u8]) -> String {
     B64.encode(body)
@@ -956,6 +1114,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn short_ids_are_short_valid_and_never_repeat_within_a_process() {
+        let ids: Vec<String> = (0..10_000).map(|_| short_message_id()).collect();
+        let distinct: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(distinct.len(), ids.len(), "a repeated id");
+        for id in &ids {
+            // What the daemon accepts as a client id: 1..=100 bytes, no '/', no control character.
+            assert!(id.len() <= 24, "{id} is not short");
+            assert!(
+                !id.contains('/') && !id.chars().any(char::is_control),
+                "{id}"
+            );
+        }
+        // The old id was `mcp-<pid>-<nanoseconds>-<n>`, 30+ bytes before the counter.
+        assert!(ids[0].len() < 20, "{}", ids[0]);
+    }
+
+    #[test]
+    fn base36_is_the_usual_digits() {
+        assert_eq!(base36(0), "0");
+        assert_eq!(base36(35), "z");
+        assert_eq!(base36(36), "10");
+        assert_eq!(base36(1_793_488_356), "tnsoh0");
+    }
+
+    fn announce_file(home: &Path, pid: u32) {
+        let text = format!(
+            r#"{{"addr":"127.0.0.1:1","instance_id":"{}","pid":{pid}}}"#,
+            "00".repeat(16)
+        );
+        let path = home.join(ANNOUNCE_FILE);
+        std::fs::write(&path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    /// The announce names a pid of another machine (a Windows daemon seen from a WSL guest): no such
+    /// local process, yet with the remote marker the announce is still read, so the proof can decide.
+    #[test]
+    fn a_remote_daemons_announced_pid_is_not_checked_locally() {
+        let home = tempfile::tempdir().unwrap();
+        announce_file(home.path(), u32::MAX - 1);
+        assert!(read_announce_with(home.path(), false).unwrap().is_none());
+        let found = read_announce_with(home.path(), true)
+            .unwrap()
+            .expect("announce read");
+        assert_eq!(found.addr, "127.0.0.1:1");
+    }
+
+    #[test]
+    fn only_a_set_non_zero_value_marks_the_daemon_remote() {
+        use std::ffi::OsStr;
+        assert!(!is_remote(None));
+        assert!(!is_remote(Some(OsStr::new(""))));
+        assert!(!is_remote(Some(OsStr::new("0"))));
+        assert!(is_remote(Some(OsStr::new("1"))));
+    }
+
+    #[test]
     fn daemon_text_reaches_the_terminal_without_control_characters() {
         assert_eq!(printable("queued"), "queued");
         assert_eq!(printable("a\u{1b}[2Jb\r\n"), "a\\u{1b}[2Jb\\r\\n");
@@ -966,5 +1185,41 @@ mod tests {
         }
         .to_string();
         assert!(!refused.chars().any(char::is_control), "{refused:?}");
+    }
+
+    /// An in-place upgrade on Windows renames the running `synapsed.exe` aside, so the live daemon's
+    /// image is then `synapsed.exe.<tag>.bak`; the health proof, not the image name, decides.
+    #[cfg(windows)]
+    #[test]
+    fn a_daemon_whose_image_was_renamed_aside_is_still_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let system = std::env::var_os("SystemRoot").unwrap();
+        let renamed = dir.path().join("synapsed.exe.rc123.bak");
+        std::fs::copy(
+            Path::new(&system).join("System32").join("ping.exe"),
+            &renamed,
+        )
+        .unwrap();
+        let mut child = Command::new(&renamed)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let alive = daemon_alive(child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(alive);
+        assert!(!daemon_alive(child.id()), "an exited process is not alive");
+    }
+
+    /// A held announced port is only a reason not to start a daemon when that daemon would bind
+    /// the same address; on a free-port configuration (`:0`) it can start and take over.
+    #[test]
+    fn a_held_port_blocks_a_daemon_only_if_it_would_bind_it() {
+        assert!(daemon_would_bind(None, "127.0.0.1:7920"), "the default");
+        assert!(daemon_would_bind(Some("127.0.0.1:9000"), "127.0.0.1:9000"));
+        assert!(!daemon_would_bind(Some("127.0.0.1:0"), "127.0.0.1:9000"));
+        assert!(!daemon_would_bind(Some("127.0.0.1:9001"), "127.0.0.1:9000"));
+        assert!(!daemon_would_bind(Some("not an address"), "127.0.0.1:9000"));
     }
 }

@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::certificate::RevocationLookup;
 use crate::roles::{ClaimError, ClaimRequest, Grant, InvalidState, Roles, RolesState, Superseded};
+use crate::rooms::{DefaultSend, JoinPolicy, RoomError, RoomsState};
 
 /// Bounds and timings (PM-approved defaults, spec §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +44,61 @@ pub struct MailConfig {
     /// fails every time) is otherwise redelivered for as long as it is queued. The dead set is
     /// bounded and visible, never silently dropped: see [`Mailbox::dead_letters`].
     pub max_deliveries: u32,
+    /// Back-off between redeliveries of a message nobody acked (empty: none, the lease alone
+    /// decides). A message leased for the nth time is hidden for `redelivery_gaps[n - 1]`, in place of the requested lease
+    /// (the last gap repeats), so the same text is not put in front of its reader every lease. The
+    /// gaps also bound the deliveries: a message that has been leased `redelivery_gaps.len()` times
+    /// (or `max_deliveries`, if smaller) and whose last lease has run out is set aside in the dead
+    /// set and reported by [`Mailbox::dead_exhausted`]. The sum of the gaps is the total time a
+    /// sender waits before it is told.
+    pub redelivery_gaps: Vec<Duration>,
+    /// The sender (a global id) whose messages are delivered once: leased once, and set aside
+    /// quietly when that lease runs out, never redelivered and never brought back by a claim. The
+    /// daemon sets it to its own notice sender, so a notice (`[UNACKED]`) does not keep arriving
+    /// with the age and attempts it had when it was made.
+    pub single_delivery_from: Option<String>,
+}
+
+impl MailConfig {
+    /// Deliveries after which an unacked message is set aside (`0`: never).
+    fn delivery_cap(&self) -> u32 {
+        let gaps = u32::try_from(self.redelivery_gaps.len()).unwrap_or(u32::MAX);
+        match (self.max_deliveries, gaps) {
+            (0, g) => g,
+            (m, 0) => m,
+            (m, g) => m.min(g),
+        }
+    }
+
+    /// Deliveries after which this message is set aside: one for the single-delivery sender's.
+    fn cap_for(&self, from: &str) -> u32 {
+        if self.single_delivery_from.as_deref() == Some(from) {
+            1
+        } else {
+            self.delivery_cap()
+        }
+    }
+
+    /// How long a message already leased `attempts` times stays hidden when leased again.
+    fn gap_for(&self, attempts: u32) -> Option<Duration> {
+        let last = self.redelivery_gaps.len().checked_sub(1)?;
+        self.redelivery_gaps
+            .get(usize::try_from(attempts).map_or(last, |n| n.min(last)))
+            .copied()
+    }
+}
+
+/// A message that used up its deliveries without an ack and was set aside in the dead set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exhausted {
+    /// The role it was for (a global id).
+    pub to: String,
+    /// The role that sent it (a global id), who should be told.
+    pub from: String,
+    pub message_id: String,
+    pub enqueued_at: DateTime<Utc>,
+    /// How many times it was leased.
+    pub attempts: u32,
 }
 
 impl Default for MailConfig {
@@ -55,6 +111,8 @@ impl Default for MailConfig {
             max_messages: 10_000,
             max_bytes: 64 * 1024 * 1024,
             max_deliveries: 10,
+            redelivery_gaps: Vec::new(),
+            single_delivery_from: None,
         }
     }
 }
@@ -68,6 +126,10 @@ pub struct Envelope {
     pub to: String,
     pub from: String,
     pub body: Vec<u8>,
+    /// The mode the sender declared (`L0`, `L1:message-formats/1`), when it declared one. Absent
+    /// in every envelope written before ROADMAP row 41 P2b, and not written when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 impl fmt::Debug for Envelope {
@@ -91,9 +153,58 @@ fn well_formed(env: &Envelope) -> bool {
     let printable =
         |s: &str| !s.is_empty() && s.len() <= MAX_ADDRESS_LEN && !s.chars().any(char::is_control);
     let role_id = env.to.split_once('@').is_some_and(|(role, account)| {
-        crate::keystore::valid_name(role) && crate::keystore::valid_name(account)
+        crate::keystore::valid_role_id(role) && crate::keystore::valid_name(account)
     });
     role_id && printable(&env.message_id) && printable(&env.from)
+}
+
+/// What one envelope of [`Mailbox::enqueue_many`] came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fanout {
+    Queued,
+    /// Already queued, acked or dead under this id for this recipient: nothing written.
+    Duplicate,
+    /// The recipient's queue is at its bound: nothing written for it.
+    Full,
+}
+
+/// One envelope's write inside a transaction: the checks and the put that `enqueue` always made.
+fn enqueue_in(
+    txn: &mut dyn MailTxn,
+    env: &Envelope,
+    now: DateTime<Utc>,
+    config: &MailConfig,
+) -> Result<Fanout, MailError> {
+    let role = env.to.as_str();
+    let id = env.message_id.as_str();
+    if txn.queued(role, id).map_err(MailError::Store)?.is_some()
+        || txn.acked_at(role, id).map_err(MailError::Store)?.is_some()
+        || txn
+            .queued(&dead_role(role), id)
+            .map_err(MailError::Store)?
+            .is_some()
+    {
+        return Ok(Fanout::Duplicate);
+    }
+    let (count, bytes) = txn.stats(role).map_err(MailError::Store)?;
+    if count + 1 > config.max_messages
+        || bytes.saturating_add(env.body.len() as u64) > config.max_bytes
+    {
+        return Ok(Fanout::Full);
+    }
+    let seq = txn.next_seq().map_err(MailError::Store)?;
+    txn.put(
+        role,
+        Stored {
+            envelope: env.clone(),
+            seq,
+            enqueued_at: now,
+            lease: None,
+            attempts: 0,
+        },
+    )
+    .map_err(MailError::Store)?;
+    Ok(Fanout::Queued)
 }
 
 /// The pseudo-role under which a role's dead set is stored: the ordinary queue tables, so no store
@@ -195,6 +306,7 @@ pub enum MailError {
     /// The envelope's `to`, `message_id` or `from` is not well formed or is too long.
     Malformed,
     Claim(ClaimError),
+    Room(RoomError),
     InvalidState(InvalidState),
     Store(StoreError),
     /// The store declares a [`DurabilityClass`] below [`REQUIRED_DURABILITY`]; [`Mailbox::open`]
@@ -269,6 +381,7 @@ impl fmt::Display for MailError {
             MailError::LeaseOutOfRange => write!(f, "the requested lease is out of range"),
             MailError::Malformed => write!(f, "the envelope's addressing is malformed"),
             MailError::Claim(e) => write!(f, "{e}"),
+            MailError::Room(e) => write!(f, "{e}"),
             MailError::InvalidState(e) => write!(f, "{e}"),
             MailError::Store(e) => write!(f, "{e}"),
             MailError::DurabilityTooWeak { declared, required } => write!(
@@ -363,6 +476,19 @@ pub trait MailTxn {
     fn next_seq(&mut self) -> Result<u64, StoreError>;
     fn roles(&self) -> Result<RolesState, StoreError>;
     fn set_roles(&mut self, state: &RolesState) -> Result<(), StoreError>;
+    /// The account's rooms (`docs/ROOMS_DESIGN.md`). A store that predates rooms holds none.
+    fn rooms(&self) -> Result<RoomsState, StoreError> {
+        Ok(RoomsState::default())
+    }
+    /// Replace the rooms. The default refuses anything but an empty state, so a store that cannot
+    /// hold rooms never silently drops one.
+    fn set_rooms(&mut self, state: &RoomsState) -> Result<(), StoreError> {
+        if state.rooms.is_empty() {
+            Ok(())
+        } else {
+            Err(StoreError("this store cannot hold rooms".into()))
+        }
+    }
 
     // The four methods below exist for [`migrate`] (copying a mailbox between stores). They have
     // defaults that refuse, so a store that does not support export still compiles.
@@ -430,6 +556,7 @@ struct MemState {
     acked: BTreeMap<(String, String), DateTime<Utc>>,
     seq: u64,
     roles: RolesState,
+    rooms: RoomsState,
 }
 
 impl MemoryStore {
@@ -551,6 +678,15 @@ impl MailTxn for MemState {
         self.roles = state.clone();
         Ok(())
     }
+
+    fn rooms(&self) -> Result<RoomsState, StoreError> {
+        Ok(self.rooms.clone())
+    }
+
+    fn set_rooms(&mut self, state: &RoomsState) -> Result<(), StoreError> {
+        self.rooms = state.clone();
+        Ok(())
+    }
 }
 
 /// The mailbox: role epochs (M3) in memory, everything else in the store.
@@ -558,7 +694,10 @@ pub struct Mailbox<S: MailStore> {
     store: S,
     config: MailConfig,
     roles: Roles,
+    rooms: RoomsState,
     poisoned: bool,
+    /// Messages set aside since the daemon last asked ([`Mailbox::dead_exhausted`]).
+    exhausted: Vec<Exhausted>,
 }
 
 impl<S: MailStore> Mailbox<S> {
@@ -586,8 +725,10 @@ impl<S: MailStore> Mailbox<S> {
         now: DateTime<Utc>,
     ) -> Result<Self, MailError> {
         let mut state = None;
+        let mut rooms = RoomsState::default();
         store.read(&mut |txn| {
             state = Some(txn.roles().map_err(MailError::Store)?);
+            rooms = txn.rooms().map_err(MailError::Store)?;
             Ok(())
         })?;
         let roles =
@@ -596,8 +737,20 @@ impl<S: MailStore> Mailbox<S> {
             store,
             config,
             roles,
+            rooms,
             poisoned: false,
+            exhausted: Vec::new(),
         })
+    }
+
+    /// Deliver this sender's messages once (see [`MailConfig::single_delivery_from`]).
+    pub fn set_single_delivery_sender(&mut self, from: String) {
+        self.config.single_delivery_from = Some(from);
+    }
+
+    /// Replace the redelivery back-off (see [`MailConfig::redelivery_gaps`]); empty turns it off.
+    pub fn set_redelivery_gaps(&mut self, gaps: Vec<Duration>) {
+        self.config.redelivery_gaps = gaps;
     }
 
     /// `Ok` only for the role's current epoch; the daemon checks every session with this (M5).
@@ -610,6 +763,159 @@ impl<S: MailStore> Mailbox<S> {
     #[must_use]
     pub fn roles_snapshot(&self) -> RolesState {
         self.roles.snapshot()
+    }
+
+    /// Every room of the account (`docs/ROOMS_DESIGN.md`).
+    #[must_use]
+    pub fn rooms_snapshot(&self) -> RoomsState {
+        self.rooms.clone()
+    }
+
+    /// Apply `change` to a copy of the rooms and persist it; the live state changes only if the
+    /// write succeeded, and a failed write poisons the mailbox like a failed claim write does.
+    fn change_rooms(
+        &mut self,
+        change: impl FnOnce(&mut RoomsState, &RolesState) -> Result<(), RoomError>,
+    ) -> Result<(), MailError> {
+        self.live()?;
+        let mut next = self.rooms.clone();
+        change(&mut next, &self.roles.snapshot()).map_err(MailError::Room)?;
+        let written = self
+            .store
+            .write(&mut |txn| txn.set_rooms(&next).map_err(MailError::Store));
+        if let Err(e) = written {
+            self.poisoned = true;
+            return Err(e);
+        }
+        self.rooms = next;
+        Ok(())
+    }
+
+    /// Create the room `global_id` (`name@account`); `creator` is a role's global id or `account`.
+    ///
+    /// # Errors
+    /// [`MailError::Room`] for a bad or taken name or the room cap; a store error.
+    pub fn create_room(
+        &mut self,
+        global_id: &str,
+        creator: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, roles| {
+            rooms.create(global_id, creator, now, roles.roles.contains_key(global_id))
+        })
+    }
+
+    /// Delete a room.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn delete_room(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.delete(global_id, actor, admin))
+    }
+
+    /// Set a room's join policy and the default for new joiners.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn set_room_policy(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+        join_policy: JoinPolicy,
+        default_send: DefaultSend,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| {
+            rooms.set_policy(global_id, actor, admin, join_policy, default_send)
+        })
+    }
+
+    /// `joiner` joins a room (under its own authority; see [`RoomsState::join`]). Returns whether
+    /// it may post.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn join_room(
+        &mut self,
+        global_id: &str,
+        joiner: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, MailError> {
+        let mut can_send = false;
+        self.change_rooms(|rooms, _| {
+            can_send = rooms.join(global_id, joiner, now)?;
+            Ok(())
+        })?;
+        Ok(can_send)
+    }
+
+    /// A member's choice to receive only the posts that name it.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn set_room_mention_only(
+        &mut self,
+        global_id: &str,
+        who: &str,
+        mention_only: bool,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.set_mention_only(global_id, who, mention_only))
+    }
+
+    /// `who` leaves a room.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn leave_room(&mut self, global_id: &str, who: &str) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.leave(global_id, who).map(|_| ()))
+    }
+
+    /// Remove `target` from a room.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn remove_from_room(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+        target: &str,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.remove(global_id, actor, admin, target).map(|_| ()))
+    }
+
+    /// Remove `target` from a room and refuse its rejoining.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn ban_from_room(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+        target: &str,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.ban(global_id, actor, admin, target))
+    }
+
+    /// Invite `invitee` to a room.
+    ///
+    /// # Errors
+    /// [`MailError::Room`]; a store error.
+    pub fn invite_to_room(
+        &mut self,
+        global_id: &str,
+        actor: &str,
+        admin: bool,
+        invitee: &str,
+    ) -> Result<(), MailError> {
+        self.change_rooms(|rooms, _| rooms.invite(global_id, actor, admin, invitee))
     }
 
     /// Every claimed role's [`Depth`] at `now` (S-1, the daemon's `list`). Changes nothing. A lease
@@ -639,9 +945,58 @@ impl<S: MailStore> Mailbox<S> {
         Ok(out)
     }
 
+    /// Like [`Mailbox::depths`], but counting only the mail whose sender `allowed` accepts (given the
+    /// sender's global id). Dead-set mail is in no count. Reads every message of a role, so call it
+    /// only for roles already known to have mail. Changes nothing.
+    pub fn depths_from(
+        &self,
+        now: DateTime<Utc>,
+        allowed: &dyn Fn(&str) -> bool,
+    ) -> Result<BTreeMap<String, QueueDepth>, MailError> {
+        self.live()?;
+        let roles = self.roles.snapshot();
+        let mut out = BTreeMap::new();
+        self.store.read(&mut |txn| {
+            out.clear();
+            for (role, record) in &roles.roles {
+                let mut depth = QueueDepth::default();
+                txn.scan(role, &mut |stored| {
+                    if allowed(&stored.envelope.from) {
+                        if stored
+                            .lease
+                            .as_ref()
+                            .is_some_and(|held| held.epoch == record.epoch && held.until > now)
+                        {
+                            depth.leased += 1;
+                        } else {
+                            depth.queued += 1;
+                        }
+                        depth.oldest_enqueued_at = Some(
+                            depth
+                                .oldest_enqueued_at
+                                .map_or(stored.enqueued_at, |o| o.min(stored.enqueued_at)),
+                        );
+                    }
+                    true
+                })
+                .map_err(MailError::Store)?;
+                out.insert(role.clone(), depth);
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
     /// The underlying store (tests and the daemon's diagnostics).
     pub fn store(&self) -> &S {
         &self.store
+    }
+
+    /// Whether a failed write left memory and store disagreeing, so every call now refuses
+    /// ([`MailError::Poisoned`]). Reopening the store clears it.
+    #[must_use]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
     }
 
     fn live(&self) -> Result<(), MailError> {
@@ -667,40 +1022,42 @@ impl<S: MailStore> Mailbox<S> {
         let config = self.config.clone();
         let mut outcome = Enqueued::Queued;
         self.store.write(&mut |txn| {
-            let role = env.to.as_str();
-            let id = env.message_id.as_str();
-            if txn.queued(role, id).map_err(MailError::Store)?.is_some()
-                || txn.acked_at(role, id).map_err(MailError::Store)?.is_some()
-                || txn
-                    .queued(&dead_role(role), id)
-                    .map_err(MailError::Store)?
-                    .is_some()
-            {
-                outcome = Enqueued::Duplicate;
-                return Ok(());
-            }
-            let (count, bytes) = txn.stats(role).map_err(MailError::Store)?;
-            if count + 1 > config.max_messages
-                || bytes.saturating_add(env.body.len() as u64) > config.max_bytes
-            {
-                return Err(MailError::MailboxFull);
-            }
-            let seq = txn.next_seq().map_err(MailError::Store)?;
-            txn.put(
-                role,
-                Stored {
-                    envelope: env.clone(),
-                    seq,
-                    enqueued_at: now,
-                    lease: None,
-                    attempts: 0,
-                },
-            )
-            .map_err(MailError::Store)?;
-            outcome = Enqueued::Queued;
+            outcome = match enqueue_in(txn, &env, now, &config)? {
+                Fanout::Queued => Enqueued::Queued,
+                Fanout::Duplicate => Enqueued::Duplicate,
+                Fanout::Full => return Err(MailError::MailboxFull),
+            };
             Ok(())
         })?;
         Ok(outcome)
+    }
+
+    /// Queue every envelope in `envs` in one store transaction (a room's fan-out, one copy per
+    /// member): all of them are written or none is. A recipient whose queue is full is skipped and
+    /// reported as [`Fanout::Full`], not an error for the whole call; a store error aborts all.
+    /// Each envelope's `to` should differ (the batch is not checked against itself).
+    ///
+    /// # Errors
+    /// [`MailError::Malformed`] if any envelope is, before anything is written; a store error.
+    pub fn enqueue_many(
+        &mut self,
+        envs: &[Envelope],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Fanout>, MailError> {
+        self.live()?;
+        if !envs.iter().all(well_formed) {
+            return Err(MailError::Malformed);
+        }
+        let config = self.config.clone();
+        let mut out = Vec::new();
+        self.store.write(&mut |txn| {
+            out.clear();
+            for env in envs {
+                out.push(enqueue_in(txn, env, now, &config)?);
+            }
+            Ok(())
+        })?;
+        Ok(out)
     }
 
     /// Take a role (M3) and persist the new epoch in the same call. If the store write fails the
@@ -713,6 +1070,11 @@ impl<S: MailStore> Mailbox<S> {
         now: DateTime<Utc>,
     ) -> Result<Grant, MailError> {
         self.live()?;
+        if let Some(leaf) = req.chain.first()
+            && self.rooms.contains(&leaf.subject_global_id)
+        {
+            return Err(MailError::Claim(ClaimError::RoomNameTaken));
+        }
         let grant = self
             .roles
             .claim(req, account_keys, revoked, now)
@@ -725,7 +1087,68 @@ impl<S: MailStore> Mailbox<S> {
             self.poisoned = true;
             return Err(e);
         }
+        // A message set aside for lack of an ack is delivered again when the role next connects
+        // (a restarted lane must get it). Best effort: a failure here never fails the claim.
+        let _ = self.revive_dead(&grant.global_id);
         Ok(grant)
+    }
+
+    /// Role liveness (docs/ROLE_LIVENESS_DESIGN.md): record when each of `seen` was last seen, then
+    /// retire every role idle past `ttl` (see [`Roles::retire_idle`]). Writes the table only when
+    /// something changed, so a quiet daemon writes at most once an hour per role. Returns the ids
+    /// retired. A failed write poisons the mailbox, as for a claim: memory and store disagree.
+    pub fn maintain_roles(
+        &mut self,
+        seen: &[(String, DateTime<Utc>)],
+        now: DateTime<Utc>,
+        ttl: chrono::Duration,
+    ) -> Result<Vec<String>, MailError> {
+        self.live()?;
+        let mut changed = false;
+        for (global_id, at) in seen {
+            changed |= self.roles.note_seen(global_id, *at);
+        }
+        let retired = self.roles.retire_idle(now, ttl);
+        changed |= !retired.is_empty();
+        if changed {
+            let snapshot = self.roles.snapshot();
+            let written = self
+                .store
+                .write(&mut |txn| txn.set_roles(&snapshot).map_err(MailError::Store));
+            if let Err(e) = written {
+                self.poisoned = true;
+                return Err(e);
+            }
+        }
+        Ok(retired)
+    }
+
+    /// Retire (`retire`) or revive a role at `now` and write the table through the store. Returns
+    /// whether the role exists (`false` writes nothing). Poisons the mailbox if the write fails.
+    pub fn set_role_retired(
+        &mut self,
+        global_id: &str,
+        retire: bool,
+        now: DateTime<Utc>,
+    ) -> Result<bool, MailError> {
+        self.live()?;
+        let found = if retire {
+            self.roles.retire(global_id, now)
+        } else {
+            self.roles.revive(global_id, now)
+        };
+        if !found {
+            return Ok(false);
+        }
+        let snapshot = self.roles.snapshot();
+        let written = self
+            .store
+            .write(&mut |txn| txn.set_roles(&snapshot).map_err(MailError::Store));
+        if let Err(e) = written {
+            self.poisoned = true;
+            return Err(e);
+        }
+        Ok(true)
     }
 
     /// Lease up to `max` deliverable messages, oldest first. A message is deliverable when it has
@@ -763,13 +1186,14 @@ impl<S: MailStore> Mailbox<S> {
             return Err(MailError::LeaseOutOfRange);
         }
         let config = self.config.clone();
-        let until = now + lease;
         let mut out = Vec::new();
+        let mut moved: Vec<Exhausted> = Vec::new();
         if max == 0 {
             return Ok(out);
         }
         self.store.write(&mut |txn| {
             out.clear();
+            moved.clear();
             // Collect up to `max` free messages in order, stopping the scan early, then lease them.
             let mut picked: Vec<Stored> = Vec::new();
             txn.scan_free(role, epoch, now, &mut |stored| {
@@ -785,7 +1209,8 @@ impl<S: MailStore> Mailbox<S> {
                 // Leased `max_deliveries` times already and still here: set it aside, body and all,
                 // instead of leasing it again. If the dead set is itself full it stays queued: a
                 // message is never dropped to make room.
-                if config.max_deliveries > 0 && stored.attempts >= config.max_deliveries {
+                let cap = config.cap_for(&stored.envelope.from);
+                if cap > 0 && stored.attempts >= cap {
                     let (count, bytes) = txn.stats(&dead_set).map_err(MailError::Store)?;
                     if count < config.max_messages
                         && bytes.saturating_add(stored.envelope.body.len() as u64)
@@ -794,11 +1219,21 @@ impl<S: MailStore> Mailbox<S> {
                         let id = stored.envelope.message_id.clone();
                         txn.remove(role, &id).map_err(MailError::Store)?;
                         stored.lease = None;
+                        moved.push(Exhausted {
+                            to: role.to_string(),
+                            from: stored.envelope.from.clone(),
+                            message_id: id,
+                            enqueued_at: stored.enqueued_at,
+                            attempts: stored.attempts,
+                        });
                         txn.put(&dead_set, stored).map_err(MailError::Store)?;
                         continue;
                     }
                 }
                 let prior_lease_lapsed = stored.lease.is_some_and(|held| held.until <= now);
+                // The back-off schedule sets the lease of a message once it is configured: the
+                // requested lease (still range-checked) is the schedule's only when none is set.
+                let until = now + config.gap_for(stored.attempts).unwrap_or(lease);
                 stored.lease = Some(Lease { epoch, until });
                 stored.attempts = stored.attempts.saturating_add(1);
                 out.push(Delivery {
@@ -812,6 +1247,7 @@ impl<S: MailStore> Mailbox<S> {
             }
             Ok(())
         })?;
+        self.exhausted.append(&mut moved);
         Ok(out)
     }
 
@@ -921,6 +1357,101 @@ impl<S: MailStore> Mailbox<S> {
         Ok(out)
     }
 
+    /// Set aside every message that used up its deliveries and whose last lease has run out (a
+    /// reader that is gone never fetches again, so the fetch path cannot find these), and return all
+    /// that were set aside since the last call, this path's and the fetch path's, for the caller to
+    /// tell their senders. Nothing is dropped: they sit in the dead set, visible in `list`, until the
+    /// role next claims (see [`Mailbox::claim`]) or `requeue` puts one back.
+    pub fn dead_exhausted(&mut self, now: DateTime<Utc>) -> Result<Vec<Exhausted>, MailError> {
+        self.live()?;
+        let config = self.config.clone();
+        let roles = self.roles.snapshot();
+        let mut moved: Vec<Exhausted> = Vec::new();
+        if config.delivery_cap() > 0 || config.single_delivery_from.is_some() {
+            self.store.write(&mut |txn| {
+                moved.clear();
+                for role in roles.roles.keys() {
+                    let mut due = Vec::new();
+                    txn.scan(role, &mut |stored| {
+                        let cap = config.cap_for(&stored.envelope.from);
+                        if cap > 0
+                            && stored.attempts >= cap
+                            && stored.lease.as_ref().is_none_or(|held| held.until <= now)
+                        {
+                            due.push(stored.clone());
+                        }
+                        true
+                    })
+                    .map_err(MailError::Store)?;
+                    let dead_set = dead_role(role);
+                    for mut stored in due {
+                        let (count, bytes) = txn.stats(&dead_set).map_err(MailError::Store)?;
+                        if count >= config.max_messages
+                            || bytes.saturating_add(stored.envelope.body.len() as u64)
+                                > config.max_bytes
+                        {
+                            continue;
+                        }
+                        let id = stored.envelope.message_id.clone();
+                        txn.remove(role, &id).map_err(MailError::Store)?;
+                        stored.lease = None;
+                        moved.push(Exhausted {
+                            to: role.clone(),
+                            from: stored.envelope.from.clone(),
+                            message_id: id,
+                            enqueued_at: stored.enqueued_at,
+                            attempts: stored.attempts,
+                        });
+                        txn.put(&dead_set, stored).map_err(MailError::Store)?;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        self.exhausted.append(&mut moved);
+        Ok(std::mem::take(&mut self.exhausted))
+    }
+
+    /// Move every dead message of `role` back to its queue with the delivery count reset, as far as
+    /// the queue bound allows (the rest stay dead). Returns how many moved.
+    fn revive_dead(&mut self, role: &str) -> Result<usize, MailError> {
+        let config = self.config.clone();
+        let mut revived = 0;
+        self.store.write(&mut |txn| {
+            revived = 0;
+            let dead = dead_role(role);
+            let mut ids = Vec::new();
+            txn.scan(&dead, &mut |stored| {
+                ids.push(stored.envelope.message_id.clone());
+                true
+            })
+            .map_err(MailError::Store)?;
+            for id in ids {
+                let Some(mut stored) = txn.queued(&dead, &id).map_err(MailError::Store)? else {
+                    continue;
+                };
+                // A single-delivery message (a daemon notice) stays dead: it was told once, and a
+                // restart must not bring its stale text back.
+                if config.single_delivery_from.as_deref() == Some(stored.envelope.from.as_str()) {
+                    continue;
+                }
+                let (count, bytes) = txn.stats(role).map_err(MailError::Store)?;
+                if count + 1 > config.max_messages
+                    || bytes.saturating_add(stored.envelope.body.len() as u64) > config.max_bytes
+                {
+                    break;
+                }
+                txn.remove(&dead, &id).map_err(MailError::Store)?;
+                stored.attempts = 0;
+                stored.lease = None;
+                txn.put(role, stored).map_err(MailError::Store)?;
+                revived += 1;
+            }
+            Ok(())
+        })?;
+        Ok(revived)
+    }
+
     /// Put a dead message back in the role's queue with its delivery count reset. The queue bound
     /// applies: a full queue refuses with [`MailError::MailboxFull`] and the message stays dead.
     pub fn requeue_dead(
@@ -991,6 +1522,8 @@ mod redb_tables {
     pub const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters");
     /// `"state"` -> serde_json `RolesState`.
     pub const ROLES: TableDefinition<&str, &[u8]> = TableDefinition::new("roles");
+    /// `"state"` -> serde_json `RoomsState`.
+    pub const ROOMS: TableDefinition<&str, &[u8]> = TableDefinition::new("rooms");
     /// `(role, seq)` -> `(epoch, until micros)` for each message that holds a lease: a fixed-width
     /// copy of `Meta::lease`, so `fetch` can tell a held message from a free one without decoding
     /// its JSON (the fetch-scan slice). `RedbTxn::put` and `remove` keep it equal to `META`.
@@ -1010,6 +1543,8 @@ struct Meta {
     lease: Option<Lease>,
     attempts: u32,
     body_len: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
 }
 
 #[cfg(feature = "mailbox-redb")]
@@ -1046,6 +1581,7 @@ impl RedbStore {
             txn.open_table(COUNTERS)
                 .map_err(|e| store_err("table")(&e))?;
             txn.open_table(ROLES).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(ROOMS).map_err(|e| store_err("table")(&e))?;
             txn.open_table(LEASES).map_err(|e| store_err("table")(&e))?;
         }
         // The migration shares this transaction with the table creation, so a crash anywhere in it
@@ -1283,6 +1819,7 @@ mod redb_migration_tests {
                             to: "lane@acct".into(),
                             from: "peer@acct".into(),
                             body: b"x".to_vec(),
+                            mode: None,
                         },
                         seq: 1,
                         enqueued_at: at,
@@ -1462,6 +1999,7 @@ impl RedbTxn<'_> {
                 to: role.to_string(),
                 from: meta.from,
                 body: self.body(role, seq)?,
+                mode: meta.mode,
             },
             seq,
             enqueued_at: meta.enqueued_at,
@@ -1646,6 +2184,7 @@ impl MailTxn for RedbTxn<'_> {
             lease: stored.lease.clone(),
             attempts: stored.attempts,
             body_len,
+            mode: stored.envelope.mode.clone(),
         };
         let raw = serde_json::to_vec(&meta).map_err(|e| store_err("meta encode")(&e))?;
         {
@@ -1887,6 +2426,30 @@ impl MailTxn for RedbTxn<'_> {
             .map_err(|e| store_err("roles")(&e))?;
         Ok(())
     }
+
+    fn rooms(&self) -> Result<RoomsState, StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::ROOMS)
+            .map_err(|e| store_err("rooms")(&e))?;
+        match t.get("state").map_err(|e| store_err("rooms")(&e))? {
+            Some(raw) => {
+                serde_json::from_slice(raw.value()).map_err(|e| store_err("rooms decode")(&e))
+            }
+            None => Ok(RoomsState::default()),
+        }
+    }
+
+    fn set_rooms(&mut self, state: &RoomsState) -> Result<(), StoreError> {
+        let raw = serde_json::to_vec(state).map_err(|e| store_err("rooms encode")(&e))?;
+        let mut t = self
+            .txn
+            .open_table(redb_tables::ROOMS)
+            .map_err(|e| store_err("rooms")(&e))?;
+        t.insert("state", raw.as_slice())
+            .map_err(|e| store_err("rooms")(&e))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1901,5 +2464,86 @@ mod needs_tests {
         assert!(n.atomic_batch && n.ordered_scan && n.lease_ttl && n.bounded_calls);
         // Control: the class really is ordered, so a Process store is below the need.
         assert!(DurabilityClass::Process < n.durability);
+    }
+}
+
+#[cfg(test)]
+mod dotted_recipient_tests {
+    use super::*;
+
+    fn to(recipient: &str) -> bool {
+        well_formed(&Envelope {
+            message_id: "m".into(),
+            to: recipient.into(),
+            from: "pm@acct".into(),
+            body: Vec::new(),
+            mode: None,
+        })
+    }
+
+    /// A3: a sub-agent such as `worker.pm@acct` is a mailable address, to a depth of three; the
+    /// shapes that are not a chain of names are not.
+    #[test]
+    fn a_dotted_role_is_a_recipient_to_a_depth_of_three() {
+        assert!(to("pm@acct"), "control: a plain role");
+        assert!(to("worker.pm@acct"));
+        assert!(to("a.worker.pm@acct"), "three levels");
+        assert!(!to("x.a.worker.pm@acct"), "four levels");
+        for bad in [
+            ".pm@acct",
+            "pm.@acct",
+            "a..b@acct",
+            "@acct",
+            "a b.pm@acct",
+            "pm@a.cct",
+        ] {
+            assert!(!to(bad), "{bad}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod mode_wire_tests {
+    use super::*;
+
+    /// A row, and an envelope, written before ROADMAP row 41 P2b carry no `mode`. They must still
+    /// read, as "no mode declared", and a message with no mode must write exactly what it wrote
+    /// before (so an older binary, which ignores unknown fields, reads a new store's old rows).
+    #[test]
+    fn an_envelope_written_before_the_mode_field_still_reads() {
+        let old = r#"{"message_id":"a/1","to":"b@acct","from":"a@acct","body":[104,105]}"#;
+        let env: Envelope = serde_json::from_str(old).unwrap();
+        assert_eq!(env.mode, None);
+        assert_eq!(
+            serde_json::to_string(&env).unwrap(),
+            old,
+            "None is not written"
+        );
+        let mut declared = env.clone();
+        declared.mode = Some("L0".into());
+        let text = serde_json::to_string(&declared).unwrap();
+        assert!(
+            text.contains(r#""mode":"L0""#),
+            "control: Some is written: {text}"
+        );
+    }
+
+    #[cfg(feature = "mailbox-redb")]
+    #[test]
+    fn a_redb_meta_row_written_before_the_mode_field_still_reads() {
+        let old = r#"{"message_id":"a/1","from":"a@acct","enqueued_at":"2026-10-02T12:00:00Z","lease":null,"attempts":0,"body_len":2}"#;
+        let meta: Meta = serde_json::from_str(old).unwrap();
+        assert_eq!(meta.mode, None);
+        assert_eq!(
+            serde_json::to_string(&meta).unwrap(),
+            old,
+            "None is not written"
+        );
+        let with: Meta = serde_json::from_str(&old.replace(
+            r#""body_len":2"#,
+            r#""body_len":2,"mode":"L1:message-formats/1""#,
+        ))
+        .unwrap();
+        assert_eq!(with.mode.as_deref(), Some("L1:message-formats/1"));
     }
 }

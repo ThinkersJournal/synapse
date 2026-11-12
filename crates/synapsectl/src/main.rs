@@ -9,19 +9,23 @@
 //! `synapse claim|send|inbox|ack|dead|requeue|list|stats --role <role>` (or `SYNAPSE_ROLE`).
 //! `inbox`, `dead`, `list` and `stats` print one JSON object per line. Session tokens are never printed.
 
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
+
+mod checker;
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use synapse::certificate::Permission;
-use synapse::keystore::{Keystore, KeystoreError, default_home, valid_name};
+use synapse::keystore::{
+    Keystore, KeystoreError, RolePublicKeys, account_name, default_home, valid_name,
+};
 use synapse::security_events::SecurityEventKind;
 
 use synapsed_client::{Daemon, MailError, encode_body, events, inbox_line, printable};
 
 #[derive(Parser)]
-#[command(name = "synapse", about = "Synapse command line")]
+#[command(name = "synapse", about = "Synapse command line", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -36,6 +40,24 @@ enum Command {
     #[cfg(feature = "storage")]
     #[command(subcommand)]
     Storage(StorageCommand),
+    /// Shared state between lanes: one record per cross-lane thread, written by compare-and-set.
+    #[command(subcommand)]
+    State(StateCommand),
+    /// Rooms: a shared channel whose joined, online members receive what is posted. Post with
+    /// `send --to <room>`; sending never joins.
+    #[command(subcommand)]
+    Room(RoomCommand),
+    /// Who may see, message, join and post: give a role rights over an agent or a room, take a
+    /// grant back, list the grants you issued or hold. The account holder may give anything; a
+    /// room's creator gives rights about its own room; anyone may pass on a subset of what it
+    /// holds (and a grant lasts only while its issuer still holds what it gave).
+    #[command(subcommand)]
+    Access(AccessCommand),
+    /// Which other accounts this node believes: list the knocks (first contacts from accounts nobody
+    /// pinned, which grant nothing), and pin an account key from one. Adding an account is the
+    /// holder's act, never a message's.
+    #[command(subcommand)]
+    Trust(TrustCommand),
     /// Claim a role on the daemon (taking it over if another holder has it).
     ///
     /// The session is cached per role in this home, so every `synapse` command for the role here
@@ -54,6 +76,10 @@ enum Command {
         /// A message id of your own, for idempotent resends (default: a fresh UUID).
         #[arg(long)]
         id: Option<String>,
+        /// How the body is written: `L0` (free prose) or `L1:message-formats/1` (the daemon checks
+        /// it and refuses a message that is not one). Default: undeclared, the soft lint.
+        #[arg(long)]
+        mode: Option<String>,
         message: Option<String>,
     },
     /// Fetch waiting messages, one JSON object per line. Each stays leased until acked.
@@ -83,12 +109,37 @@ enum Command {
         role: RoleArg,
         message_id: String,
     },
+    /// Retire a role now: it leaves `list` unless `--include-retired`, and keeps its epoch and its
+    /// queued mail. Needs the `role-admin` grant. A claim by the role itself brings it back.
+    Retire {
+        #[command(flatten)]
+        role: RoleArg,
+        /// The role to retire (a name, not `name@account`).
+        target: String,
+    },
+    /// Bring a retired role back and restart its idle clock. Needs the `role-admin` grant.
+    Revive {
+        #[command(flatten)]
+        role: RoleArg,
+        /// The role to revive (a name, not `name@account`).
+        target: String,
+    },
+    /// Stop the daemon cleanly (it exits 0, so the scheduled task does not retry). Needs the
+    /// `daemon-admin` grant. Start it again afterwards the way you started it.
+    Shutdown {
+        #[command(flatten)]
+        role: RoleArg,
+    },
     /// Per-role message counters since this daemon started (a restart begins again from zero):
     /// `sent`, `acked`, `redelivered`, `expired`, one JSON object per line, each with the
-    /// daemon's `scope` and `since`.
+    /// daemon's `scope` and `since`. With `--daemon`: instead one object about the daemon itself,
+    /// `scope`, `since` and `launch_senders_set` (whether `SYNAPSE_LAUNCH_SENDERS` lists anyone;
+    /// false means launch signals are off).
     Stats {
         #[command(flatten)]
         role: RoleArg,
+        #[arg(long)]
+        daemon: bool,
     },
     /// List every role the daemon knows, with presence, one JSON object per line. `--cwd` and
     /// `--repo` keep only roles whose self-reported presence matches exactly (a role that reports
@@ -102,7 +153,648 @@ enum Command {
         /// Only roles whose reported repo is exactly this.
         #[arg(long)]
         repo: Option<String>,
+        /// Also list roles retired for being idle past the ttl (each carries `retired_at`).
+        #[arg(long)]
+        include_retired: bool,
     },
+}
+
+/// A condition is `FACT,OP,VALUE` (`crate_version:synapse,ge,6.0.0`; `exists` and `absent` take no
+/// value). A blocker is a record id (`T-12`) or a condition.
+#[derive(Subcommand)]
+enum StateCommand {
+    /// Create a record; prints it as one JSON object.
+    New {
+        #[command(flatten)]
+        role: RoleArg,
+        #[arg(long)]
+        title: String,
+        /// A party (repeatable). The creator must be one.
+        #[arg(long = "party", required = true)]
+        parties: Vec<String>,
+        #[arg(long)]
+        owner: String,
+        /// open (default), blocked, waiting, done or cancelled.
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        /// A fact that makes the record true or done (repeatable).
+        #[arg(long = "verify")]
+        verify: Vec<String>,
+        /// What a blocked record waits on (repeatable).
+        #[arg(long = "blocked-on")]
+        blocked_on: Vec<String>,
+    },
+    /// Print one record as JSON.
+    Show {
+        #[command(flatten)]
+        role: RoleArg,
+        id: String,
+    },
+    /// Print the records you may see, one JSON object per line.
+    List {
+        #[command(flatten)]
+        role: RoleArg,
+        /// Comma-separated states.
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        party: Option<String>,
+    },
+    /// Change a record, if it is still at --rev. A stale --rev changes nothing and says so.
+    Set {
+        #[command(flatten)]
+        role: RoleArg,
+        id: String,
+        /// The revision you read.
+        #[arg(long)]
+        rev: u64,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        /// Replace the parties (repeatable).
+        #[arg(long = "party")]
+        parties: Vec<String>,
+        /// Replace the verify list (repeatable).
+        #[arg(long = "verify")]
+        verify: Vec<String>,
+        #[arg(long)]
+        clear_verify: bool,
+        /// Replace what the record is blocked on (repeatable).
+        #[arg(long = "blocked-on")]
+        blocked_on: Vec<String>,
+        #[arg(long)]
+        clear_blocked_on: bool,
+    },
+    /// Print a record's history, one JSON entry per line.
+    History {
+        #[command(flatten)]
+        role: RoleArg,
+        id: String,
+    },
+    /// Run the checker: look up the facts open records name (crates.io, GitHub) and report them.
+    /// Needs the `state-derive` grant (`synapse id grant --role <role> state-derive`); run it as
+    /// the checker role. Nothing else may write a fact.
+    Check {
+        #[command(flatten)]
+        role: RoleArg,
+        /// One pass, then exit (default: repeat).
+        #[arg(long)]
+        once: bool,
+        /// Seconds between passes.
+        #[arg(long, default_value_t = 300)]
+        interval: u64,
+        /// The environment variable holding a GitHub token (none: GitHub's unauthenticated limits).
+        #[arg(long, default_value = "SYNAPSE_CHECKER_GITHUB_TOKEN")]
+        github_token_env: String,
+        #[arg(long, default_value = "https://crates.io")]
+        crates_url: String,
+        #[arg(long, default_value = "https://api.github.com")]
+        github_url: String,
+    },
+}
+
+fn condition_json(text: &str) -> Result<serde_json::Value, MailError> {
+    let bad = || {
+        MailError::Usage(format!(
+            "`{}` is not FACT,OP,VALUE (OP: eq, ge, exists, absent)",
+            printable(text)
+        ))
+    };
+    let mut parts = text.splitn(3, ',');
+    let fact = parts.next().filter(|f| !f.is_empty()).ok_or_else(bad)?;
+    let op = parts.next().ok_or_else(bad)?;
+    let value = parts.next().unwrap_or("");
+    Ok(json!({ "fact": fact, "op": op, "value": value }))
+}
+
+fn blocker_json(text: &str) -> Result<serde_json::Value, MailError> {
+    if text.starts_with("T-") {
+        Ok(json!({ "record": text }))
+    } else {
+        Ok(json!({ "condition": condition_json(text)? }))
+    }
+}
+
+fn state_command(home: &std::path::Path, command: StateCommand) -> Result<(), MailError> {
+    let conditions = |v: &[String]| {
+        v.iter()
+            .map(|c| condition_json(c))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let blockers = |v: &[String]| {
+        v.iter()
+            .map(|c| blocker_json(c))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let query = |id: &str| id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    // The record is the command's output, written as data rather than formatted into a log line.
+    let print_record = |reply: &serde_json::Value| -> Result<(), MailError> {
+        let mut out = std::io::stdout().lock();
+        out.write_all(reply["record"].to_string().as_bytes())?;
+        out.write_all(b"\n")?;
+        Ok(())
+    };
+    match command {
+        StateCommand::New {
+            role,
+            title,
+            parties,
+            owner,
+            state,
+            notes,
+            verify,
+            blocked_on,
+        } => {
+            let mut body = json!({
+                "title": title,
+                "parties": parties,
+                "owner": owner,
+                "verify": conditions(&verify)?,
+                "blocked_on": blockers(&blocked_on)?,
+            });
+            if let Some(state) = state {
+                body["state"] = json!(state);
+            }
+            if let Some(notes) = notes {
+                body["notes"] = json!(notes);
+            }
+            let daemon = connect(home, &role)?;
+            print_record(&daemon.call(&role.role, "/v1/state/create", Some(&body))?)?;
+        }
+        StateCommand::Show { role, id } => {
+            if !query(&id) {
+                return Err(MailError::Usage("not a record id".into()));
+            }
+            let daemon = connect(home, &role)?;
+            print_record(&daemon.call(&role.role, &format!("/v1/state/get?id={id}"), None)?)?;
+        }
+        StateCommand::List { role, state, party } => {
+            let mut path = String::from("/v1/state/list?");
+            if let Some(state) = state {
+                if !state.bytes().all(|b| b.is_ascii_lowercase() || b == b',') {
+                    return Err(MailError::Usage(
+                        "--state is comma-separated state names".into(),
+                    ));
+                }
+                path.push_str(&format!("state={state}&"));
+            }
+            if let Some(party) = party {
+                if !valid_name(&party) {
+                    return Err(MailError::Usage("--party is a role name".into()));
+                }
+                path.push_str(&format!("party={party}&"));
+            }
+            let daemon = connect(home, &role)?;
+            let reply = daemon.call(&role.role, path.trim_end_matches(['?', '&']), None)?;
+            for record in reply["records"].as_array().into_iter().flatten() {
+                println!("{record}");
+            }
+        }
+        StateCommand::Set {
+            role,
+            id,
+            rev,
+            title,
+            owner,
+            state,
+            notes,
+            parties,
+            verify,
+            clear_verify,
+            blocked_on,
+            clear_blocked_on,
+        } => {
+            let mut patch = serde_json::Map::new();
+            let mut put = |k: &str, v: serde_json::Value| {
+                patch.insert(k.to_string(), v);
+            };
+            if let Some(v) = title {
+                put("title", json!(v));
+            }
+            if let Some(v) = owner {
+                put("owner", json!(v));
+            }
+            if let Some(v) = state {
+                put("state", json!(v));
+            }
+            if let Some(v) = notes {
+                put("notes", json!(v));
+            }
+            if !parties.is_empty() {
+                put("parties", json!(parties));
+            }
+            if !verify.is_empty() || clear_verify {
+                put("verify", json!(conditions(&verify)?));
+            }
+            if !blocked_on.is_empty() || clear_blocked_on {
+                put("blocked_on", json!(blockers(&blocked_on)?));
+            }
+            let body = json!({ "id": id, "expected_revision": rev, "patch": patch });
+            let daemon = connect(home, &role)?;
+            print_record(&daemon.call(&role.role, "/v1/state/patch", Some(&body))?)?;
+        }
+        StateCommand::Check {
+            role,
+            once,
+            interval,
+            github_token_env,
+            crates_url,
+            github_url,
+        } => {
+            let forge = checker::Forge::new(
+                &crates_url,
+                &github_url,
+                Box::new(checker::EnvToken(github_token_env)),
+            )?;
+            loop {
+                // Connect afresh each pass: a daemon that restarted is a new instance.
+                let pass = connect(home, &role)
+                    .and_then(|daemon| checker::check_once(&daemon, &role.role, &forge));
+                match pass {
+                    Ok(p) => println!(
+                        "checked {} facts: {} found, {} absent, {} failed",
+                        p.found + p.absent + p.failed,
+                        p.found,
+                        p.absent,
+                        p.failed
+                    ),
+                    Err(e) if once => return Err(e),
+                    Err(e) => eprintln!("error: {e}"),
+                }
+                if once {
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_secs(interval.max(1)));
+            }
+        }
+        StateCommand::History { role, id } => {
+            if !query(&id) {
+                return Err(MailError::Usage("not a record id".into()));
+            }
+            let daemon = connect(home, &role)?;
+            let reply = daemon.call(&role.role, &format!("/v1/state/history?id={id}"), None)?;
+            for entry in reply["entries"].as_array().into_iter().flatten() {
+                println!("{entry}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `synapse room ...`: thin calls on the daemon's `/v1/rooms*` routes. A room is `name` or
+/// `name@account`. Each prints the daemon's reply as one JSON line.
+#[derive(Subcommand)]
+enum RoomCommand {
+    /// Create a room (needs `room-create`). Only you and the account holder see it until a rule
+    /// says otherwise.
+    Create {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+    },
+    /// Delete a room you created or moderate.
+    Delete {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+    },
+    /// Set who may join and whether new joiners may post.
+    Policy {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+        /// `open`, `invite-only`, or `allow-list` (with one or more --allow).
+        #[arg(long)]
+        join: String,
+        /// A role (`role@account`) the allow-list admits; repeat for several.
+        #[arg(long)]
+        allow: Vec<String>,
+        /// New joiners are muted (they receive, but do not post).
+        #[arg(long)]
+        muted: bool,
+    },
+    /// Invite a role (`role@account`); the invitation is used by that role's own join.
+    Invite {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+        invitee: String,
+    },
+    /// Join a room as this role.
+    Join {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+        /// `true`: receive only the posts that name this role (`@role`); `false`: everything.
+        /// Leave it out to keep the current choice.
+        #[arg(long)]
+        mention_only: Option<bool>,
+    },
+    /// Leave a room.
+    Leave {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+    },
+    /// Who is in a room, and whether each member is online, retired and deliverable.
+    Members {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+    },
+    /// The rooms this role may see.
+    List {
+        #[command(flatten)]
+        role: RoleArg,
+    },
+    /// Remove a member (it may rejoin if the policy allows).
+    Remove {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+        /// `role@account`.
+        member: String,
+    },
+    /// Remove a member and refuse its rejoining.
+    Ban {
+        #[command(flatten)]
+        role: RoleArg,
+        room: String,
+        /// `role@account`.
+        member: String,
+    },
+}
+
+/// `synapse access ...`: thin calls on the daemon's `/v1/access/*` routes, each printing the
+/// daemon's reply as one JSON line. An object is `agent:role@account` or `room:name@account`.
+#[derive(Subcommand)]
+enum AccessCommand {
+    /// Give --to rights over one or more objects.
+    Grant {
+        #[command(flatten)]
+        role: RoleArg,
+        /// Who receives the rights: `role@account`.
+        #[arg(long)]
+        to: String,
+        /// What it may do: see, send, join, post, manage-room, edit-rule or grant. Repeat.
+        #[arg(long = "action", required = true)]
+        actions: Vec<String>,
+        /// What it is about: `agent:role@account` or `room:name@account`. Repeat.
+        #[arg(long = "object", required = true)]
+        objects: Vec<String>,
+        /// The grant lapses after this many seconds.
+        #[arg(long)]
+        expires_secs: Option<i64>,
+        /// Ask that decisions resting on this grant be checked live.
+        #[arg(long)]
+        sensitive: bool,
+    },
+    /// Take a grant back (what was passed on from it stops with it).
+    Revoke {
+        #[command(flatten)]
+        role: RoleArg,
+        /// The grant's id, from `grant` or `list`.
+        id: String,
+    },
+    /// The grants this role issued or holds (the account holder sees all).
+    List {
+        #[command(flatten)]
+        role: RoleArg,
+    },
+}
+
+/// `synapse trust ...`: the trust book in the keystore home (`<home>/trust/`), one JSON line per row.
+#[derive(Subcommand)]
+enum TrustCommand {
+    /// The knocks, most recent first: who claimed to be whom, and the account key id their chain
+    /// named. A knock grants nothing.
+    Knocks,
+    /// The account keys pinned, oldest first.
+    Pinned,
+    /// Pin an account key that knocked. Get the account's public key from that account's holder (not
+    /// from the knock, which carries only its hash), then type its key id back: there is no default
+    /// and no yes flag. Refused unless the key hashes to the id typed and a knock names that id.
+    Pin {
+        /// Your name for the account; reporting only.
+        #[arg(long)]
+        label: String,
+        /// The account's Ed25519 public key, 64 hex digits.
+        #[arg(long, value_name = "HEX")]
+        public_key: String,
+        /// The key id (SHA-256 of the public key, hex) typed back as the confirmation.
+        #[arg(long, value_name = "KEY_ID")]
+        confirm_key_id: String,
+    },
+}
+
+fn trust_command(home: &std::path::Path, command: TrustCommand) -> Result<(), MailError> {
+    let book = synapse::keystore::trust_book::TrustBook::open(home);
+    match command {
+        TrustCommand::Knocks => {
+            for knock in book.knocks()? {
+                println!("{}", serde_json::to_string(&knock).map_err(json_err)?);
+            }
+        }
+        TrustCommand::Pinned => {
+            for pin in book.pinned()? {
+                println!("{}", serde_json::to_string(&pin).map_err(json_err)?);
+            }
+        }
+        TrustCommand::Pin {
+            label,
+            public_key,
+            confirm_key_id,
+        } => {
+            let key = unhex32(&public_key, "--public-key")?;
+            match book.pin(&label, key, &confirm_key_id, chrono::Utc::now()) {
+                Ok(pinned) => println!("{}", serde_json::to_string(&pinned).map_err(json_err)?),
+                Err(synapse::keystore::trust_book::PinError::Store(e)) => return Err(e.into()),
+                Err(refused) => return Err(MailError::Usage(refused.to_string())),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn json_err(e: serde_json::Error) -> MailError {
+    MailError::Usage(format!("cannot print a row: {e}"))
+}
+
+/// The actions a grant can name; the daemon checks which fit which object.
+const GRANT_ACTIONS: [&str; 7] = [
+    "see",
+    "send",
+    "join",
+    "post",
+    "manage-room",
+    "edit-rule",
+    "grant",
+];
+
+fn valid_grant_object(object: &str) -> bool {
+    object
+        .strip_prefix("agent:")
+        .or_else(|| object.strip_prefix("room:"))
+        .is_some_and(synapse::rooms::valid_room_id)
+}
+
+fn access_command(home: &std::path::Path, command: AccessCommand) -> Result<(), MailError> {
+    let (role, path, body): (RoleArg, &str, Option<serde_json::Value>) = match command {
+        AccessCommand::Grant {
+            role,
+            to,
+            actions,
+            objects,
+            expires_secs,
+            sensitive,
+        } => {
+            if !synapse::rooms::valid_room_id(&to) {
+                return Err(MailError::Usage(format!("--to `{to}` is not role@account")));
+            }
+            if let Some(bad) = actions
+                .iter()
+                .find(|a| !GRANT_ACTIONS.contains(&a.as_str()))
+            {
+                return Err(MailError::Usage(format!(
+                    "--action `{bad}` is not one of {}",
+                    GRANT_ACTIONS.join(", ")
+                )));
+            }
+            if let Some(bad) = objects.iter().find(|o| !valid_grant_object(o)) {
+                return Err(MailError::Usage(format!(
+                    "--object `{bad}` is not agent:role@account or room:name@account"
+                )));
+            }
+            let mut body = json!({
+                "principal": to,
+                "actions": actions,
+                "objects": objects,
+                "sensitive": sensitive,
+            });
+            if let Some(secs) = expires_secs {
+                body["expires_secs"] = json!(secs);
+            }
+            (role, "/v1/access/grant", Some(body))
+        }
+        AccessCommand::Revoke { role, id } => (role, "/v1/access/revoke", Some(json!({"id": id}))),
+        AccessCommand::List { role } => (role, "/v1/access/grants", None),
+    };
+    let daemon = connect(home, &role)?;
+    let reply = daemon.call(&role.role, path, body.as_ref())?;
+    println!("{reply}");
+    Ok(())
+}
+
+/// The bare room name the daemon's routes take, from `name` or `name@account`.
+fn room_name(room: &str) -> Result<String, MailError> {
+    let name = room.split_once('@').map_or(room, |(name, _)| name);
+    if valid_name(name) {
+        Ok(name.to_string())
+    } else {
+        Err(MailError::Usage(format!(
+            "`{room}` is not a room name: use [A-Za-z0-9_-], at most 64 characters"
+        )))
+    }
+}
+
+/// The daemon's room-policy body for `--join` and `--allow`.
+fn join_policy(join: &str, allow: &[String]) -> Result<serde_json::Value, MailError> {
+    match (join, allow.is_empty()) {
+        ("open", true) => Ok(json!("open")),
+        ("invite-only", true) => Ok(json!("invite-only")),
+        ("allow-list", false) => Ok(json!({"allow-list": allow})),
+        ("allow-list", true) => Err(MailError::Usage(
+            "--join allow-list needs at least one --allow role@account".to_string(),
+        )),
+        ("open" | "invite-only", false) => Err(MailError::Usage(
+            "--allow only goes with --join allow-list".to_string(),
+        )),
+        _ => Err(MailError::Usage(
+            "--join is open, invite-only or allow-list".to_string(),
+        )),
+    }
+}
+
+fn room_command(home: &std::path::Path, command: RoomCommand) -> Result<(), MailError> {
+    let (role, path, body): (RoleArg, String, Option<serde_json::Value>) = match command {
+        RoomCommand::Create { role, room } => (
+            role,
+            "/v1/rooms/create".into(),
+            Some(json!({"room": room_name(&room)?})),
+        ),
+        RoomCommand::Delete { role, room } => (
+            role,
+            "/v1/rooms/delete".into(),
+            Some(json!({"room": room_name(&room)?})),
+        ),
+        RoomCommand::Policy {
+            role,
+            room,
+            join,
+            allow,
+            muted,
+        } => (
+            role,
+            "/v1/rooms/policy".into(),
+            Some(json!({
+                "room": room_name(&room)?,
+                "join_policy": join_policy(&join, &allow)?,
+                "default_send": if muted { "muted" } else { "speak" },
+            })),
+        ),
+        RoomCommand::Invite {
+            role,
+            room,
+            invitee,
+        } => (
+            role,
+            "/v1/rooms/invite".into(),
+            Some(json!({"room": room_name(&room)?, "invitee": invitee})),
+        ),
+        RoomCommand::Join {
+            role,
+            room,
+            mention_only,
+        } => {
+            let mut body = json!({"room": room_name(&room)?});
+            if let Some(flag) = mention_only {
+                body["mention_only"] = json!(flag);
+            }
+            (role, "/v1/rooms/join".into(), Some(body))
+        }
+        RoomCommand::Leave { role, room } => (
+            role,
+            "/v1/rooms/leave".into(),
+            Some(json!({"room": room_name(&room)?})),
+        ),
+        RoomCommand::Members { role, room } => (
+            role,
+            format!("/v1/rooms/members?room={}", room_name(&room)?),
+            None,
+        ),
+        RoomCommand::List { role } => (role, "/v1/rooms".into(), None),
+        RoomCommand::Remove { role, room, member } => (
+            role,
+            "/v1/rooms/remove".into(),
+            Some(json!({"room": room_name(&room)?, "member": member})),
+        ),
+        RoomCommand::Ban { role, room, member } => (
+            role,
+            "/v1/rooms/ban".into(),
+            Some(json!({"room": room_name(&room)?, "member": member})),
+        ),
+    };
+    let daemon = connect(home, &role)?;
+    let reply = daemon.call(&role.role, &path, body.as_ref())?;
+    println!("{reply}");
+    Ok(())
 }
 
 #[derive(clap::Args)]
@@ -140,11 +832,201 @@ enum IdCommand {
         #[arg(long)]
         account: String,
     },
-    /// Show the account, and with --role, that role's identity (creating its keys on first use).
+    /// Make a role's keys in a home that does NOT hold the account key (a sandbox that must not be
+    /// able to mint roles), and print their public halves for the account holder to `issue`.
+    InitRole {
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        role: String,
+    },
+    /// With the account key: certify a role's public keys (from `init-role`) and print the
+    /// certificate. The certificate is public; the role's private keys never reach this home.
+    Issue {
+        #[arg(long)]
+        role: String,
+        #[arg(long, value_name = "HEX")]
+        signing_pub: String,
+        #[arg(long, value_name = "HEX")]
+        sealing_pub: String,
+        /// Validity in days (1 to 30).
+        #[arg(long, default_value_t = 8)]
+        days: i64,
+    },
+    /// With the account key: have `--role`, which must hold role-admin, issue the sub-agent
+    /// `--label` (so `worker` under `pm` is `worker.pm@account`) a certificate for its public keys
+    /// (from `init-role`), and print the chain: the sub-agent's certificate, then the role's own.
+    /// The sub-agent never holds more than `--permission` (default: send, request-ack, ack,
+    /// state-write), nor more than the role holds, and never outlasts the role's certificate.
+    Delegate {
+        #[arg(long)]
+        role: String,
+        #[arg(long)]
+        label: String,
+        #[arg(long, value_name = "HEX")]
+        signing_pub: String,
+        #[arg(long, value_name = "HEX")]
+        sealing_pub: String,
+        /// A permission the sub-agent holds; repeat for several.
+        #[arg(long = "permission", value_name = "NAME")]
+        permissions: Vec<String>,
+        /// Validity in days (1 to 30); it is cut to the role's own certificate.
+        #[arg(long, default_value_t = 1)]
+        days: i64,
+    },
+    /// With the account key: give every role in --roles-file its own home under --lane-home-root
+    /// (`<root>/<role>`), holding that role's keys and a current certificate and NOT the account key.
+    /// A dry run unless --apply. Idempotent: a role whose certificate is current is `ok` and
+    /// untouched. Prints one line per role, `<role> <status>`, and never a key, certificate or path.
+    /// Exit 2 if any role was refused. Certificates last --days; a role within --renew-below-days of
+    /// expiry is reissued, so run this on a schedule shorter than that. Roles in one lane's home are
+    /// not hidden from other lanes of the same OS user.
+    Provision {
+        /// One role name per line; blank lines and `#` comments are skipped.
+        #[arg(long, value_name = "FILE")]
+        roles_file: std::path::PathBuf,
+        /// The directory that holds the per-role homes.
+        #[arg(long, value_name = "DIR")]
+        lane_home_root: std::path::PathBuf,
+        /// Write. Without it nothing on disk changes.
+        #[arg(long)]
+        apply: bool,
+        /// Certificate validity in days (1 to 30).
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+        /// Reissue when this many days or fewer remain.
+        #[arg(long, default_value_t = 14)]
+        renew_below_days: i64,
+    },
+    /// In a role-only home: store the certificate read from standard input for --role, after
+    /// checking that it certifies this home's keys.
+    InstallCert {
+        #[arg(long)]
+        role: String,
+    },
+    /// With the account key: give --role an extra grant (state-read-all, state-admin,
+    /// state-derive, role-admin, daemon-admin, room-create or room-admin). It takes effect when the role's certificate is next made.
+    Grant {
+        #[arg(long)]
+        role: String,
+        permission: String,
+    },
+    /// With the account key: take an extra grant back.
+    Ungrant {
+        #[arg(long)]
+        role: String,
+        permission: String,
+    },
+    /// Show the account, and with --role, that role's identity (creating its keys on first use; a
+    /// role-only home creates nothing and never renews).
     Show {
         #[arg(long)]
         role: Option<String>,
     },
+}
+
+/// The role names in a `--roles-file`: one per line, blank lines and `#` comments skipped. Refuses
+/// the whole file, before anything is written, on an invalid or repeated name.
+fn parse_roles_file(text: &str) -> Result<Vec<String>, String> {
+    let mut roles: Vec<String> = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let name = line.split('#').next().unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !synapse::keystore::valid_name(name) {
+            return Err(format!("roles file line {}: not a role name", n + 1));
+        }
+        if roles.iter().any(|r| r == name) {
+            return Err(format!("roles file line {}: role repeated", n + 1));
+        }
+        roles.push(name.to_string());
+    }
+    if roles.is_empty() {
+        return Err("roles file names no role".to_string());
+    }
+    Ok(roles)
+}
+
+fn provision_word(p: synapse::keystore::Provision, apply: bool) -> &'static str {
+    use synapse::keystore::Provision::{Created, Ok, Renewed};
+    match (p, apply) {
+        (Ok, _) => "ok",
+        (Created, true) => "created",
+        (Created, false) => "would-create",
+        (Renewed, true) => "renewed",
+        (Renewed, false) => "would-renew",
+    }
+}
+
+fn print_identity(identity: &synapse::keystore::RoleIdentity) {
+    println!("identity: {}", identity.chain[0].subject_global_id);
+    println!("signing key id: {}", identity.signing_key_id);
+    println!("sealing key id: {}", identity.sealing_key_id);
+    println!(
+        "certificate valid: {} to {}",
+        identity.not_before.to_rfc3339(),
+        identity.not_after.to_rfc3339()
+    );
+    let permissions: Vec<String> = identity
+        .permissions
+        .iter()
+        .map(Permission::as_str)
+        .collect();
+    println!("permissions: {}", permissions.join(", "));
+}
+
+/// What a delegated sub-agent holds: the names given, or the four every role holds by default.
+fn delegate_permissions(names: &[String]) -> Result<Vec<Permission>, MailError> {
+    if names.is_empty() {
+        return Ok(vec![
+            Permission::Send,
+            Permission::RequestAck,
+            Permission::Ack,
+            Permission::StateWrite,
+        ]);
+    }
+    names
+        .iter()
+        .map(|name| {
+            Permission::parse(name)
+                .ok_or_else(|| MailError::Usage(format!("`{name}` is not a permission")))
+        })
+        .collect()
+}
+
+fn parse_grant(text: &str) -> Result<Permission, MailError> {
+    match Permission::parse(text) {
+        Some(
+            p @ (Permission::StateReadAll
+            | Permission::StateAdmin
+            | Permission::StateDerive
+            | Permission::RoleAdmin
+            | Permission::DaemonAdmin
+            | Permission::RoomCreate
+            | Permission::RoomAdmin),
+        ) => Ok(p),
+        _ => Err(MailError::Usage(
+            "a grant is state-read-all, state-admin, state-derive, role-admin, daemon-admin, room-create or room-admin"
+                .to_string(),
+        )),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex32(s: &str, flag: &str) -> Result<[u8; 32], MailError> {
+    let bad = || MailError::Usage(format!("{flag} must be 64 hex digits"));
+    if s.len() != 64 || !s.is_ascii() {
+        return Err(bad());
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
+    }
+    Ok(out)
 }
 
 fn main() -> ExitCode {
@@ -177,29 +1059,137 @@ fn run(cli: Cli) -> Result<(), MailError> {
             println!("account: {}", summary.account);
             println!("account key id: {}", summary.key_id);
         }
+        Command::Id(IdCommand::InitRole { account, role }) => {
+            let keys = Keystore::init_role(&home, &account, &role)?;
+            println!("role: {role}");
+            println!("signing-pub: {}", hex(&keys.signing));
+            println!("sealing-pub: {}", hex(&keys.sealing));
+        }
+        Command::Id(IdCommand::Issue {
+            role,
+            signing_pub,
+            sealing_pub,
+            days,
+        }) => {
+            let keys = RolePublicKeys {
+                signing: unhex32(&signing_pub, "--signing-pub")?,
+                sealing: unhex32(&sealing_pub, "--sealing-pub")?,
+            };
+            let pem = Keystore::open(&home)?.issue_role_certificate(
+                &role,
+                keys,
+                chrono::Utc::now(),
+                chrono::Duration::days(days),
+            )?;
+            std::io::stdout().write_all(pem.as_bytes())?;
+        }
+        Command::Id(IdCommand::Delegate {
+            role,
+            label,
+            signing_pub,
+            sealing_pub,
+            permissions,
+            days,
+        }) => {
+            let keys = RolePublicKeys {
+                signing: unhex32(&signing_pub, "--signing-pub")?,
+                sealing: unhex32(&sealing_pub, "--sealing-pub")?,
+            };
+            let permissions = delegate_permissions(&permissions)?;
+            let pem = Keystore::open(&home)?.delegate(
+                &role,
+                &label,
+                keys,
+                &permissions,
+                chrono::Utc::now(),
+                chrono::Duration::days(days),
+            )?;
+            std::io::stdout().write_all(pem.as_bytes())?;
+        }
+        Command::Id(IdCommand::Provision {
+            roles_file,
+            lane_home_root,
+            apply,
+            days,
+            renew_below_days,
+        }) => {
+            let text = std::fs::read_to_string(&roles_file)?;
+            let roles = parse_roles_file(&text).map_err(MailError::Usage)?;
+            let store = Keystore::open(&home)?;
+            let now = chrono::Utc::now();
+            let mut refused = 0usize;
+            for role in &roles {
+                let status = store.provision_role(
+                    &lane_home_root.join(role),
+                    role,
+                    now,
+                    chrono::Duration::days(days),
+                    chrono::Duration::days(renew_below_days),
+                    apply,
+                );
+                match status {
+                    Ok(p) => println!("{role} {}", provision_word(p, apply)),
+                    Err(e) => {
+                        refused += 1;
+                        println!("{role} refused: {e}");
+                    }
+                }
+            }
+            println!(
+                "{} role(s), {} refused{}",
+                roles.len(),
+                refused,
+                if apply {
+                    ""
+                } else {
+                    " (dry run: nothing written)"
+                }
+            );
+            if refused > 0 {
+                std::io::stdout().flush()?;
+                std::process::exit(2);
+            }
+        }
+        Command::Id(IdCommand::InstallCert { role }) => {
+            let mut pem = String::new();
+            std::io::stdin().read_to_string(&mut pem)?;
+            Keystore::install_role_certificate(&home, &role, &pem)?;
+            println!("installed: {role}");
+        }
+        Command::Id(IdCommand::Grant { role, permission }) => {
+            let permission = parse_grant(&permission)?;
+            Keystore::open(&home)?.grant(&role, &permission)?;
+            println!("granted: {} to {role}", permission.as_str());
+        }
+        Command::Id(IdCommand::Ungrant { role, permission }) => {
+            let permission = parse_grant(&permission)?;
+            Keystore::open(&home)?.ungrant(&role, &permission)?;
+            println!("ungranted: {} from {role}", permission.as_str());
+        }
         Command::Id(IdCommand::Show { role }) => {
+            if let Some(role) = &role
+                && !home.join("account").join("account.key.pem").exists()
+            {
+                // A role-only home: no account key to show, nothing created, nothing renewed.
+                let store = Keystore::open_role_only(&home)?;
+                print_identity(&store.role(role, chrono::Utc::now())?);
+                return Ok(());
+            }
+
             let store = Keystore::open(&home)?;
             let summary = store.account();
             println!("account: {}", summary.account);
             println!("account key id: {}", summary.key_id);
             if let Some(role) = role {
-                let identity = store.role(&role, chrono::Utc::now())?;
-                println!("identity: {}", identity.global_id);
-                println!("signing key id: {}", identity.signing_key_id);
-                println!("sealing key id: {}", identity.sealing_key_id);
-                println!(
-                    "certificate valid: {} to {}",
-                    identity.not_before.to_rfc3339(),
-                    identity.not_after.to_rfc3339()
-                );
-                let permissions: Vec<String> = identity
-                    .permissions
-                    .iter()
-                    .map(Permission::as_str)
-                    .collect();
-                println!("permissions: {}", permissions.join(", "));
+                // `store.role` makes or renews the role's keys and certificate; what is printed is
+                // then read back through the public view, so no value that passed through the
+                // account-key-holding store reaches the print.
+                store.role(&role, chrono::Utc::now())?;
+                let view = Keystore::open_public_view(&home)?;
+                print_identity(&view.role(&role, chrono::Utc::now())?);
             }
         }
+        Command::State(command) => state_command(&home, command)?,
         Command::Claim { role } => {
             let daemon = connect(&home, &role)?;
             let claimed = daemon.claim(&role.role)?;
@@ -210,13 +1200,14 @@ fn run(cli: Cli) -> Result<(), MailError> {
             role,
             to,
             id,
+            mode,
             message,
         } => {
             check_role(&role)?;
             let to = if to.contains('@') {
                 to
             } else {
-                format!("{to}@{}", Keystore::open(&home)?.account().account)
+                format!("{to}@{}", account_name(&home)?)
             };
             let body = match message {
                 Some(text) => text.into_bytes(),
@@ -232,16 +1223,19 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 }
             };
             // Chosen here, not by the daemon, so resending with `--id` is a duplicate, not a copy.
-            let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let id = id.unwrap_or_else(synapsed_client::short_message_id);
             let daemon = connect(&home, &role)?;
-            let reply = daemon.call(
-                &role.role,
-                "/v1/send",
-                Some(&json!({"to": to, "message_id": id, "body_b64": encode_body(&body)})),
-            )?;
+            let mut request = json!({"to": to, "message_id": id, "body_b64": encode_body(&body)});
+            if let Some(mode) = mode {
+                request["mode"] = json!(mode);
+            }
+            let reply = daemon.call(&role.role, "/v1/send", Some(&request))?;
             let field = |name: &str| printable(reply[name].as_str().unwrap_or(""));
             println!("message id: {}", field("message_id"));
             println!("outcome: {}", field("outcome"));
+            if reply["warning"].is_string() {
+                println!("warning: {}", field("warning"));
+            }
         }
         Command::Inbox {
             role,
@@ -289,9 +1283,55 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 printable(reply["outcome"].as_str().unwrap_or(""))
             );
         }
-        Command::Stats { role } => {
+        Command::Room(command) => room_command(&home, command)?,
+        Command::Access(command) => access_command(&home, command)?,
+        Command::Trust(command) => trust_command(&home, command)?,
+        Command::Retire { role, target } => {
+            let daemon = connect(&home, &role)?;
+            let reply = daemon.call(
+                &role.role,
+                "/v1/roles/retire",
+                Some(&json!({"role": target})),
+            )?;
+            println!(
+                "retired: {}",
+                printable(reply["role"].as_str().unwrap_or(""))
+            );
+        }
+        Command::Revive { role, target } => {
+            let daemon = connect(&home, &role)?;
+            let reply = daemon.call(
+                &role.role,
+                "/v1/roles/revive",
+                Some(&json!({"role": target})),
+            )?;
+            println!(
+                "revived: {}",
+                printable(reply["role"].as_str().unwrap_or(""))
+            );
+        }
+        Command::Shutdown { role } => {
+            let daemon = connect(&home, &role)?;
+            daemon.call(&role.role, "/v1/daemon/shutdown", Some(&json!({})))?;
+            println!("stopping");
+        }
+        Command::Stats {
+            role,
+            daemon: about_daemon,
+        } => {
             let daemon = connect(&home, &role)?;
             let reply = daemon.call(&role.role, "/v1/stats", None)?;
+            if about_daemon {
+                println!(
+                    "{}",
+                    json!({
+                        "scope": reply["scope"],
+                        "since": reply["since"],
+                        "launch_senders_set": reply["launch_senders_set"].as_bool().unwrap_or(false),
+                    })
+                );
+                return Ok(());
+            }
             for entry in reply["roles"].as_array().into_iter().flatten() {
                 let mut entry = entry.clone();
                 entry["scope"] = reply["scope"].clone();
@@ -301,11 +1341,16 @@ fn run(cli: Cli) -> Result<(), MailError> {
         }
         #[cfg(feature = "storage")]
         Command::Storage(command) => storage(&home, command)?,
-        Command::List { role, cwd, repo } => {
+        Command::List {
+            role,
+            cwd,
+            repo,
+            include_retired,
+        } => {
             let daemon = connect(&home, &role)?;
             let reply = daemon.call(
                 &role.role,
-                &list_path(cwd.as_deref(), repo.as_deref()),
+                &list_path(cwd.as_deref(), repo.as_deref(), include_retired),
                 None,
             )?;
             for entry in reply["roles"].as_array().into_iter().flatten() {
@@ -378,12 +1423,15 @@ fn storage(home: &std::path::Path, command: StorageCommand) -> Result<(), MailEr
 }
 
 /// `/v1/list` with the filters as percent-encoded query parameters (paths hold `\`, `:` and `&`).
-fn list_path(cwd: Option<&str>, repo: Option<&str>) -> String {
+fn list_path(cwd: Option<&str>, repo: Option<&str>, include_retired: bool) -> String {
     let mut pairs = Vec::new();
     for (key, value) in [("cwd", cwd), ("repo", repo)] {
         if let Some(value) = value {
             pairs.push(format!("{key}={}", percent_encode(value)));
         }
+    }
+    if include_retired {
+        pairs.push("include_retired=true".to_string());
     }
     if pairs.is_empty() {
         "/v1/list".to_string()
@@ -427,11 +1475,16 @@ mod tests {
 
     #[test]
     fn list_path_encodes_filters() {
-        assert_eq!(list_path(None, None), "/v1/list");
+        assert_eq!(list_path(None, None, false), "/v1/list");
         assert_eq!(
-            list_path(Some(r"C:\Projects\a b&c"), Some("r")),
+            list_path(Some(r"C:\Projects\a b&c"), Some("r"), false),
             "/v1/list?cwd=C%3A%5CProjects%5Ca%20b%26c&repo=r"
         );
-        assert_eq!(list_path(None, Some("é")), "/v1/list?repo=%C3%A9");
+        assert_eq!(list_path(None, Some("é"), false), "/v1/list?repo=%C3%A9");
+        assert_eq!(list_path(None, None, true), "/v1/list?include_retired=true");
+        assert_eq!(
+            list_path(None, Some("r"), true),
+            "/v1/list?repo=r&include_retired=true"
+        );
     }
 }

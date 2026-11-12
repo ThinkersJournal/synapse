@@ -175,7 +175,7 @@ What the 24 h pilot measures for them (spec section 3, by measure number):
 synapse list --role synapse   # one line per role that has connected, "online": true (heartbeat every 30 s; window 90 s)
 synapse send --role overmind --to synapse --id pilot-overmind-0001 "smoke"
 ```
-Expect: the synapse session shows a `<channel source="synapse">` event, text starting `UNTRUSTED message from`,
+Expect: the synapse session shows a `<channel source="synapse">` event, text of the form `<sender> (untrusted): <message>`,
 within ~1-2 s. Then `synapse list` shows `pending` for `synapse` at `queued:0, leased:0` after the adapter's bounded
 attempts (up to 3 shows, ~30 s apart; same `message_id`; act once).
 Rehearsed: `send` prints `message id: overmind@rehearsal/pilot-overmind-0001` and `outcome: queued` (the id is prefixed

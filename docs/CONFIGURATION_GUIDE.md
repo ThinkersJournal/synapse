@@ -18,6 +18,7 @@ variable or a compiled-in default.
 | `SYNAPSE_ADDR` | `synapse`, `synapsed` | the daemon's address; **loopback only** (the daemon refuses any other) | `127.0.0.1:7920` |
 | `SYNAPSE_ROLE` | `synapse`, both adapters | the default for `--role` | none; an adapter without `--role` or `SYNAPSE_ROLE` exits with status 2 |
 | `SYNAPSE_LAUNCHER_ROLES` | `synapsed` | comma-separated roles allowed to read the launch signals (`GET /v1/waiting`); empty means lane launch on message is off | empty (off) |
+| `SYNAPSE_LAUNCH_SENDERS` | `synapsed` | comma-separated authenticated senders (`role` for this account, or `role@account`) whose pending mail may raise a launch signal; **empty means no signal at all, even with launcher roles set**. Also `[launch] senders` in `synapsed.toml`, re-read every 5 s. `GET /v1/stats` shows `launch_senders_set` | empty (no signals) |
 | `SYNAPSE_ALERT_ROLES` | `synapsed` | comma-separated roles that receive security alerts as mail from `daemon:alerts@<account>` (a threshold of 10 events in 5 minutes for one kind, surface and subject; digests of held alerts, at most one alert per kind and surface per 15 minutes). A role that has not claimed yet gets them when it does; a body is untrusted text like any other | empty (off: nothing changes) |
 
 An unparsable `SYNAPSE_ADDR` or a bad role name in `SYNAPSE_LAUNCHER_ROLES` or `SYNAPSE_ALERT_ROLES` makes `synapsed` exit with
@@ -28,6 +29,31 @@ Names (accounts and roles) are 1 to 64 characters: letters, digits, `-` and `_`.
 **The adapters' `--home` flag does not reach a daemon the adapter starts on demand**; set `SYNAPSE_HOME` in
 the adapter's environment instead (for Claude Code, the `env` block of its `.mcp.json` entry; see
 `docs/PILOT_T0_RUNBOOK.md` section 3a).
+
+## `synapsed.toml` (since rc.161)
+
+The four `synapsed` settings above can also be set in `<home>/synapsed.toml`; the environment wins over the file,
+the file over the defaults. `SYNAPSE_HOME` is not in the file (the file lives in the home). Read through ConfigurAnt
+0.2.34; the schema is `crates/synapsed/synapsed.schema.toml`.
+
+```toml
+[listen]
+addr = "127.0.0.1:7920"      # SYNAPSE_ADDR
+[launch]
+roles = ["agentlife-launcher"] # SYNAPSE_LAUNCHER_ROLES
+senders = ["agentlife"]        # SYNAPSE_LAUNCH_SENDERS
+[alert]
+roles = ["pm"]                 # SYNAPSE_ALERT_ROLES
+[storage]
+id = "sqlite"                  # SYNAPSE_MAILBOX_STORE (deprecated; prefer `synapse storage use`)
+[liveness]
+role_ttl_days = 30             # a role idle this long is retired; file only, at least 1
+[session]
+ttl_hours = 24                 # a session unused this long expires (401 session_expired); every call renews it; file only, at least 1
+```
+
+An unknown key, a file that does not parse, an address that is not one, or a bad role name makes `synapsed` exit 2
+naming the key. An absent file changes nothing.
 
 ## Mailbox limits (compiled in)
 

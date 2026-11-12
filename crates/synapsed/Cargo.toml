@@ -2,7 +2,7 @@
 name = "synapsed"
 version.workspace = true
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.98"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "The Synapse daemon: one per user, on loopback, serving a durable role mailbox to any agent."
 license = "MIT OR Apache-2.0"
@@ -18,8 +18,8 @@ name = "synapsed"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.130" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.130" }
+synapse = { path = "../..", version = "6.0.0-rc.241" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.241" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
 tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -28,14 +28,19 @@ base64 = "0.23"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 ring = "0.17"
 uuid = { version = "1.6", features = ["v4"] }
-synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.130", optional = true }
+configurant = "0.7"
+synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.241", optional = true }
 
 [features]
-# Off by default: serve the mailbox from PersistAnt SQLite (WAL, synchronous=FULL; declared Machine)
-# instead of redb. Selected at run time with SYNAPSE_MAILBOX_STORE=sqlite. Board 229.
+# On by default (ROADMAP row 42, slice A): a new home is served from PersistAnt SQLite (WAL,
+# synchronous=FULL; declared Machine); an existing redb home stays on redb until moved. Build with
+# `--no-default-features` for the redb-only daemon. Selected at run time with SYNAPSE_MAILBOX_STORE.
+default = ["sqlite-store"]
 sqlite-store = ["dep:synapse-mailbox-persistant"]
 
 [dev-dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.130", features = ["mailbox-conformance"] }
+synapse = { path = "../..", version = "6.0.0-rc.241", features = ["mailbox-conformance"] }
+synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.241" }
 reqwest = { version = "0.13.5", features = ["json"] }
 tempfile = "3.0"
+ed25519-dalek = { version = "3.0.0", features = ["pkcs8", "pem"] }

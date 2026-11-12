@@ -41,6 +41,12 @@ impl Home {
         };
         let init = home.run(&["id", "init", "--account", "acct"]);
         assert_eq!(init.status.code(), Some(0), "{init:?}");
+        // Slice A1: new roles are deny-all, so seed an allow-all rule the way an upgraded home has one.
+        std::fs::write(
+            home.path().join("access.json"),
+            r#"{"grants":[{"principal":"*","actions":["see","send"],"objects":["agent:*"]}]}"#,
+        )
+        .expect("seed access.json");
         home
     }
 
@@ -53,6 +59,7 @@ impl Home {
         cmd.args(args)
             .env("SYNAPSE_HOME", self.path())
             .env("SYNAPSE_ADDR", "127.0.0.1:0")
+            .env("SYNAPSE_REDELIVERY_GAPS", "")
             .env_remove("SYNAPSE_ROLE");
         cmd
     }
@@ -179,8 +186,30 @@ fn stats_prints_one_object_per_role_with_scope_and_since() {
     assert!(
         stats
             .iter()
-            .all(|r| r["scope"] == "process" && r["since"].is_string())
+            .all(|r| r["scope"] == "home" && r["since"].is_string())
     );
+}
+
+#[test]
+fn stats_daemon_says_whether_launch_senders_is_set() {
+    for (value, expected) in [(None, false), (Some("beta"), true)] {
+        let home = Home::new();
+        let mut cmd = home.command(&["stats", "--role", "alpha", "--daemon"]);
+        match value {
+            Some(v) => cmd.env("SYNAPSE_LAUNCH_SENDERS", v),
+            None => cmd.env_remove("SYNAPSE_LAUNCH_SENDERS"),
+        };
+        let out = cmd.output().expect("the synapse binary runs");
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let lines = json_lines(&String::from_utf8(out.stdout).unwrap());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(
+            lines[0]["launch_senders_set"], expected,
+            "{value:?}: {lines:?}"
+        );
+        assert_eq!(lines[0]["scope"], "home");
+        assert!(lines[0]["since"].is_string());
+    }
 }
 
 #[test]
@@ -200,6 +229,128 @@ fn a_command_against_a_stopped_daemon_starts_it() {
     let pid = home.announced_pid().expect("the CLI started a daemon");
     assert_eq!(spawned_pids(&out), vec![pid]);
     assert!(alive(pid));
+}
+
+/// `SYNAPSE_NO_AUTOSTART` makes the CLI find the owner's daemon and never start one. The same home
+/// without the variable starts a daemon (the control: the failure is the variable, not the home).
+#[test]
+fn no_autostart_never_starts_a_daemon() {
+    let home = Home::new();
+
+    let mut cmd = home.command(&["claim", "--role", "alpha"]);
+    let out = cmd.env("SYNAPSE_NO_AUTOSTART", "1").output().unwrap();
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no daemon answered"), "{err}");
+    assert!(spawned_pids(&out).is_empty(), "{out:?}");
+    assert!(home.announced_pid().is_none(), "a daemon was started");
+
+    let out = home.run(&["claim", "--role", "alpha"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(home.announced_pid().is_some(), "the control started none");
+}
+
+/// A lane's role-only home (from `id provision`) holds its keys and never the daemon's announce
+/// file; `SYNAPSE_DAEMON_HOME` points the announce lookup at the owner's home. The control is the
+/// same lane without it, which names the missing file; a stale file names itself.
+#[test]
+fn a_provisioned_lane_home_reaches_the_daemon_through_synapse_daemon_home() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    let root = tempfile::tempdir().unwrap();
+    let roles = root.path().join("roles.txt");
+    std::fs::write(
+        &roles, "lane1
+",
+    )
+    .unwrap();
+    let lanes = root.path().join("lanes");
+    home.ok(&[
+        "id",
+        "provision",
+        "--roles-file",
+        roles.to_str().unwrap(),
+        "--lane-home-root",
+        lanes.to_str().unwrap(),
+        "--apply",
+    ]);
+    let lane = lanes.join("lane1");
+    assert!(
+        !lane.join("synapsed.json").exists(),
+        "the lane holds no announce copy"
+    );
+    let claim = |daemon_home: Option<&Path>| {
+        let mut cmd = home.command(&["claim", "--role", "lane1"]);
+        cmd.env("SYNAPSE_HOME", &lane)
+            .env("SYNAPSE_NO_AUTOSTART", "1");
+        if let Some(dir) = daemon_home {
+            cmd.env("SYNAPSE_DAEMON_HOME", dir);
+        }
+        cmd.output().unwrap()
+    };
+
+    let out = claim(None);
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no announce file at"), "{err}");
+    assert!(err.contains("SYNAPSE_DAEMON_HOME"), "{err}");
+
+    let out = claim(Some(home.path()));
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        !lane.join("synapsed.json").exists(),
+        "nothing was copied into the lane"
+    );
+
+    // The daemon dies; the announce file it left is a stale copy and the message says so.
+    home.kill_daemon();
+    let out = claim(Some(home.path()));
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("synapsed.json"), "{err}");
+    assert!(err.contains("does not name a running daemon"), "{err}");
+}
+
+/// A lane's role-only home holds no account key, so no daemon could run from it: a command there
+/// never starts one, with or without `SYNAPSE_NO_AUTOSTART` (the lane's CLI and adapter must not
+/// split the lanes across daemons while the owner's is down, 2026-10-30 reconnect measurement).
+/// The control is `no_autostart_never_starts_a_daemon`: an account home does start one.
+#[test]
+fn a_role_only_home_never_starts_a_daemon_even_without_the_variable() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    let root = tempfile::tempdir().unwrap();
+    let roles = root.path().join("roles.txt");
+    std::fs::write(
+        &roles, "lane1
+",
+    )
+    .unwrap();
+    let lanes = root.path().join("lanes");
+    home.ok(&[
+        "id",
+        "provision",
+        "--roles-file",
+        roles.to_str().unwrap(),
+        "--lane-home-root",
+        lanes.to_str().unwrap(),
+        "--apply",
+    ]);
+    let lane = lanes.join("lane1");
+    home.kill_daemon();
+    let stale = home.announced_pid();
+
+    let mut cmd = home.command(&["claim", "--role", "lane1"]);
+    cmd.env("SYNAPSE_HOME", &lane)
+        .env_remove("SYNAPSE_NO_AUTOSTART")
+        .env_remove("SYNAPSE_DAEMON_HOME");
+    let out = cmd.output().unwrap();
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    assert!(spawned_pids(&out).is_empty(), "{out:?}");
+    for leftover in ["synapsed.json", "synapsed-start.err"] {
+        assert!(!lane.join(leftover).exists(), "{leftover} in the lane home");
+    }
+    assert_eq!(home.announced_pid(), stale, "a daemon was started");
 }
 
 /// Start both commands back to back (not via `output()`, which runs each to completion in turn
@@ -294,6 +445,52 @@ fn a_round_trip_between_two_roles() {
         json_lines(&home.ok(&["inbox", "--role", "beta"])).is_empty(),
         "an acked message is not redelivered"
     );
+}
+
+/// Row 41 V2: the id the CLI makes for a send is short (`<start>-<pid>-<n>` in base 36), not a UUID.
+#[test]
+fn a_send_without_an_id_gets_a_short_one() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    home.ok(&["claim", "--role", "beta"]);
+    let sent = home.ok(&["send", "--role", "alpha", "--to", "beta", "hi"]);
+    let message_id = line(&sent, "message id");
+    let client_part = message_id
+        .strip_prefix("alpha@acct/")
+        .unwrap_or_else(|| panic!("{message_id}"));
+    assert!(client_part.len() < 20, "{client_part} is not short");
+    assert!(
+        client_part
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+        "{client_part}"
+    );
+    assert!(!client_part.contains("mcp-"), "{client_part}");
+    // A second send is a different id, not a duplicate.
+    let again = home.ok(&["send", "--role", "alpha", "--to", "beta", "hi"]);
+    assert_ne!(line(&again, "message id"), message_id);
+    assert_eq!(line(&again, "outcome"), "queued");
+}
+
+/// An id made by an older build (33 bytes of client id) is opaque to the daemon: it sends,
+/// dedupes and acks as before, so a transition leaves nothing stuck.
+#[test]
+fn an_older_long_id_still_sends_dedupes_and_acks() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    home.ok(&["claim", "--role", "beta"]);
+    let old = "mcp-25684-1793488356941680200-395";
+    let args = [
+        "send", "--role", "alpha", "--to", "beta", "--id", old, "hello",
+    ];
+    let first = home.ok(&args);
+    assert_eq!(line(&first, "outcome"), "queued");
+    assert_eq!(line(&first, "message id"), format!("alpha@acct/{old}"));
+    assert_eq!(line(&home.ok(&args), "outcome"), "duplicate");
+    let inbox = json_lines(&home.ok(&["inbox", "--role", "beta"]));
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+    let acked = home.ok(&["ack", "--role", "beta", &format!("alpha@acct/{old}")]);
+    assert_eq!(line(&acked, "outcome"), "removed");
 }
 
 #[test]
@@ -802,6 +999,7 @@ fn claim_in(home: &Path) -> Output {
         .args(["claim", "--role", "alpha"])
         .env("SYNAPSE_HOME", home)
         .env("SYNAPSE_ADDR", "127.0.0.1:0")
+        .env("SYNAPSE_REDELIVERY_GAPS", "")
         .env_remove("SYNAPSE_ROLE")
         .output()
         .expect("the synapse binary runs")
@@ -987,5 +1185,248 @@ fn list_filters_on_reported_cwd_and_repo() {
     assert!(
         ids(&["--cwd", r"C:\Projects"]).is_empty(),
         "exact, not prefix"
+    );
+}
+
+/// Shared state (S2b) through the real binary: new, show, list, a stale set, a good set, history.
+#[test]
+fn state_commands_create_show_list_set_and_refuse_a_stale_revision() {
+    let home = Home::new();
+    let made: Value = serde_json::from_str(&home.ok(&[
+        "state",
+        "new",
+        "--role",
+        "alpha",
+        "--title",
+        "wire it",
+        "--party",
+        "alpha",
+        "--party",
+        "beta",
+        "--owner",
+        "alpha",
+        "--verify",
+        "crate_version:synapse,ge,6.0.0",
+    ]))
+    .unwrap();
+    assert_eq!(
+        (made["id"].as_str(), made["revision"].as_u64()),
+        (Some("T-1"), Some(1))
+    );
+    assert_eq!(made["verify"][0]["fact"], "crate_version:synapse");
+
+    let shown: Value =
+        serde_json::from_str(&home.ok(&["state", "show", "--role", "alpha", "T-1"])).unwrap();
+    assert_eq!(shown["title"], "wire it");
+    let listed = home.ok(&["state", "list", "--role", "alpha", "--state", "open"]);
+    assert_eq!(listed.lines().count(), 1);
+
+    let set = home.ok(&[
+        "state", "set", "--role", "alpha", "T-1", "--rev", "1", "--state", "waiting",
+    ]);
+    assert_eq!(serde_json::from_str::<Value>(&set).unwrap()["revision"], 2);
+    let stale = home.run(&[
+        "state", "set", "--role", "alpha", "T-1", "--rev", "1", "--state", "done",
+    ]);
+    assert_ne!(stale.status.code(), Some(0), "a stale revision must fail");
+    assert!(
+        String::from_utf8_lossy(&stale.stderr).contains("stale_revision"),
+        "{stale:?}"
+    );
+
+    let history = home.ok(&["state", "history", "--role", "alpha", "T-1"]);
+    assert_eq!(
+        history.lines().count(),
+        2,
+        "the refused write left no entry"
+    );
+
+    let bad = home.run(&[
+        "state",
+        "new",
+        "--role",
+        "alpha",
+        "--title",
+        "t",
+        "--party",
+        "alpha",
+        "--owner",
+        "alpha",
+        "--verify",
+        "not a condition",
+    ]);
+    assert_eq!(bad.status.code(), Some(2), "{bad:?}");
+}
+
+/// A claim never loads the account key: with a valid certificate already in the home, the account
+/// key file can be garbage and the state commands (which claim) still work. The old path, which
+/// opened the full keystore on every claim, fails here with a corrupt account key.
+#[test]
+fn the_state_commands_never_load_the_account_key() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    let key = home.path().join("account").join("account.key.pem");
+    assert!(key.exists());
+    std::fs::write(&key, b"not a key").unwrap();
+    // A fresh claim (the cached session would hide the keystore): it must not open the key.
+    home.ok(&["claim", "--role", "alpha"]);
+
+    let made = home.ok(&[
+        "state",
+        "new",
+        "--role",
+        "alpha",
+        "--title",
+        "no key needed",
+        "--party",
+        "alpha",
+        "--owner",
+        "alpha",
+    ]);
+    assert_eq!(serde_json::from_str::<Value>(&made).unwrap()["id"], "T-1");
+    let shown = home.ok(&["state", "show", "--role", "alpha", "T-1"]);
+    assert_eq!(
+        serde_json::from_str::<Value>(&shown).unwrap()["title"],
+        "no key needed"
+    );
+    // Control: the commands that do need the key say so, so the garbage really is in effect.
+    let id = home.run(&["id", "show", "--role", "alpha"]);
+    assert_ne!(
+        id.status.code(),
+        Some(0),
+        "the corrupted key must be unreadable: {id:?}"
+    );
+}
+
+/// A stub forge on loopback: answers by path, remembers (path, had a bearer token).
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>;
+
+fn forge_stub() -> (String, Seen) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let path = request
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("")
+                .to_string();
+            let auth = request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer");
+            log.lock().unwrap().push((path.clone(), auth));
+            let (status, body) = if path == "/api/v1/crates/synapse" {
+                (200, r#"{"crate":{"max_version":"6.0.0-rc.183"}}"#)
+            } else if path == "/repos/o/r/pulls/7" {
+                (
+                    200,
+                    r#"{"state":"closed","merged_at":"2026-10-24T00:00:00Z"}"#,
+                )
+            } else if path.starts_with("/repos/o/r/contents/docs/X.md") {
+                (404, r#"{"message":"Not Found"}"#)
+            } else {
+                (500, r#"{"message":"boom"}"#)
+            };
+            let reason = if status == 200 { "OK" } else { "Error" };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (base, seen)
+}
+
+/// The checker, end to end against a stub forge: it reports what it saw, the daemon derives, and a
+/// failed lookup answers nothing instead of "absent". The token goes to the GitHub URL only.
+#[test]
+fn the_checker_reports_forge_facts_and_the_daemon_derives_them() {
+    let home = Home::new();
+    home.ok(&["id", "grant", "--role", "checker", "state-derive"]);
+    let (forge, seen) = forge_stub();
+    home.ok(&[
+        "state",
+        "new",
+        "--role",
+        "alpha",
+        "--title",
+        "release",
+        "--party",
+        "alpha",
+        "--owner",
+        "alpha",
+        "--verify",
+        "crate_version:synapse,ge,6.0.0-rc.145",
+        "--verify",
+        "pr_state:o/r#7,eq,merged",
+        "--verify",
+        "file_at_ref:o/r@main:docs/X.md,absent",
+        "--verify",
+        "ref_sha:o/r@main,exists",
+    ]);
+
+    // A lane cannot run the checker: the grant is the checker's alone.
+    let denied = home.run(&["state", "check", "--role", "alpha", "--once"]);
+    assert_ne!(denied.status.code(), Some(0), "{denied:?}");
+
+    let out = home
+        .command(&[
+            "state",
+            "check",
+            "--role",
+            "checker",
+            "--once",
+            "--crates-url",
+            &forge,
+            "--github-url",
+            &forge,
+        ])
+        .env("SYNAPSE_CHECKER_GITHUB_TOKEN", "test-token")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "checked 4 facts: 2 found, 1 absent, 1 failed"
+    );
+
+    let shown: Value =
+        serde_json::from_str(&home.ok(&["state", "show", "--role", "alpha", "T-1"])).unwrap();
+    let verify = &shown["derived"]["verify"];
+    assert_eq!(verify[0]["satisfied"], true, "6.0.0-rc.183 >= 6.0.0-rc.145");
+    assert_eq!(verify[1]["satisfied"], true, "merged");
+    assert_eq!(verify[2]["satisfied"], true, "a 404 is absent");
+    assert_eq!(verify[3]["satisfied"], Value::Null, "a 500 answers nothing");
+    assert_eq!(verify[3]["error"], "HTTP 500");
+    assert_eq!(verify[0]["observed_by"], "checker");
+    assert_eq!(
+        shown["derived"]["stale"], true,
+        "one fact was never observed"
+    );
+    assert_eq!(shown["derived"]["last_verified"], Value::Null);
+    assert_eq!(shown["revision"], 1, "facts are not writes to the record");
+
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|(p, _)| p.starts_with("/api/v1/crates/")));
+    assert!(
+        seen.iter()
+            .filter(|(p, _)| p.starts_with("/repos/"))
+            .all(|(_, auth)| *auth),
+        "the token goes to GitHub: {seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .filter(|(p, _)| p.starts_with("/api/"))
+            .all(|(_, auth)| !*auth),
+        "and never to crates.io: {seen:?}"
     );
 }

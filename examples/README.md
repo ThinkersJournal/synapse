@@ -20,7 +20,6 @@ This directory contains practical examples demonstrating how to use the Synapse 
 
 - [`unified_transport_demo.rs`](unified_transport_demo.rs) - Unified transport layer demonstration
 - [`multi_transport_demo.rs`](multi_transport_demo.rs) - Using multiple transport types
-- [`http_transport_demo.rs`](http_transport_demo.rs) - HTTP transport implementation
 - [`email_server_demo.rs`](email_server_demo.rs) - Email server integration
 
 ### Fault Tolerance Examples

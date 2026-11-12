@@ -28,10 +28,23 @@ use crate::certificate::{AgentCertificate, Permission, chain_from_pem, chain_to_
 use crate::crypto::CryptoManager;
 use crate::sealing::SealingKeyPair;
 
+pub mod trust_book;
+
 /// How long a role certificate is valid (PM-approved, spec §4 Q3).
 pub const CERT_VALIDITY: Duration = Duration::hours(24);
 /// A certificate with less than this left is reissued on load.
 pub const RENEW_BELOW: Duration = Duration::hours(12);
+
+/// What [`Keystore::provision_role`] did, or in a dry run would do, for one role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Provision {
+    /// The role home has a certificate that is current: nothing to do, nothing done.
+    Ok,
+    /// No certificate yet (keys are made if missing and one is issued).
+    Created,
+    /// The certificate is near expiry, expired, or no longer carries the role's grants: reissued.
+    Renewed,
+}
 
 /// What went wrong, naming only the item involved.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,12 +57,82 @@ pub enum KeystoreError {
     AccountExists,
     /// `open` found no account; run `init_account` first.
     NoAccount,
+    /// A role-only operation found an account key in the home. A role-only home must never hold
+    /// one (it could mint any role), so it refuses rather than quietly using it.
+    AccountKeyPresent,
+    /// A role-only home has keys but no certificate: the account holder has to issue one.
+    NoRoleCertificate,
+    /// A role-only home's certificate has expired. It never renews itself (that needs the account key).
+    CertificateExpired,
+    /// A certificate's validity must be between 1 and 30 days.
+    InvalidValidity,
+    /// A role asked to issue a sub-agent certificate it may not (it has no delegation budget, the
+    /// sub-agent would be too deep, or it would hold a permission its creator lacks).
+    DelegationRefused(&'static str),
     /// The item is accessible to more than its owner (read, or on Windows also write or re-ACL).
     PermissionsTooOpen(&'static str),
     /// The item exists but does not parse.
     Corrupt(&'static str),
     /// The item could not be read or written.
     Io(&'static str, io::ErrorKind),
+}
+
+/// The item names this module reports, as constants: [`KeystoreError::detached`] maps onto them.
+fn known_item(item: &str) -> &'static str {
+    match item {
+        "account directory" => "account directory",
+        "account key" => "account key",
+        "account name" => "account name",
+        "role certificate" => "role certificate",
+        "role directory" => "role directory",
+        "role grants" => "role grants",
+        "role sealing key" => "role sealing key",
+        "role signing key" => "role signing key",
+        "roles directory" => "roles directory",
+        "random source" => "random source",
+        _ => "keystore file",
+    }
+}
+
+fn known_kind(kind: io::ErrorKind) -> io::ErrorKind {
+    match kind {
+        io::ErrorKind::NotFound => io::ErrorKind::NotFound,
+        io::ErrorKind::PermissionDenied => io::ErrorKind::PermissionDenied,
+        io::ErrorKind::AlreadyExists => io::ErrorKind::AlreadyExists,
+        io::ErrorKind::InvalidData => io::ErrorKind::InvalidData,
+        io::ErrorKind::UnexpectedEof => io::ErrorKind::UnexpectedEof,
+        _ => io::ErrorKind::Other,
+    }
+}
+
+impl KeystoreError {
+    /// The same error rebuilt from constants. This type only ever holds a `&'static str` item name
+    /// and an `io::ErrorKind`, so nothing in it is computed from key material: CodeQL's alert on a
+    /// claim's reply (rust/cleartext-logging, #244) was a data-flow false positive, because its
+    /// taint tracking treats the `Ok` and `Err` sides of a `?` alike. Rebuilding the error from
+    /// constants at the one place a key-loading call's refusal leaves its function makes that
+    /// plain to the analysis as well as to a reader; it is not a defence against a leak that
+    /// existed. Nothing observable changes: every variant, item and kind this module produces
+    /// maps to itself.
+    #[must_use]
+    pub fn detached(&self) -> KeystoreError {
+        match self {
+            KeystoreError::InvalidName => KeystoreError::InvalidName,
+            KeystoreError::NoHome => KeystoreError::NoHome,
+            KeystoreError::AccountExists => KeystoreError::AccountExists,
+            KeystoreError::NoAccount => KeystoreError::NoAccount,
+            KeystoreError::AccountKeyPresent => KeystoreError::AccountKeyPresent,
+            KeystoreError::NoRoleCertificate => KeystoreError::NoRoleCertificate,
+            KeystoreError::CertificateExpired => KeystoreError::CertificateExpired,
+            KeystoreError::InvalidValidity => KeystoreError::InvalidValidity,
+            KeystoreError::DelegationRefused(why) => KeystoreError::DelegationRefused(why),
+            KeystoreError::PermissionsTooOpen(item) => {
+                KeystoreError::PermissionsTooOpen(known_item(item))
+            }
+            KeystoreError::Corrupt(item) => KeystoreError::Corrupt(known_item(item)),
+            KeystoreError::Io(item, kind) => KeystoreError::Io(known_item(item), known_kind(*kind)),
+        }
+    }
 }
 
 impl fmt::Display for KeystoreError {
@@ -64,6 +147,22 @@ impl fmt::Display for KeystoreError {
             KeystoreError::NoHome => write!(f, "no keystore home: set SYNAPSE_HOME"),
             KeystoreError::AccountExists => write!(f, "an account already exists"),
             KeystoreError::NoAccount => write!(f, "no account: run `synapse id init` first"),
+            KeystoreError::AccountKeyPresent => write!(
+                f,
+                "this home holds an account key; a role-only keystore must not"
+            ),
+            KeystoreError::NoRoleCertificate => write!(
+                f,
+                "no role certificate: ask the PM to issue one for this role's public keys (`synapse id init-role` prints them)"
+            ),
+            KeystoreError::CertificateExpired => write!(
+                f,
+                "the role certificate has expired; ask the PM to re-issue it (this home has no account key to renew it)"
+            ),
+            KeystoreError::InvalidValidity => {
+                write!(f, "certificate validity must be 1 to 30 days")
+            }
+            KeystoreError::DelegationRefused(why) => write!(f, "delegation refused: {why}"),
             KeystoreError::PermissionsTooOpen(item) => {
                 write!(f, "the {item} is accessible to more than its owner")
             }
@@ -86,6 +185,26 @@ pub fn valid_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The deepest a dotted role id goes: `worker.lead.pm` is three levels (a sub-agent of a sub-agent
+/// of `pm`), a fourth is refused.
+pub const MAX_ROLE_DEPTH: usize = 3;
+
+/// A role as a mail recipient: one [`valid_name`] or up to [`MAX_ROLE_DEPTH`] of them joined by
+/// single dots, so `worker.pm` (a sub-agent of `pm`) is addressable. An empty level (`.pm`, `a..b`,
+/// `pm.`) is not. Only addressing uses this: a role still claims under a plain [`valid_name`], and
+/// no dot ever reaches a path component.
+#[must_use]
+pub fn valid_role_id(role: &str) -> bool {
+    let mut levels = 0;
+    for level in role.split('.') {
+        levels += 1;
+        if levels > MAX_ROLE_DEPTH || !valid_name(level) {
+            return false;
+        }
+    }
+    true
 }
 
 /// `$SYNAPSE_HOME`, else `%LOCALAPPDATA%\synapse` (Windows), else `$XDG_DATA_HOME/synapse`, else
@@ -139,9 +258,71 @@ impl fmt::Debug for Keystore {
 /// The grants a role certificate carries (PM-approved, spec §4 Q4), in the order a parsed
 /// certificate holds them (sorted by name), so a reloaded certificate compares equal.
 fn default_permissions() -> Vec<Permission> {
-    let mut permissions = vec![Permission::Send, Permission::RequestAck, Permission::Ack];
+    let mut permissions = vec![
+        Permission::Send,
+        Permission::RequestAck,
+        Permission::Ack,
+        Permission::StateWrite,
+    ];
     permissions.sort_by_key(Permission::as_str);
     permissions
+}
+
+/// The extra grants an account holder may give a role, beyond the defaults. `state-write` is a
+/// default; these seven are not.
+const GRANTABLE: [Permission; 7] = [
+    Permission::StateReadAll,
+    Permission::StateAdmin,
+    Permission::StateDerive,
+    Permission::RoleAdmin,
+    Permission::DaemonAdmin,
+    Permission::RoomCreate,
+    Permission::RoomAdmin,
+];
+const GRANTS: &str = "grants";
+
+/// The defaults plus `grants`, in the order a parsed certificate holds them (sorted by name).
+/// The levels of sub-agent a role holding `role-admin` may have below it (A3): its certificate says
+/// `may_delegate: 2`, the sub-agent's says 1, and a sub-agent of that one says 0 and so issues
+/// nothing. Every other role's certificate says 0.
+pub const ROLE_DELEGATION: u8 = 2;
+
+/// What a role with these extra grants may delegate: [`ROLE_DELEGATION`] for `role-admin`, else 0.
+fn delegation_budget(grants: &[Permission]) -> u8 {
+    if grants.contains(&Permission::RoleAdmin) {
+        ROLE_DELEGATION
+    } else {
+        0
+    }
+}
+
+fn with_grants(grants: &[Permission]) -> Vec<Permission> {
+    let mut permissions = default_permissions();
+    permissions.extend(grants.iter().cloned());
+    permissions.sort_by_key(Permission::as_str);
+    permissions.dedup();
+    permissions
+}
+
+/// `role`'s extra grants from `<home>/roles/<role>/grants` (one permission per line). A missing file
+/// is no grants; a name that is not grantable is `Corrupt`, never skipped.
+fn read_grants(home: &Path, role: &str) -> Result<Vec<Permission>> {
+    let path = home.join(ROLES_DIR).join(role).join(GRANTS);
+    if !exists(&path, "role grants")? {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8(read_checked(&path, "role grants")?)
+        .map_err(|_| KeystoreError::Corrupt("role grants"))?;
+    let mut out = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match Permission::parse(line) {
+            Some(p) if GRANTABLE.contains(&p) => out.push(p),
+            _ => return Err(KeystoreError::Corrupt("role grants")),
+        }
+    }
+    out.sort_by_key(Permission::as_str);
+    out.dedup();
+    Ok(out)
 }
 
 /// A role, loaded: its identity, its keys in a ready [`CryptoManager`], and its certificate.
@@ -284,6 +465,7 @@ impl Keystore {
             .as_bytes();
 
         let global_id = format!("{role}@{}", self.account);
+        let grants = read_grants(&self.home, role)?;
         let cert_path = dir.join(CERT);
         let current = if exists(&cert_path, "role certificate")? {
             read_checked(&cert_path, "role certificate")?
@@ -299,8 +481,8 @@ impl Keystore {
                     && chain[0].subject_signing_key == signing_public
                     && chain[0].subject_sealing_key == sealing_public
                     && chain[0].issuer_key_id == self.account().key_id
-                    && chain[0].may_delegate == 0
-                    && chain[0].permissions == default_permissions()
+                    && chain[0].may_delegate == delegation_budget(&grants)
+                    && chain[0].permissions == with_grants(&grants)
                     && chain[0].verify_signature(&self.account_public_key())
                     && chain[0].not_before <= now
                     && chain[0].not_after - now >= RENEW_BELOW
@@ -318,8 +500,8 @@ impl Keystore {
                     subject_sealing_key: sealing_public,
                     not_before: now,
                     not_after: now + CERT_VALIDITY,
-                    permissions: default_permissions(),
-                    may_delegate: 0,
+                    permissions: with_grants(&grants),
+                    may_delegate: delegation_budget(&grants),
                     signature: [0; 64],
                 };
                 let chain = vec![AgentCertificate::sign(unsigned, &self.account_key)];
@@ -354,6 +536,518 @@ impl Keystore {
     pub fn account_public_key(&self) -> [u8; 32] {
         self.account_key.verifying_key().to_bytes()
     }
+}
+
+/// The public halves of a role's keys: what the account holder certifies. Not secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RolePublicKeys {
+    pub signing: [u8; 32],
+    pub sealing: [u8; 32],
+}
+
+/// A keystore that holds role keys and their certificates but NOT the account key (the WSL pilot:
+/// a Linux sandbox that must not be able to mint roles). It never creates keys or certificates and
+/// never renews: an expired certificate is an error, for the account holder to answer by re-issuing.
+#[derive(Debug)]
+pub struct RoleOnlyKeystore {
+    home: PathBuf,
+    account: String,
+}
+
+fn account_key_exists(home: &Path) -> Result<bool> {
+    exists(&home.join(ACCOUNT_DIR).join(ACCOUNT_KEY), "account key")
+}
+
+fn read_account_name(home: &Path) -> Result<String> {
+    let dir = home.join(ACCOUNT_DIR);
+    check_dir(&dir, "account directory")?;
+    let name_path = dir.join(ACCOUNT_NAME);
+    if !exists(&name_path, "account name")? {
+        return Err(KeystoreError::NoAccount);
+    }
+    String::from_utf8(read_checked(&name_path, "account name")?)
+        .ok()
+        .filter(|n| valid_name(n))
+        .ok_or(KeystoreError::Corrupt("account name"))
+}
+
+/// Signing and sealing keys loaded from PEM, with their public halves.
+fn crypto_from_pems(
+    signing_pem: &str,
+    sealing_pem: &str,
+) -> Result<(CryptoManager, RolePublicKeys)> {
+    let mut crypto = CryptoManager::new();
+    crypto
+        .load_private_key(signing_pem)
+        .map_err(|_| KeystoreError::Corrupt("role signing key"))?;
+    crypto
+        .load_sealing_key_pem(sealing_pem)
+        .map_err(|_| KeystoreError::Corrupt("role sealing key"))?;
+    let signing = crypto
+        .public_key_bytes()
+        .map_err(|_| KeystoreError::Corrupt("role signing key"))?;
+    let sealing = *crypto
+        .sealing_key()
+        .ok_or(KeystoreError::Corrupt("role sealing key"))?
+        .public_key()
+        .as_bytes();
+    Ok((crypto, RolePublicKeys { signing, sealing }))
+}
+
+/// A certificate chain read from `pem` that certifies exactly `global_id` with `keys`.
+fn leaf_for(pem: &[u8], global_id: &str, keys: &RolePublicKeys) -> Result<Vec<AgentCertificate>> {
+    let chain = std::str::from_utf8(pem)
+        .ok()
+        .and_then(|pem| chain_from_pem(pem).ok())
+        .filter(|chain| {
+            chain.len() == 1
+                && chain[0].subject_global_id == global_id
+                && chain[0].subject_signing_key == keys.signing
+                && chain[0].subject_sealing_key == keys.sealing
+                && chain[0].may_delegate <= ROLE_DELEGATION
+        });
+    chain.ok_or(KeystoreError::Corrupt("role certificate"))
+}
+
+/// As [`leaf_for`], for any account: see [`chain_for_role`].
+fn leaf_for_role(pem: &[u8], role: &str, keys: &RolePublicKeys) -> Result<Vec<AgentCertificate>> {
+    chain_for_role(pem, role, None, keys)
+}
+
+/// The chain in `pem` when it certifies `keys` for `role` (A3): either one link, `<role>@<account>`
+/// from the account holder, or a delegated sub-agent's, whose leaf is `<role>.<creator's id>` under
+/// its creator's chain (at most `1 + ROLE_DELEGATION` links). `account`, when given, is the account
+/// the id must be in. Whether the signatures chain to the account is the daemon's to check at claim
+/// (this home has no account key to check them with).
+fn chain_for_role(
+    pem: &[u8],
+    role: &str,
+    account: Option<&str>,
+    keys: &RolePublicKeys,
+) -> Result<Vec<AgentCertificate>> {
+    let own = |chain: &[AgentCertificate]| {
+        let leaf = &chain[0];
+        leaf.subject_label == role
+            && leaf.subject_signing_key == keys.signing
+            && leaf.subject_sealing_key == keys.sealing
+            && leaf.may_delegate <= ROLE_DELEGATION
+    };
+    let in_account = |id: &str| {
+        account.is_none_or(|account| id.rsplit_once('@').is_some_and(|(_, a)| a == account))
+    };
+    let chain = std::str::from_utf8(pem)
+        .ok()
+        .and_then(|pem| chain_from_pem(pem).ok())
+        .filter(|chain| {
+            (1..=1 + usize::from(ROLE_DELEGATION)).contains(&chain.len())
+                && own(chain)
+                && in_account(&chain[chain.len() - 1].subject_global_id)
+                && if chain.len() == 1 {
+                    chain[0].subject_global_id.starts_with(&format!("{role}@"))
+                } else {
+                    chain[0].subject_global_id == format!("{role}.{}", chain[1].subject_global_id)
+                }
+        });
+    chain.ok_or(KeystoreError::Corrupt("role certificate"))
+}
+
+impl Keystore {
+    /// Make `role`'s keys in `home` for an account named `account` whose key is NOT here, and return
+    /// their public halves for the account holder to certify. Repeatable: existing keys are kept.
+    /// Refuses a home that holds an account key.
+    pub fn init_role(home: &Path, account: &str, role: &str) -> Result<RolePublicKeys> {
+        if !valid_name(role) || !valid_name(account) {
+            return Err(KeystoreError::InvalidName);
+        }
+        if account_key_exists(home)? {
+            return Err(KeystoreError::AccountKeyPresent);
+        }
+        let dir = home.join(ACCOUNT_DIR);
+        ensure_dir(&dir, "account directory")?;
+        write_new(&dir.join(ACCOUNT_NAME), account.as_bytes(), "account name")?;
+        if read_account_name(home)? != account {
+            return Err(KeystoreError::AccountExists);
+        }
+        let dir = home.join(ROLES_DIR).join(role);
+        ensure_dir(&dir, "role directory")?;
+        let signing_pem = load_or_create(&dir.join(SIGNING_KEY), "role signing key", || {
+            CryptoManager::new()
+                .generate_keypair()
+                .map(|(private, _public)| private)
+                .map_err(|_| KeystoreError::Io("role signing key", io::ErrorKind::Other))
+        })?;
+        let sealing_pem = load_or_create(&dir.join(SEALING_KEY), "role sealing key", || {
+            Ok(SealingKeyPair::generate().to_pkcs8_pem())
+        })?;
+        Ok(crypto_from_pems(&signing_pem, &sealing_pem)?.1)
+    }
+
+    /// Certify `keys` as `role@<this account>` for `valid_for` (1 to 30 days) with the default
+    /// permissions and no delegation, and return the certificate chain as PEM. It holds no secret.
+    pub fn issue_role_certificate(
+        &self,
+        role: &str,
+        keys: RolePublicKeys,
+        now: DateTime<Utc>,
+        valid_for: Duration,
+    ) -> Result<String> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        if valid_for < Duration::days(1) || valid_for > Duration::days(30) {
+            return Err(KeystoreError::InvalidValidity);
+        }
+        let grants = read_grants(&self.home, role)?;
+        let unsigned = AgentCertificate {
+            version: 1,
+            serial: random_bytes::<16>()?,
+            issuer_key_id: self.account().key_id,
+            subject_label: role.to_string(),
+            subject_global_id: format!("{role}@{}", self.account),
+            subject_signing_key: keys.signing,
+            subject_sealing_key: keys.sealing,
+            not_before: now,
+            not_after: now + valid_for,
+            permissions: with_grants(&grants),
+            may_delegate: delegation_budget(&grants),
+            signature: [0; 64],
+        };
+        Ok(chain_to_pem(&[AgentCertificate::sign(
+            unsigned,
+            &self.account_key,
+        )]))
+    }
+
+    /// A sub-agent's certificate chain, issued by `role` with its own key (A3): `label` under
+    /// `role`, so `worker` under `pm` is `worker.pm@<account>`, certifying `keys` for at most
+    /// `permissions`. Leaf first, then `role`'s own chain, as a claim presents it. Refused
+    /// ([`KeystoreError::DelegationRefused`]) when `role` holds no delegation budget (only a role
+    /// with `role-admin` does) or when `permissions` is not a subset of `role`'s own: a delegated
+    /// certificate cannot widen its parent. The sub-agent's window is `valid_for` at most (1 second to 30 days) and never
+    /// outlasts its creator's certificate.
+    pub fn delegate(
+        &self,
+        role: &str,
+        label: &str,
+        keys: RolePublicKeys,
+        permissions: &[Permission],
+        now: DateTime<Utc>,
+        valid_for: Duration,
+    ) -> Result<String> {
+        if !valid_name(role) || !valid_name(label) {
+            return Err(KeystoreError::InvalidName);
+        }
+        if valid_for < Duration::seconds(1) || valid_for > Duration::days(30) {
+            return Err(KeystoreError::InvalidValidity);
+        }
+        let parent = self.role(role, now)?;
+        let parent_leaf = &parent.chain[0];
+        if parent_leaf.may_delegate == 0 {
+            return Err(KeystoreError::DelegationRefused(
+                "this role holds no delegation budget",
+            ));
+        }
+        let global_id = format!("{label}.{}", parent_leaf.subject_global_id);
+        if !permissions
+            .iter()
+            .all(|permission| parent_leaf.permissions.contains(permission))
+        {
+            return Err(KeystoreError::DelegationRefused(
+                "a sub-agent cannot hold a permission its creator lacks",
+            ));
+        }
+        let key_path = self.home.join(ROLES_DIR).join(role).join(SIGNING_KEY);
+        let pem = read_checked(&key_path, "role signing key")?;
+        let pem =
+            std::str::from_utf8(&pem).map_err(|_| KeystoreError::Corrupt("role signing key"))?;
+        let signing_key = SigningKey::from_pkcs8_pem(pem)
+            .map_err(|_| KeystoreError::Corrupt("role signing key"))?;
+        let mut sorted = permissions.to_vec();
+        sorted.sort_by_key(Permission::as_str);
+        sorted.dedup();
+        let unsigned = AgentCertificate {
+            version: 1,
+            serial: random_bytes::<16>()?,
+            issuer_key_id: crate::sender_auth::key_id(&parent_leaf.subject_signing_key),
+            subject_label: label.to_string(),
+            subject_global_id: global_id,
+            subject_signing_key: keys.signing,
+            subject_sealing_key: keys.sealing,
+            not_before: now,
+            not_after: (now + valid_for).min(parent_leaf.not_after),
+            permissions: sorted,
+            may_delegate: parent_leaf.may_delegate - 1,
+            signature: [0; 64],
+        };
+        let mut chain = vec![AgentCertificate::sign(unsigned, &signing_key)];
+        chain.extend(parent.chain.iter().cloned());
+        Ok(chain_to_pem(&chain))
+    }
+
+    /// Bring `role`'s own home (`role_home`, which must NOT hold an account key) to a current
+    /// certificate: make its keys if missing, issue a certificate for `valid_for`, install it. A
+    /// certificate with more than `renew_below` left and the role's current grants is left alone, so a
+    /// second run changes nothing. With `apply` false nothing is written, not even the directory.
+    /// Returns what was (or would be) done; prints and returns no key.
+    pub fn provision_role(
+        &self,
+        role_home: &Path,
+        role: &str,
+        now: DateTime<Utc>,
+        valid_for: Duration,
+        renew_below: Duration,
+        apply: bool,
+    ) -> Result<Provision> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        let wanted = with_grants(&read_grants(&self.home, role)?);
+        let cert_present = if role_home.join(ACCOUNT_DIR).exists() {
+            if account_key_exists(role_home)? {
+                return Err(KeystoreError::AccountKeyPresent);
+            }
+            if read_account_name(role_home)? != self.account {
+                return Err(KeystoreError::AccountExists);
+            }
+            let expected = format!("{role}@{}", self.account);
+            match identity_from_files(role_home, role, Some(&expected), now) {
+                Ok(id) if id.permissions == wanted && id.not_after - now >= renew_below => {
+                    return Ok(Provision::Ok);
+                }
+                Ok(_) | Err(KeystoreError::CertificateExpired) => true,
+                Err(KeystoreError::NoRoleCertificate) => false,
+                Err(e) => return Err(e),
+            }
+        } else {
+            false
+        };
+        let done = if cert_present {
+            Provision::Renewed
+        } else {
+            Provision::Created
+        };
+        if apply {
+            let keys = Keystore::init_role(role_home, &self.account, role)?;
+            let pem = self.issue_role_certificate(role, keys, now, valid_for)?;
+            Keystore::install_role_certificate(role_home, role, &pem)?;
+        }
+        Ok(done)
+    }
+
+    /// Give `role` an extra grant (`state-read-all`, `state-admin` or `state-derive`). Takes effect
+    /// when the role's certificate is next made: a full home renews it on the next load, and
+    /// `issue_role_certificate` uses it from now on. Idempotent.
+    pub fn grant(&self, role: &str, permission: &Permission) -> Result<()> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        if !GRANTABLE.contains(permission) {
+            return Err(KeystoreError::InvalidName);
+        }
+        let dir = self.home.join(ROLES_DIR).join(role);
+        ensure_dir(&self.home.join(ROLES_DIR), "roles directory")?;
+        ensure_dir(&dir, "role directory")?;
+        let mut grants = read_grants(&self.home, role)?;
+        if !grants.contains(permission) {
+            grants.push(permission.clone());
+        }
+        grants.sort_by_key(Permission::as_str);
+        let text: String = grants.iter().map(|p| format!("{}\n", p.as_str())).collect();
+        replace(&dir.join(GRANTS), text.as_bytes(), "role grants")
+    }
+
+    /// Remove an extra grant. Idempotent.
+    pub fn ungrant(&self, role: &str, permission: &Permission) -> Result<()> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        let dir = self.home.join(ROLES_DIR).join(role);
+        let mut grants = read_grants(&self.home, role)?;
+        grants.retain(|p| p != permission);
+        let text: String = grants.iter().map(|p| format!("{}\n", p.as_str())).collect();
+        if exists(&dir, "role directory")? {
+            replace(&dir.join(GRANTS), text.as_bytes(), "role grants")?;
+        }
+        Ok(())
+    }
+
+    /// `role`'s extra grants, as set by [`Keystore::grant`].
+    pub fn grants(&self, role: &str) -> Result<Vec<Permission>> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        read_grants(&self.home, role)
+    }
+
+    /// Store an issued certificate for `role` in a role-only `home`, after checking that it
+    /// certifies THIS home's keys for `role@<account>`. (The signature is the daemon's to verify:
+    /// this home has no account key to check it with.)
+    pub fn install_role_certificate(home: &Path, role: &str, pem: &str) -> Result<()> {
+        let store = Keystore::open_role_only(home)?;
+        let (_, keys) = store.role_keys(role)?;
+        chain_for_role(pem.as_bytes(), role, Some(&store.account), &keys)?;
+        replace(
+            &home.join(ROLES_DIR).join(role).join(CERT),
+            pem.as_bytes(),
+            "role certificate",
+        )
+    }
+
+    /// Whether `home` is a lane's role-only home: it names an account but holds no account key,
+    /// so no daemon could run from it. Anything unreadable counts as not role-only.
+    #[must_use]
+    pub fn is_role_only_home(home: &Path) -> bool {
+        Keystore::open_role_only(home).is_ok()
+    }
+
+    /// Open a home that must NOT hold an account key. Refuses one that does.
+    pub fn open_role_only(home: &Path) -> Result<RoleOnlyKeystore> {
+        if account_key_exists(home)? {
+            return Err(KeystoreError::AccountKeyPresent);
+        }
+        Ok(RoleOnlyKeystore {
+            home: home.to_path_buf(),
+            account: read_account_name(home)?,
+        })
+    }
+
+    /// The public view of any home, whether or not it holds the account key: reads only the
+    /// account name, the role's keys and its certificate, and never loads the account key. For
+    /// reporting an identity that [`Keystore::role`] has already made or renewed.
+    pub fn open_public_view(home: &Path) -> Result<RoleOnlyKeystore> {
+        Ok(RoleOnlyKeystore {
+            home: home.to_path_buf(),
+            account: read_account_name(home)?,
+        })
+    }
+}
+
+impl RoleOnlyKeystore {
+    #[must_use]
+    pub fn account_name(&self) -> &str {
+        &self.account
+    }
+
+    fn role_keys(&self, role: &str) -> Result<(CryptoManager, RolePublicKeys)> {
+        role_keys_in(&self.home, role)
+    }
+
+    /// Load `role` with the certificate the account holder issued. Never creates or renews anything:
+    /// a missing certificate is [`KeystoreError::NoRoleCertificate`], an expired one
+    /// [`KeystoreError::CertificateExpired`].
+    pub fn role(&self, role: &str, now: DateTime<Utc>) -> Result<RoleIdentity> {
+        let identity = identity_from_files(&self.home, role, None, now)?;
+        // This home's account: the one-link certificate is exactly `<role>@<account>`, a delegated
+        // sub-agent's chain (A3) ends in a root certificate of this account.
+        let root = identity.chain[identity.chain.len() - 1]
+            .subject_global_id
+            .as_str();
+        let ours = if identity.chain.len() == 1 {
+            identity.global_id == format!("{role}@{}", self.account)
+        } else {
+            root.ends_with(&format!("@{}", self.account))
+        };
+        if ours {
+            Ok(identity)
+        } else {
+            Err(KeystoreError::Corrupt("role certificate"))
+        }
+    }
+}
+
+fn role_keys_in(home: &Path, role: &str) -> Result<(CryptoManager, RolePublicKeys)> {
+    if !valid_name(role) {
+        return Err(KeystoreError::InvalidName);
+    }
+    let dir = home.join(ROLES_DIR).join(role);
+    let read = |name: &str, item: &'static str| -> Result<String> {
+        let path = dir.join(name);
+        if !exists(&path, item)? {
+            return Err(KeystoreError::NoRoleCertificate);
+        }
+        String::from_utf8(read_checked(&path, item)?).map_err(|_| KeystoreError::Corrupt(item))
+    };
+    crypto_from_pems(
+        &read(SIGNING_KEY, "role signing key")?,
+        &read(SEALING_KEY, "role sealing key")?,
+    )
+}
+
+/// `role`'s identity from the files in `home`, creating and renewing nothing. With `expected` the
+/// certificate must certify exactly that id; without it, any `<role>@<account>` (the daemon checks
+/// the account at claim). This reads no account name and no account key, and the id it carries is
+/// the certificate's own subject.
+fn identity_from_files(
+    home: &Path,
+    role: &str,
+    expected: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<RoleIdentity> {
+    let (mut crypto, keys) = role_keys_in(home, role)?;
+    let cert_path = home.join(ROLES_DIR).join(role).join(CERT);
+    if !exists(&cert_path, "role certificate")? {
+        return Err(KeystoreError::NoRoleCertificate);
+    }
+    let pem = read_checked(&cert_path, "role certificate")?;
+    let chain = match expected {
+        Some(id) => leaf_for(&pem, id, &keys)?,
+        None => leaf_for_role(&pem, role, &keys)?,
+    };
+    let global_id = chain[0].subject_global_id.clone();
+    let leaf = &chain[0];
+    if now >= leaf.not_after {
+        return Err(KeystoreError::CertificateExpired);
+    }
+    if now < leaf.not_before {
+        return Err(KeystoreError::Corrupt("role certificate"));
+    }
+    Ok(RoleIdentity {
+        global_id,
+        signing_key_id: crate::sender_auth::key_id(&keys.signing),
+        sealing_key_id: crate::sender_auth::key_id(&keys.sealing),
+        not_before: leaf.not_before,
+        not_after: leaf.not_after,
+        permissions: leaf.permissions.clone(),
+        chain: chain.clone(),
+        crypto: {
+            crypto.set_certificate_chain(chain);
+            crypto
+        },
+    })
+}
+
+/// `role`'s identity from `home`, always read through the public view, so a claim, a signature or
+/// anything else built from it never derives from the account key (a claim has no business holding
+/// it). A home that holds the account key reaches for it only when the role has no usable
+/// certificate: none, expired, within [`RENEW_BELOW`] of expiry, or not carrying the grants the
+/// account holder set. Otherwise the key file is not opened at all. (The public view does not check
+/// the certificate's signature, which needs the account key; the daemon does, at claim.)
+pub fn load_role(home: &Path, role: &str, now: DateTime<Utc>) -> Result<RoleIdentity> {
+    if account_key_exists(home)? {
+        let wanted = with_grants(&read_grants(home, role)?);
+        let usable = identity_from_files(home, role, None, now)
+            .ok()
+            .filter(|id| id.permissions == wanted && id.not_after - now >= RENEW_BELOW);
+        if let Some(identity) = usable {
+            return Ok(identity);
+        }
+        make_or_renew_role(home, role, now)?;
+    }
+    identity_from_files(home, role, None, now)
+}
+
+/// Make or renew `role`'s keys and certificate with the account key, and return nothing: the one
+/// place a read-only caller crosses into the account key.
+fn make_or_renew_role(home: &Path, role: &str, now: DateTime<Utc>) -> Result<()> {
+    match Keystore::open(home).and_then(|keystore| keystore.role(role, now)) {
+        Ok(_identity) => Ok(()),
+        Err(error) => Err(error.detached()),
+    }
+}
+
+/// The account's name in `home`, whether or not the home holds the account key.
+pub fn account_name(home: &Path) -> Result<String> {
+    read_account_name(home)
 }
 
 fn load_account_key(path: &Path) -> Result<SigningKey> {
