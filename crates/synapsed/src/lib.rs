@@ -549,6 +549,7 @@ fn queue_alert(shared: &Shared, roles: &[String], fallback: &Arc<dyn SecuritySin
             to: format!("{role}@{}", shared.account),
             from: format!("{ALERT_SENDER}@{}", shared.account),
             body: body.clone(),
+            mode: None,
         };
         let result = match shared.mailbox.lock() {
             Ok(mut mailbox) => mailbox.enqueue(envelope, now).map(|_| ()),
@@ -597,6 +598,7 @@ fn deliver_state_notices_once(shared: &Shared) -> bool {
             to: format!("{}@{}", notice.to, shared.account),
             from: format!("{STATE_SENDER}@{}", shared.account),
             body: notice.body().into_bytes(),
+            mode: None,
         };
         let queued = match shared.mailbox.lock() {
             Ok(mut mailbox) => mailbox.enqueue(envelope, Utc::now()).is_ok(),
@@ -1627,11 +1629,13 @@ async fn send(
             None
         }
     };
+    let declared_mode = body.mode.clone();
     let envelope = Envelope {
         message_id: message_id.clone(),
         to: body.to,
         from: session.global_id.clone(),
         body: body_bytes,
+        mode: declared_mode,
     };
     // A post to a room fans out to its members (docs/ROOMS_DESIGN.md section 9). Presence is read
     // before the mailbox lock is taken, so the two locks are never held in the other order.
@@ -1885,6 +1889,7 @@ fn post_to_room(
             to: member.clone(),
             from: me.to_string(),
             body: envelope.body.clone(),
+            mode: envelope.mode.clone(),
         });
     }
     let outcomes = mailbox.enqueue_many(&copies, now)?;
@@ -2045,7 +2050,7 @@ async fn fetch(
         .into_iter()
         .map(|d| {
             let seen = senders.get(&d.envelope.from);
-            json!({
+            let mut message = json!({
                 "message_id": d.envelope.message_id,
                 "from": d.envelope.from,
                 "from_summary": seen.and_then(|p| p.summary.clone()),
@@ -2054,7 +2059,11 @@ async fn fetch(
                 "enqueued_at": d.enqueued_at.to_rfc3339(),
                 "lease_until": d.lease_until.to_rfc3339(),
                 "attempts": d.attempts,
-            })
+            });
+            if let Some(mode) = &d.envelope.mode {
+                message["mode"] = Value::String(mode.clone());
+            }
+            message
         })
         .collect();
     drop(senders);
@@ -2401,6 +2410,7 @@ fn flush_room_notices(shared: &Shared, notice_from: &str, now: DateTime<Utc>) {
             to: from,
             from: notice_from.to_string(),
             body: format!("[ROOM-UNACKED] room={room} id={id} unacked={unacked}").into_bytes(),
+            mode: None,
         };
         let Ok(mut mailbox) = shared.mailbox.lock() else {
             return;
@@ -2434,6 +2444,7 @@ fn unacked_notice(gone: &Exhausted, account: &str, now: DateTime<Utc>) -> Option
             gone.message_id, gone.attempts
         )
         .into_bytes(),
+        mode: None,
     })
 }
 

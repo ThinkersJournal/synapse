@@ -549,6 +549,12 @@ impl MessageView {
         self.shown["from_cwd"].as_str()
     }
 
+    /// The mode the sender declared (`L0`, `L1:message-formats/1`), when it declared one. The
+    /// daemon verified an L1 claim before queueing, but the value is still shown escaped.
+    pub fn mode(&self) -> Option<&str> {
+        self.shown["mode"].as_str()
+    }
+
     /// The daemon's delivery-attempt count for this message (it counts leases).
     pub fn attempts(&self) -> Option<u64> {
         self.attempts

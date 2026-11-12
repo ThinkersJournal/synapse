@@ -126,6 +126,10 @@ pub struct Envelope {
     pub to: String,
     pub from: String,
     pub body: Vec<u8>,
+    /// The mode the sender declared (`L0`, `L1:message-formats/1`), when it declared one. Absent
+    /// in every envelope written before ROADMAP row 41 P2b, and not written when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 impl fmt::Debug for Envelope {
@@ -1539,6 +1543,8 @@ struct Meta {
     lease: Option<Lease>,
     attempts: u32,
     body_len: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
 }
 
 #[cfg(feature = "mailbox-redb")]
@@ -1813,6 +1819,7 @@ mod redb_migration_tests {
                             to: "lane@acct".into(),
                             from: "peer@acct".into(),
                             body: b"x".to_vec(),
+                            mode: None,
                         },
                         seq: 1,
                         enqueued_at: at,
@@ -1992,6 +1999,7 @@ impl RedbTxn<'_> {
                 to: role.to_string(),
                 from: meta.from,
                 body: self.body(role, seq)?,
+                mode: meta.mode,
             },
             seq,
             enqueued_at: meta.enqueued_at,
@@ -2176,6 +2184,7 @@ impl MailTxn for RedbTxn<'_> {
             lease: stored.lease.clone(),
             attempts: stored.attempts,
             body_len,
+            mode: stored.envelope.mode.clone(),
         };
         let raw = serde_json::to_vec(&meta).map_err(|e| store_err("meta encode")(&e))?;
         {
@@ -2468,6 +2477,7 @@ mod dotted_recipient_tests {
             to: recipient.into(),
             from: "pm@acct".into(),
             body: Vec::new(),
+            mode: None,
         })
     }
 
@@ -2489,5 +2499,51 @@ mod dotted_recipient_tests {
         ] {
             assert!(!to(bad), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod mode_wire_tests {
+    use super::*;
+
+    /// A row, and an envelope, written before ROADMAP row 41 P2b carry no `mode`. They must still
+    /// read, as "no mode declared", and a message with no mode must write exactly what it wrote
+    /// before (so an older binary, which ignores unknown fields, reads a new store's old rows).
+    #[test]
+    fn an_envelope_written_before_the_mode_field_still_reads() {
+        let old = r#"{"message_id":"a/1","to":"b@acct","from":"a@acct","body":[104,105]}"#;
+        let env: Envelope = serde_json::from_str(old).unwrap();
+        assert_eq!(env.mode, None);
+        assert_eq!(
+            serde_json::to_string(&env).unwrap(),
+            old,
+            "None is not written"
+        );
+        let mut declared = env.clone();
+        declared.mode = Some("L0".into());
+        let text = serde_json::to_string(&declared).unwrap();
+        assert!(
+            text.contains(r#""mode":"L0""#),
+            "control: Some is written: {text}"
+        );
+    }
+
+    #[cfg(feature = "mailbox-redb")]
+    #[test]
+    fn a_redb_meta_row_written_before_the_mode_field_still_reads() {
+        let old = r#"{"message_id":"a/1","from":"a@acct","enqueued_at":"2026-10-02T12:00:00Z","lease":null,"attempts":0,"body_len":2}"#;
+        let meta: Meta = serde_json::from_str(old).unwrap();
+        assert_eq!(meta.mode, None);
+        assert_eq!(
+            serde_json::to_string(&meta).unwrap(),
+            old,
+            "None is not written"
+        );
+        let with: Meta = serde_json::from_str(&old.replace(
+            r#""body_len":2"#,
+            r#""body_len":2,"mode":"L1:message-formats/1""#,
+        ))
+        .unwrap();
+        assert_eq!(with.mode.as_deref(), Some("L1:message-formats/1"));
     }
 }

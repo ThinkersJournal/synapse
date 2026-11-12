@@ -90,6 +90,9 @@ fn channel_meta(message: &MessageView, from: &str, id: &str) -> Value {
     if let Some(room) = message.room() {
         meta["room"] = Value::String(escape(room, false));
     }
+    if let Some(mode) = message.mode() {
+        meta["mode"] = Value::String(escape(mode, false));
+    }
     if let Some(summary) = message.from_summary() {
         meta["sender_summary"] = Value::String(escape(summary, false));
     }
@@ -218,6 +221,24 @@ mod tests {
             shown.contains("hello"),
             "control: the body is rendered: {params}"
         );
+    }
+
+    /// ROADMAP row 41 P2b: the declared mode is a `mode` attribute of the tag, escaped like every
+    /// `meta` value, and there is no attribute at all when the sender declared none.
+    #[test]
+    fn the_declared_mode_is_a_tag_attribute_and_absent_when_undeclared() {
+        let mut wire = json!({
+            "message_id": "bob@acct/1", "from": "bob@acct", "body_b64": "aGk=",
+            "mode": "L1:message-formats/1",
+        });
+        let params = channel_params(&MessageView::from_wire(&wire));
+        assert_eq!(params["meta"]["mode"], "L1:message-formats/1", "{params}");
+        wire["mode"] = json!("L0><x");
+        let params = channel_params(&MessageView::from_wire(&wire));
+        assert_eq!(params["meta"]["mode"], "L0&gt;&lt;x", "escaped: {params}");
+        wire.as_object_mut().unwrap().remove("mode");
+        let params = channel_params(&MessageView::from_wire(&wire));
+        assert!(params["meta"].get("mode").is_none(), "{params}");
     }
 
     /// #106: the bidi controls are format characters (Cf), not control characters (Cc), so

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.241): the declared `mode` is stored with the message and shown to the receiver
+
+ROADMAP row 41, slice P2b (PM ruling 2026-11-11: option A with conditions). The mode a sender declared on `/v1/send` (P2a) is now kept on the mailbox `Envelope`, in both stores (redb and the PersistAnt store, so SQLite, PostgreSQL and MySQL too), and comes back on every delivery. `/v1/fetch` gains a `mode` field on a message that declared one, the MCP `fetch` tool shows it, and the Claude Code channel tag gains a `mode` attribute (escaped like every `meta` value). A message with no declared mode has no `mode` field anywhere, so today's lanes see no change on the wire. The sender's claim is still verified at send (an `L1` body is decoded before it is queued); the receiver is told what was declared and checked, not asked to trust it.
+
+Storage format: the new field is optional with a serde default, so every row and envelope written before this release still reads (as no mode), nothing is rewritten, and a message without a mode is written byte for byte as before. Tests: a pre-change row decodes in each store's own decoder, and one conformance case (run against the memory, redb, SQLite, PostgreSQL and MySQL stores) shows the mode surviving enqueue, fetch and a re-lease.
+
+Downgrade: an older build reads a store this one wrote (neither store rejects unknown fields) and delivers every message intact, but it does not know `mode`: it shows none, and any message it re-leases is rewritten without it. Nothing else is lost, and no migration or format stamp changes.
+
 ### Added (rc.240): a declared `mode` on the daemon send path (`L0`, or `L1:message-formats/1`)
 
 ROADMAP row 41, slice P2a (PM ruling 2026-11-10: option B). `/v1/send` takes an optional `mode`. `L0` is free prose and is not checked, so no warning and no lint count. `L1:message-formats/1` promises a MESSAGE-FORMATS v1 message: the daemon decodes it strictly with the P1 decoder and refuses a message that is not one (422 `not_message_format`, naming the rule and showing the shape, never echoing the message); a refused message is not queued or counted. Any other mode is refused (400), not guessed. With no `mode` nothing changes: the soft lint still warns and counts, so today's lanes are unaffected. `synapse send --mode` and the MCP `send` tool's new optional `mode` argument set it (`synapse_mcp_server::SendArgs` gains a field).

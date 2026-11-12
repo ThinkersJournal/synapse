@@ -137,6 +137,7 @@ pub fn env(id: &str, to: &str, body: &[u8]) -> Envelope {
         to: to.to_string(),
         from: "peer@acct".to_string(),
         body: body.to_vec(),
+        mode: None,
     }
 }
 
@@ -173,6 +174,44 @@ pub fn enqueue_then_fetch_leases_and_hides<S: MailStore>(make: impl Fn() -> S) {
         again.is_empty(),
         "a leased message is hidden until its lease expires"
     );
+}
+
+/// ROADMAP row 41 P2b: the mode a sender declared rides with the message, comes back on every
+/// delivery (a re-lease included) and is absent, not empty, when none was declared.
+pub fn a_declared_mode_rides_with_the_message_and_survives_a_re_lease<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    let mut declared = env("m1", LANE, b"hi");
+    declared.mode = Some("L1:message-formats/1".to_string());
+    mb.enqueue(declared, t0()).unwrap();
+    mb.enqueue(env("m2", LANE, b"plain"), t0()).unwrap();
+    let first = mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
+    assert_eq!(ids_of(&first), ["m1", "m2"]);
+    assert_eq!(
+        first[0].envelope.mode.as_deref(),
+        Some("L1:message-formats/1")
+    );
+    assert_eq!(
+        first[1].envelope.mode, None,
+        "no mode declared, none invented"
+    );
+    let again = mb
+        .fetch(LANE, epoch, 10, None, t0() + Duration::seconds(61))
+        .unwrap();
+    assert_eq!(
+        ids_of(&again),
+        ["m1", "m2"],
+        "control: both were redelivered"
+    );
+    assert_eq!(again[0].attempts, 2);
+    assert_eq!(
+        again[0].envelope.mode.as_deref(),
+        Some("L1:message-formats/1")
+    );
+    assert_eq!(again[1].envelope.mode, None);
 }
 
 pub fn an_expired_lease_redelivers_in_order<S: MailStore>(make: impl Fn() -> S) {
@@ -1069,6 +1108,10 @@ pub fn run_all<S: MailStore>(make: impl Fn() -> S) {
     case("enqueue_then_fetch_leases_and_hides", || {
         enqueue_then_fetch_leases_and_hides(&make)
     });
+    case(
+        "a_declared_mode_rides_with_the_message_and_survives_a_re_lease",
+        || a_declared_mode_rides_with_the_message_and_survives_a_re_lease(&make),
+    );
     case("an_expired_lease_redelivers_in_order", || {
         an_expired_lease_redelivers_in_order(&make)
     });

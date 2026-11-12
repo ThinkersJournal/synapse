@@ -270,3 +270,26 @@ async fn a_declared_mode_decides_how_the_body_is_checked() {
     let none = submit(&d, &a, "d7", "hello there").await;
     assert!(none["warning"].is_string(), "{none}");
 }
+
+#[tokio::test]
+async fn a_declared_mode_reaches_the_receiver_and_an_undeclared_one_leaves_no_trace() {
+    let d = start(&[]).await;
+    let a = claim(&d, "a").await;
+    let b = claim(&d, "b").await;
+    let good = "[READY] synapse#1 head=abc merge=CLEAN checks=3/3 red=0 threads=0 codacy=- sourcery=- files=2";
+    let (status, reply) = send_with_mode(&d, &a, "p1", good, "L1:message-formats/1").await;
+    assert_eq!(status, 200, "{reply}");
+    let (status, reply) = send_with_mode(&d, &a, "p2", "free prose", "L0").await;
+    assert_eq!(status, 200, "{reply}");
+    submit(&d, &a, "p3", "no mode declared").await;
+    let (status, got) = call(&d, Some(&b), "/v1/fetch", Some(json!({"max": 10}))).await;
+    assert_eq!(status, 200, "{got}");
+    let messages = got["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 3, "{got}");
+    assert_eq!(messages[0]["mode"], "L1:message-formats/1", "{got}");
+    assert_eq!(messages[1]["mode"], "L0", "{got}");
+    assert!(
+        messages[2].get("mode").is_none(),
+        "no mode key when none was declared: {got}"
+    );
+}
