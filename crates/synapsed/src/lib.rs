@@ -1756,6 +1756,16 @@ async fn send(
         "message_id": message_id,
         "outcome": match outcome { Enqueued::Queued => "queued", Enqueued::Duplicate => "duplicate" },
     });
+    // Whether anyone is there to read it: the sender already passed the `send` (and so `see`) check
+    // above, so this tells it nothing it could not see in `list`. Additive; `queued` stays true either way.
+    {
+        let now = Utc::now();
+        let last_seen = locked(&shared.presence)?.get(&to).map(|p| p.last_seen);
+        reply["recipient"] = json!({
+            "online": last_seen.is_some_and(|at| now - at <= shared.online_window),
+            "last_seen": last_seen,
+        });
+    }
     if let Some(warning) = lint {
         reply["warning"] = Value::String(warning);
     }

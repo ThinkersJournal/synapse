@@ -1233,6 +1233,16 @@ fn run(cli: Cli) -> Result<(), MailError> {
             let field = |name: &str| printable(reply[name].as_str().unwrap_or(""));
             println!("message id: {}", field("message_id"));
             println!("outcome: {}", field("outcome"));
+            // Queued is true either way; say when nobody is there to read it right now.
+            if reply["recipient"]["online"] == json!(false) {
+                match reply["recipient"]["last_seen"].as_str() {
+                    Some(at) => println!(
+                        "recipient: offline (last seen {}); the message waits for it",
+                        printable(at)
+                    ),
+                    None => println!("recipient: offline (not seen since the daemon started); the message waits for it"),
+                }
+            }
             if reply["warning"].is_string() {
                 println!("warning: {}", field("warning"));
             }
