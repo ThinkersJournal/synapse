@@ -27,6 +27,9 @@ pub use derived::{
     Staleness, derive,
 };
 
+mod export;
+pub use export::{View, escape_cell, render_json, render_markdown};
+
 #[cfg(feature = "mailbox-redb")]
 mod redb_backend;
 #[cfg(feature = "mailbox-redb")]

@@ -232,6 +232,20 @@ enum StateCommand {
         #[arg(long)]
         clear_blocked_on: bool,
     },
+    /// Render the board: every record you may read, as one Markdown table (default) or JSON, with
+    /// what the checker observed beside each claim, and STALE / NEVER VERIFIED marked.
+    Export {
+        #[command(flatten)]
+        role: RoleArg,
+        /// `md` (default) or `json`.
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// Comma-separated states.
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        party: Option<String>,
+    },
     /// Print a record's history, one JSON entry per line.
     History {
         #[command(flatten)]
@@ -399,6 +413,56 @@ fn state_command(home: &std::path::Path, command: StateCommand) -> Result<(), Ma
             let body = json!({ "id": id, "expected_revision": rev, "patch": patch });
             let daemon = connect(home, &role)?;
             print_record(&daemon.call(&role.role, "/v1/state/patch", Some(&body))?)?;
+        }
+        StateCommand::Export {
+            role,
+            format,
+            state,
+            party,
+        } => {
+            if format != "md" && format != "json" {
+                return Err(MailError::Usage("--format is md or json".into()));
+            }
+            let mut path = String::from("/v1/state/list?");
+            if let Some(state) = state {
+                if !state.bytes().all(|b| b.is_ascii_lowercase() || b == b',') {
+                    return Err(MailError::Usage(
+                        "--state is comma-separated state names".into(),
+                    ));
+                }
+                path.push_str(&format!("state={state}&"));
+            }
+            if let Some(party) = party {
+                if !valid_name(&party) {
+                    return Err(MailError::Usage("--party is a role name".into()));
+                }
+                path.push_str(&format!("party={party}&"));
+            }
+            let daemon = connect(home, &role)?;
+            let reply = daemon.call(&role.role, path.trim_end_matches(['?', '&']), None)?;
+            // The daemon already applied the access rule; each row is a record with `derived` beside it.
+            let views = reply["records"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|row| {
+                    let record = serde_json::from_value(row.clone())?;
+                    let derived = serde_json::from_value(row["derived"].clone())?;
+                    Ok((record, derived))
+                })
+                .collect::<Result<Vec<synapse::state::View>, serde_json::Error>>()
+                .map_err(|e| {
+                    MailError::Usage(format!(
+                        "the daemon sent a record this build cannot read: {e}"
+                    ))
+                })?;
+            let now = chrono::Utc::now();
+            let mut out = std::io::stdout().lock();
+            if format == "json" {
+                writeln!(out, "{}", synapse::state::render_json(&views, now))?;
+            } else {
+                out.write_all(synapse::state::render_markdown(&views, now).as_bytes())?;
+            }
         }
         StateCommand::Check {
             role,
