@@ -486,7 +486,7 @@ async fn stats_says_whether_launch_senders_is_set() {
 #[tokio::test]
 async fn send_tells_the_sender_whether_the_recipient_is_online() {
     let d = start(&[]).await;
-    let _alpha = claim(&d, "alpha").await;
+    let alpha = claim(&d, "alpha").await;
     let sender = claim(&d, "beta").await;
     let send = |to: &'static str| {
         let (d, sender) = (&d, sender.clone());
@@ -500,7 +500,14 @@ async fn send_tells_the_sender_whether_the_recipient_is_online() {
             .await
         }
     };
-    // Just claimed, so inside the 300 ms window.
+    // A claim alone is not presence: nobody has heard from alpha yet.
+    let (s, unheard) = send("alpha@acct").await;
+    assert_eq!(s, 200, "{unheard}");
+    assert_eq!(unheard["recipient"]["online"], false, "{unheard}");
+    assert!(unheard["recipient"]["last_seen"].is_null(), "{unheard}");
+    // Alpha speaks, so it is inside the 300 ms window.
+    let (s, _) = post(&d, "/v1/heartbeat", Some(&alpha), json!({})).await;
+    assert_eq!(s, 200);
     let (s, fresh) = send("alpha@acct").await;
     assert_eq!(s, 200, "{fresh}");
     assert_eq!(fresh["outcome"], "queued");
