@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added, Docs (rc.246): a new lane may see and message the PM from its first claim, and the role liveness part 2 design note (ROADMAP row 31, #355 and #354)
+
+Two entries that merged without a stamp, stamped together because `tools/stamp-version.py` takes one fragment at a time.
+
+**Added (#355): a new lane may see and message the PM, and be seen and messaged by it, from its first claim (ROADMAP row 31, liveness part 2, Gap 2)**
+The daemon now writes, at a role's very first claim (epoch 1), a see+send grant each way between that role and every role in `access.default_peers` (`SYNAPSE_DEFAULT_PEERS`, `synapsed.toml`; default `pm`; empty restores the old deny-all). The grants are tagged `provisioned` in `access.json` and are ordinary grants: the account holder can narrow or revoke them, and a later claim never rewrites them. A role already claimed is not touched, and a role is never paired with itself. Why: a lane claimed after the access migration was deny-all both ways, so its first send to the PM answered `unknown_recipient` and a message to it never queued, which would also defeat wake-on-message (measured with ml-convertant on the pilot, 2026-11-12). Design: `docs/ROLE_LIVENESS_ALERT_DESIGN.md` Gap 2; it said `provision` would write them, but `provision` is offline and cannot reach the daemon, so the daemon does it at the first claim. `Grant` gains `provisioned` (serde default; stored files load unchanged); `Access::add_default_pair` and `Daemon::with_default_peers` are new. Tests: `crates/synapsed/tests/access.rs` (first claim pairs both ways and stays deny-all toward others; no peers means deny-all; a second claim writes nothing), `tests/settings.rs`; sabotage of the epoch test fails two of them.
+
+**Docs (#354): role liveness part 2, a stall alert for queued mail and default grants for a new lane (ROADMAP row 31)**
+Design only (`docs/ROLE_LIVENESS_ALERT_DESIGN.md`), no code. Covers the silent queue to an offline role (a `[STALLED]` notice and a `recipient.online` field on send), the deny-all finding for lanes claimed after the access migration (default grants applied at provision time), and a lapsing admin grant. Four slices and four open calls for the PM.
+
 ### Added (rc.245): `send` says whether the recipient is online (ROADMAP row 31, liveness part 2, Gap 1 / S1)
 
 The `POST /v1/send` reply gains an additive `recipient: {online, last_seen}`: `online` is the same test `list` uses (heard from within the online window, 90 s by default) and `last_seen` is the last time it was heard from, or null if not since the daemon started. `outcome` is unchanged, `queued` stays true, and the sender had already passed the `send` check, so this discloses nothing `list` would not. `synapse send` prints `recipient: offline (last seen ...)` when the role is offline, so a sender sees at send time that the message waits for nobody. Why: bonefish, capant, cpufish and others had mail queued for days with nothing telling the sender (2026-11-12). The stall notice itself is S2. Test: `send_tells_the_sender_whether_the_recipient_is_online` in `crates/synapsed/tests/launch.rs`.
