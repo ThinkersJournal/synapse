@@ -793,10 +793,10 @@ impl SynapseMcpServer {
                 safe_text(bad)
             ));
         }
-        if let Some(party) = &args.party {
-            if !synapse::keystore::valid_name(party) {
-                return refuse("a party is a role name".to_string());
-            }
+        if let Some(party) = &args.party
+            && !synapse::keystore::valid_name(party)
+        {
+            return refuse("a party is a role name".to_string());
         }
         let mut path = String::from("/v1/state/list?");
         if !args.states.is_empty() {
