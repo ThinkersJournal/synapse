@@ -51,6 +51,20 @@ restart = true
 description = "a role idle this many days is retired (hidden from list, kept); at least 1"
 
 [[value]]
+key = "liveness.stall_after_secs"
+type = "int"
+default = 900
+restart = true
+description = "mail waiting this many seconds for an offline role is announced (STALLED) to its senders and the alert roles; at least 1"
+
+[[value]]
+key = "liveness.stall_realert_secs"
+type = "int"
+default = 21600
+restart = true
+description = "a role that stays stalled is announced again no sooner than this many seconds; at least 1"
+
+[[value]]
 key = "session.ttl_hours"
 type = "int"
 default = 24

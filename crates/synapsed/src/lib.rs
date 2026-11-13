@@ -294,6 +294,14 @@ struct Shared {
     room_unacked: Mutex<RoomUnacked>,
     /// A role idle longer than this is retired by the sweep.
     role_ttl: chrono::Duration,
+    /// Mail waits this long for an offline role before its senders are told (`[STALLED]`).
+    stall_after: chrono::Duration,
+    /// A role that stays stalled is announced again no sooner than this.
+    stall_realert: chrono::Duration,
+    /// The alert roles, who also get one `[STALLED]` digest per announcement.
+    stall_digest_roles: Vec<String>,
+    /// When each role was last announced as stalled; in memory, so a restart may announce once more.
+    stalled_at: Mutex<HashMap<String, DateTime<Utc>>>,
     /// A session unused longer than this is expired (401 `session_expired`).
     session_ttl: chrono::Duration,
 }
@@ -782,6 +790,10 @@ impl Daemon {
                 room_rate: Mutex::new(HashMap::new()),
                 room_unacked: Mutex::new(BTreeMap::new()),
                 role_ttl: chrono::Duration::days(DEFAULT_ROLE_TTL_DAYS),
+                stall_after: chrono::Duration::minutes(15),
+                stall_realert: chrono::Duration::hours(6),
+                stall_digest_roles: Vec::new(),
+                stalled_at: Mutex::new(HashMap::new()),
                 session_ttl: chrono::Duration::hours(DEFAULT_SESSION_TTL_HOURS),
             },
         })
@@ -805,6 +817,7 @@ impl Daemon {
         if roles.is_empty() {
             return self;
         }
+        self.shared.stall_digest_roles = roles.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(ALERT_QUEUE);
         let fallback = self.shared.security.sink.clone();
         let sink = Arc::new(AlertSink::new(
@@ -895,6 +908,22 @@ impl Daemon {
     #[must_use]
     pub fn with_redelivery_check(mut self, every: std::time::Duration) -> Daemon {
         self.shared.redelivery_check = every;
+        self
+    }
+
+    /// Sets how long mail may wait for an offline role before its senders and the alert roles are
+    /// told with one `[STALLED]` notice (default 15 minutes), and how long before a role that stays
+    /// stalled is announced again (default 6 hours). Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_stall(
+        mut self,
+        after: std::time::Duration,
+        realert: std::time::Duration,
+    ) -> Daemon {
+        self.shared.stall_after =
+            chrono::Duration::from_std(after).unwrap_or(self.shared.stall_after);
+        self.shared.stall_realert =
+            chrono::Duration::from_std(realert).unwrap_or(self.shared.stall_realert);
         self
     }
 
@@ -989,6 +1018,7 @@ impl Daemon {
                             Err(e) => eprintln!("synapsed: role liveness not written: {e}"),
                         }
                     }
+                    stall_sweep(&shared, now);
                 }
             })
         };
@@ -2416,6 +2446,164 @@ fn report_exhausted(shared: &Shared) {
         }
     }
     flush_room_notices(shared, &notice_from, now);
+}
+
+/// A short age: seconds under two minutes, minutes under two hours, else hours.
+fn age_text(age: chrono::Duration) -> String {
+    let age = age.max(chrono::Duration::zero());
+    if age < chrono::Duration::minutes(2) {
+        format!("{}s", age.num_seconds())
+    } else if age < chrono::Duration::hours(2) {
+        format!("{}m", age.num_minutes())
+    } else {
+        format!("{}h", age.num_hours())
+    }
+}
+
+/// One stalled role to announce: its id, each sender with how many of its messages wait, and the
+/// oldest arrival.
+type StalledRole = (String, Vec<(String, usize)>, DateTime<Utc>);
+
+/// Tell people when mail waits for a role that is not there (ROADMAP row 31, liveness part 2). A role
+/// is stalled when it is offline, has queued mail, and both its silence and its oldest waiting message
+/// are older than `stall_after`. Each stalled role is announced once, then again no sooner than
+/// `stall_realert`: one `[STALLED] role=<r> waiting=<n> oldest=<age> online=false` to each sender
+/// of the waiting mail, and one digest to the alert roles. The daemon's own notices are not counted as
+/// waiting mail, so there is never a notice about a notice.
+fn stall_sweep(shared: &Shared, now: DateTime<Utc>) {
+    // Before the daemon has been up for the online window every presence is empty.
+    if now - shared.started_at < shared.online_window {
+        return;
+    }
+    let seen: HashMap<String, DateTime<Utc>> = match shared.presence.lock() {
+        Ok(p) => p.iter().map(|(id, p)| (id.clone(), p.last_seen)).collect(),
+        Err(_) => return,
+    };
+    let (roles, waiting) = {
+        let Ok(mailbox) = shared.mailbox.lock() else {
+            return;
+        };
+        let roles = mailbox.roles_snapshot();
+        let any = match mailbox.depths(now) {
+            Ok(depths) => depths.values().any(|d| d.queued > 0),
+            Err(_) => return,
+        };
+        if !any {
+            return;
+        }
+        match mailbox.waiting_senders(now) {
+            Ok(waiting) => (roles, waiting),
+            Err(e) => {
+                eprintln!("synapsed: waiting mail not read for stall notices: {e}");
+                return;
+            }
+        }
+    };
+    let notice_from = format!("{NOTICE_SENDER}@{}", shared.account);
+    let daemon_senders = [
+        notice_from.clone(),
+        format!("{ALERT_SENDER}@{}", shared.account),
+        format!("{STATE_SENDER}@{}", shared.account),
+    ];
+    let mut announce: Vec<StalledRole> = Vec::new();
+    for (role_id, senders) in &waiting {
+        let Some(record) = roles.roles.get(role_id) else {
+            continue;
+        };
+        let senders: Vec<(&String, &(usize, DateTime<Utc>))> = senders
+            .iter()
+            .filter(|(from, _)| !daemon_senders.contains(*from))
+            .collect();
+        let Some(oldest) = senders.iter().map(|(_, (_, at))| *at).min() else {
+            continue;
+        };
+        let last_heard = [
+            Some(record.claimed_at),
+            record.last_seen,
+            seen.get(role_id).copied(),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(record.claimed_at);
+        if now - last_heard <= shared.online_window
+            || now - last_heard < shared.stall_after
+            || now - oldest < shared.stall_after
+        {
+            continue;
+        }
+        let Ok(mut announced) = shared.stalled_at.lock() else {
+            return;
+        };
+        if announced
+            .get(role_id)
+            .is_some_and(|at| now - *at < shared.stall_realert)
+        {
+            continue;
+        }
+        announced.insert(role_id.clone(), now);
+        announce.push((
+            role_id.clone(),
+            senders
+                .iter()
+                .map(|(from, (n, _))| ((*from).clone(), *n))
+                .collect(),
+            oldest,
+        ));
+    }
+    if announce.is_empty() {
+        return;
+    }
+    let short = |id: &str| {
+        id.split_once('@')
+            .map_or(id.to_string(), |(r, _)| r.to_string())
+    };
+    let mut notices = Vec::new();
+    for (role_id, senders, oldest) in &announce {
+        for (from, n) in senders {
+            notices.push((
+                from.clone(),
+                format!(
+                    "[STALLED] role={} waiting={n} oldest={} online=false",
+                    short(role_id),
+                    age_text(now - *oldest)
+                ),
+            ));
+        }
+    }
+    let list = announce
+        .iter()
+        .map(|(role_id, senders, oldest)| {
+            format!(
+                "{}:{}:{}",
+                short(role_id),
+                senders.iter().map(|(_, n)| n).sum::<usize>(),
+                age_text(now - *oldest)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    for role in &shared.stall_digest_roles {
+        notices.push((
+            format!("{role}@{}", shared.account),
+            format!("[STALLED] digest roles={} list={list}", announce.len()),
+        ));
+    }
+    let Ok(mut mailbox) = shared.mailbox.lock() else {
+        return;
+    };
+    for (to, body) in notices {
+        let envelope = Envelope {
+            message_id: format!("{notice_from}/stalled-{}", uuid::Uuid::new_v4()),
+            to,
+            from: notice_from.clone(),
+            body: body.into_bytes(),
+            mode: None,
+        };
+        if let Err(e) = mailbox.enqueue(envelope, now) {
+            eprintln!("synapsed: a [STALLED] notice was not queued: {e}");
+        }
+    }
 }
 
 /// `(sender/client id, room)` of a room copy's id `<sender>/<id>#<room>`.
