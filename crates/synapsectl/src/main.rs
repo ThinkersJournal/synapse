@@ -1240,7 +1240,9 @@ fn run(cli: Cli) -> Result<(), MailError> {
                         "recipient: offline (last seen {}); the message waits for it",
                         printable(at)
                     ),
-                    None => println!("recipient: offline (not seen since the daemon started); the message waits for it"),
+                    None => println!(
+                        "recipient: offline (not seen since the daemon started); the message waits for it"
+                    ),
                 }
             }
             if reply["warning"].is_string() {
