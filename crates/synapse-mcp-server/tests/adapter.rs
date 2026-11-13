@@ -834,14 +834,19 @@ async fn share_grants_lists_and_revokes_what_a_creator_owns() {
         bob.ok("rooms", json!({})).await["rooms"][0]["room"],
         "lounge@acct"
     );
-    assert_eq!(
-        alice.ok("grants", json!({})).await["grants"][0]["id"],
-        id.as_str()
-    );
-    assert_eq!(
-        bob.ok("grants", json!({})).await["grants"][0]["id"],
-        id.as_str()
-    );
+    // The listing also carries the lane's default rights with the PM (written at its first claim),
+    // so look for the share by id rather than by position.
+    for who in [&alice, &bob] {
+        let listed = who.ok("grants", json!({})).await;
+        assert!(
+            listed["grants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|g| g["id"] == id.as_str()),
+            "{listed}"
+        );
+    }
     // bob may not take back what alice gave him; alice may.
     assert!(
         !bob.refused("revoke_share", json!({"id": id}))

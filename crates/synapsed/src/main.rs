@@ -119,6 +119,7 @@ async fn main() -> ExitCode {
                 .collect(),
         )
         .with_alert_roles(settings.alert_roles.clone())
+        .with_default_peers(settings.default_peers.clone())
         .with_launch_senders(settings.launch_senders.clone())
         .with_launcher(synapsed::LauncherConfig {
             roles: settings.launcher_roles.clone(),

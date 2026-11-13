@@ -31,6 +31,9 @@ pub struct Settings {
     pub launch_senders: Vec<String>,
     /// Roles that receive security alerts as mail.
     pub alert_roles: Vec<String>,
+    /// Roles a new lane may see and message, and be seen and messaged by, from its first claim
+    /// (default `pm`; empty means a new lane is deny-all).
+    pub default_peers: Vec<String>,
     /// A role idle this many days is retired (file only; default 30).
     pub role_ttl_days: u32,
     /// A session unused this many hours expires (file only; default 24).
@@ -129,6 +132,7 @@ pub fn load(env: &BTreeMap<String, String>, file: Option<&str>) -> Result<Settin
         launcher_roles: roles("launch.roles")?,
         launch_senders,
         alert_roles: roles("alert.roles")?,
+        default_peers: roles("access.default_peers")?,
         role_ttl_days,
         session_ttl_hours,
         redelivery_gaps_secs,

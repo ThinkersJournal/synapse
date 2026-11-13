@@ -276,9 +276,18 @@ fn the_access_commands_share_list_and_revoke() {
     assert_eq!(after["rooms"][0]["room"], "lounge@acct", "{after}");
     // The grant is listed for the one who issued it and the one who holds it.
     let mine = json_of(&home.ok(&["access", "list", "--role", "pm"]));
-    assert_eq!(mine["grants"][0]["id"], id.as_str(), "{mine}");
+    // Each list also carries the default rights with the PM (written at a lane's first claim), so
+    // look for the grant by id rather than by position.
+    let has = |list: &serde_json::Value| {
+        list["grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["id"] == id.as_str())
+    };
+    assert!(has(&mine), "{mine}");
     let theirs = json_of(&home.ok(&["access", "list", "--role", "dev"]));
-    assert_eq!(theirs["grants"][0]["id"], id.as_str(), "{theirs}");
+    assert!(has(&theirs), "{theirs}");
     // dev may not revoke what pm gave it; pm may.
     let out = home.run(&["access", "revoke", "--role", "dev", &id]);
     assert_ne!(out.status.code(), Some(0), "the holder revoked the grant");
