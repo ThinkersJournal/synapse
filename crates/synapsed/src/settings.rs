@@ -36,6 +36,10 @@ pub struct Settings {
     pub default_peers: Vec<String>,
     /// A role idle this many days is retired (file only; default 30).
     pub role_ttl_days: u32,
+    /// Mail waits this many seconds for an offline role before its senders are told.
+    pub stall_after_secs: u64,
+    /// A role that stays stalled is announced again after this many seconds.
+    pub stall_realert_secs: u64,
     /// A session unused this many hours expires (file only; default 24).
     pub session_ttl_hours: u32,
     /// Seconds an unacked message stays hidden after each delivery (see `MailConfig::redelivery_gaps`);
@@ -92,6 +96,15 @@ pub fn load(env: &BTreeMap<String, String>, file: Option<&str>) -> Result<Settin
         .ok()
         .filter(|d| *d >= 1)
         .ok_or_else(|| format!("liveness.role_ttl_days is {days}: it must be at least 1"))?;
+    let secs = |key: &str| -> Result<u64, String> {
+        let n: i64 = config.get(key).map_err(|e| e.to_string())?;
+        u64::try_from(n)
+            .ok()
+            .filter(|s| *s >= 1)
+            .ok_or_else(|| format!("{key} is {n}: it must be at least 1"))
+    };
+    let stall_after_secs = secs("liveness.stall_after_secs")?;
+    let stall_realert_secs = secs("liveness.stall_realert_secs")?;
     let hours: i64 = config.get("session.ttl_hours").map_err(|e| e.to_string())?;
     let session_ttl_hours = u32::try_from(hours)
         .ok()
@@ -131,6 +144,8 @@ pub fn load(env: &BTreeMap<String, String>, file: Option<&str>) -> Result<Settin
         store_pin_from_env,
         launcher_roles: roles("launch.roles")?,
         launch_senders,
+        stall_after_secs,
+        stall_realert_secs,
         alert_roles: roles("alert.roles")?,
         default_peers: roles("access.default_peers")?,
         role_ttl_days,

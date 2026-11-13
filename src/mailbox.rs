@@ -271,6 +271,9 @@ pub struct Depth {
     pub oldest_enqueued_at: Option<DateTime<Utc>>,
 }
 
+/// [`Mailbox::waiting_senders`]: per role, per sender, how many messages wait and since when.
+pub type WaitingSenders = BTreeMap<String, BTreeMap<String, (usize, DateTime<Utc>)>>;
+
 /// What [`Mailbox::depths`] reads for one role: queued and leased counts and the oldest arrival.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct QueueDepth {
@@ -981,6 +984,44 @@ impl<S: MailStore> Mailbox<S> {
                 })
                 .map_err(MailError::Store)?;
                 out.insert(role.clone(), depth);
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// For every role that has not retired: its queued (not currently leased) mail, as
+    /// `sender -> (count, oldest arrival)`. Reads every message of a role, so call it only when some
+    /// role is known to have queued mail. Changes nothing.
+    pub fn waiting_senders(&self, now: DateTime<Utc>) -> Result<WaitingSenders, MailError> {
+        self.live()?;
+        let roles = self.roles.snapshot();
+        let mut out = BTreeMap::new();
+        self.store.read(&mut |txn| {
+            out.clear();
+            for (role, record) in &roles.roles {
+                if record.retired_at.is_some() {
+                    continue;
+                }
+                let mut senders: BTreeMap<String, (usize, DateTime<Utc>)> = BTreeMap::new();
+                txn.scan(role, &mut |stored| {
+                    let leased = stored
+                        .lease
+                        .as_ref()
+                        .is_some_and(|held| held.epoch == record.epoch && held.until > now);
+                    if !leased {
+                        let entry = senders
+                            .entry(stored.envelope.from.clone())
+                            .or_insert((0, stored.enqueued_at));
+                        entry.0 += 1;
+                        entry.1 = entry.1.min(stored.enqueued_at);
+                    }
+                    true
+                })
+                .map_err(MailError::Store)?;
+                if !senders.is_empty() {
+                    out.insert(role.clone(), senders);
+                }
             }
             Ok(())
         })?;

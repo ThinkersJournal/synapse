@@ -110,6 +110,10 @@ async fn main() -> ExitCode {
     };
     let daemon = daemon
         .with_role_ttl_days(settings.role_ttl_days)
+        .with_stall(
+            std::time::Duration::from_secs(settings.stall_after_secs),
+            std::time::Duration::from_secs(settings.stall_realert_secs),
+        )
         .with_session_ttl_hours(settings.session_ttl_hours)
         .with_redelivery_gaps(
             settings
