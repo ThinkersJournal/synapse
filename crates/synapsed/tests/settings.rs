@@ -194,3 +194,30 @@ gaps_secs = []
     let many = vec!["60"; 17].join(",");
     assert!(settings(&[("SYNAPSE_REDELIVERY_GAPS", &many)], None).is_err());
 }
+
+#[test]
+fn a_new_lane_defaults_to_the_pm_as_its_only_peer_and_the_file_or_environment_can_change_it() {
+    let s = settings(&[], None).unwrap();
+    assert_eq!(
+        s.default_peers,
+        ["pm"],
+        "the ruling: the PM only (2026-11-12)"
+    );
+    let s = settings(&[("SYNAPSE_DEFAULT_PEERS", "")], None).unwrap();
+    assert!(
+        s.default_peers.is_empty(),
+        "empty leaves a new lane deny-all"
+    );
+    let s = settings(
+        &[],
+        Some(
+            "[access]
+default_peers = [\"pm\", \"mlmf\"]
+",
+        ),
+    )
+    .unwrap();
+    assert_eq!(s.default_peers, ["pm", "mlmf"]);
+    let bad = settings(&[("SYNAPSE_DEFAULT_PEERS", "has space")], None);
+    assert!(bad.is_err(), "a bad role name is refused");
+}
