@@ -1,0 +1,4 @@
+{ "mcpServers": { "synapse": {
+  "command": "/home/lane-commysdk/.local/bin/synapse-claude-channel",
+  "args": ["--role", "lane-commysdk", "--home", "/home/lane-commysdk/synapse-home"],
+  "env": { "SYNAPSE_HOME": "/home/lane-commysdk/synapse-home", "SYNAPSE_ADDR": "127.0.0.1:7920", "SYNAPSE_REMOTE_DAEMON": "1" } } } }
