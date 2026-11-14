@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.250): how a refused launch is cleared, and that a dry run spends it (ROADMAP row 49)
+
+The lane-launch spec's C4a now says what is built: the `launch-clear` route and client method exist, the `synapsectl launch-clear` CLI does not (new low-priority ROADMAP row 49). It also records that a refusal is terminal for the signal id (role plus the enqueue time of the oldest queued message), so new mail never re-signals it, that a launcher dry run with the wake switch off spends the signal as `refused`, that `launch: null` is normal, and that the sender allowlist (no wildcard, environment over file) gates which mail signals.
+
 ### Added (rc.249): `state_get` and `state_list` MCP tools, the read half of shared state (ROADMAP row 30, S5)
 
 The MCP adapter gains two read tools over `/v1/state/get` and `/v1/state/list`, so a lane that gets an id-only `T-41 changed` notice can read the record without the CLI. The caller's access is the daemon's: a non-party gets `not_found` and an empty list. Every string in a result (title, notes, condition values, observed values, errors) is free text another agent wrote and is shown escaped like a message body (control and bidi characters as `\u{..}`), and both descriptions say UNTRUSTED. Ids and states are checked before they reach a URL. `derived` carries what the checker observed, so a never-observed record reads as stale with no `last_verified`. No write tool yet (`state_patch` is a later slice). Test `state_tools_read_what_a_party_may_and_escape_what_another_agent_wrote`; with the escaping removed from `state_get` it fails.
