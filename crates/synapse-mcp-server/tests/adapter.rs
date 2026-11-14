@@ -273,6 +273,8 @@ async fn the_tool_set_and_the_untrusted_wording() {
             "send",
             "set_summary",
             "share",
+            "state_get",
+            "state_list",
             "whoami"
         ]
     );
@@ -432,6 +434,79 @@ async fn control_characters_in_a_body_or_a_summary_cannot_reach_the_model_raw() 
         .refused("set_summary", json!({"summary": "y".repeat(501)}))
         .await;
     assert!(refusal.contains("500"), "{refusal}");
+}
+
+/// Create a state record as `role` straight over the daemon's API (the adapter has no write tool yet).
+async fn create_record(home: &Home, role: &str, new: Value) {
+    let path = home.path().to_path_buf();
+    let role = role.to_string();
+    tokio::task::spawn_blocking(move || {
+        let daemon = Daemon::connect_existing(&path).expect("connect");
+        daemon
+            .call(&role, "/v1/state/create", Some(&new))
+            .expect("create the record");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn state_tools_read_what_a_party_may_and_escape_what_another_agent_wrote() {
+    let home = Home::new();
+    let alice = agent(&home, "alice").await;
+    let bob = agent(&home, "bob").await;
+    let carol = agent(&home, "carol").await;
+    create_record(
+        &home,
+        "alice",
+        json!({"title": "ship \u{202e}gnp.exe", "parties": ["alice", "bob"], "owner": "alice",
+               "notes": "see \u{2066}this",
+               "verify": [{"fact": "pr_state:o/r#1", "op": "eq", "value": "merged"}]}),
+    )
+    .await;
+
+    let got = bob.ok("state_get", json!({"id": "T-1"})).await;
+    let title = got["record"]["title"].as_str().unwrap();
+    assert!(
+        title.contains("\\u{202e}") && !title.contains('\u{202e}'),
+        "{got}"
+    );
+    assert!(
+        !got["record"]["notes"]
+            .as_str()
+            .unwrap()
+            .contains('\u{2066}'),
+        "{got}"
+    );
+    // Nothing was observed, so the record says so rather than claiming it is verified.
+    assert_eq!(got["record"]["derived"]["stale"], true, "{got}");
+    assert!(got["record"]["derived"]["last_verified"].is_null(), "{got}");
+
+    let listed = bob
+        .ok("state_list", json!({"states": ["open"], "party": "bob"}))
+        .await;
+    assert_eq!(listed["records"].as_array().unwrap().len(), 1, "{listed}");
+
+    // A non-party sees nothing: not the record, not in a list.
+    let refusal = carol.refused("state_get", json!({"id": "T-1"})).await;
+    assert!(
+        refusal.contains("not_found") || refusal.contains("no such"),
+        "{refusal}"
+    );
+    let none = carol.ok("state_list", json!({})).await;
+    assert_eq!(none["records"].as_array().unwrap().len(), 0, "{none}");
+
+    // Malformed arguments are refused before the daemon hears them.
+    for bad in ["T-1/../x", "41", "T-", "T-1?x=1"] {
+        let why = alice.refused("state_get", json!({"id": bad})).await;
+        assert!(why.contains("T-41"), "{bad}: {why}");
+    }
+    let why = alice
+        .refused("state_list", json!({"states": ["nope"]}))
+        .await;
+    assert!(why.contains("unknown state"), "{why}");
+    let why = alice.refused("state_list", json!({"party": "a&b"})).await;
+    assert!(why.contains("role name"), "{why}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

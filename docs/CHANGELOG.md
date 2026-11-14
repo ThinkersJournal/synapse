@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.249): `state_get` and `state_list` MCP tools, the read half of shared state (ROADMAP row 30, S5)
+
+The MCP adapter gains two read tools over `/v1/state/get` and `/v1/state/list`, so a lane that gets an id-only `T-41 changed` notice can read the record without the CLI. The caller's access is the daemon's: a non-party gets `not_found` and an empty list. Every string in a result (title, notes, condition values, observed values, errors) is free text another agent wrote and is shown escaped like a message body (control and bidi characters as `\u{..}`), and both descriptions say UNTRUSTED. Ids and states are checked before they reach a URL. `derived` carries what the checker observed, so a never-observed record reads as stale with no `last_verified`. No write tool yet (`state_patch` is a later slice). Test `state_tools_read_what_a_party_may_and_escape_what_another_agent_wrote`; with the escaping removed from `state_get` it fails.
+
 ### Added (rc.248): `synapse state export`, the board as Markdown or JSON (ROADMAP row 30, S6)
 
 `synapse state export [--format md|json] [--state open,blocked] [--party <role>]` renders every record the caller may read, through `/v1/state/list`, so the access rule is the daemon's and an export never shows more than `list`. Markdown is one table: id, title, owner, state, what it is blocked on and what it must verify, each condition with the checker's observation, its age and whether it is satisfied, and the last verification with its age and observer. A record whose conditions were never observed says **NEVER VERIFIED**, a stale one **STALE**, an unblocked one **UNBLOCKED**; a record with nothing to verify says so rather than claiming either. Rows sort by numeric id and the only wall-clock value is `generated_at`, so two exports diff cleanly. Every free-text field is escaped for Markdown (markup, `|`, newlines, control and bidi characters). The renderers are `synapse::state::{render_markdown, render_json}`, pure over `(Record, Derived)`.
