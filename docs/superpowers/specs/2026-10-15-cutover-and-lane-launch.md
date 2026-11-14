@@ -206,6 +206,15 @@ Two mechanisms, both named: (1) **automatic** on the role's next successful clai
 state is stale), and (2) **explicit** `POST /v1/launch-clear {role}` (CLI `synapsectl launch-clear <role>`),
 allowed only to `launcher_roles`. Clearing resets `attempts` and lets the next read re-signal.
 
+**As built (2026-11-14):** the route and `synapsed_client::Daemon::launch_clear(launcher_role, target_role)` exist; the
+`synapsectl launch-clear` CLI does NOT (ROADMAP row 49, low priority). A refusal is terminal for the signal id, which is the
+role plus the enqueue time of its OLDEST queued message, so new mail behind it never re-signals and there is no retry
+window: only a clear, the role's next claim, or the oldest message leaving re-raises it. **A launcher dry run with the wake
+switch off still answers `refused`, and that spends the signal**: the role shows `launch: {state: refused}` and stays
+silent until cleared. Clear after turning the switch on. `launch: null` in `/v1/list` is normal: a role has launch state
+only after a signal was evaluated for it. The sender allowlist (`SYNAPSE_LAUNCH_SENDERS` or `[launch] senders` in
+`synapsed.toml`; no wildcard, the environment wins over the file) also gates which mail raises a signal.
+
 ### C4b. Alive but stuck is not unreachable
 
 A lane whose session is alive but stopped at a dialog (the development-channels dialog, for example) is
