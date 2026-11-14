@@ -1,7 +1,0 @@
-Added: client-signed state writes, phase 1 (ROADMAP row 30 S7a, row 50)
-
-A writer can now sign a shared-state write with its own role key. The signed text binds the signer, the daemon instance, the operation, the record id, the expected revision, a SHA-256 of the canonical body (sorted keys, derived from the parsed value), a nonce and a time. The daemon checks it against the leaf key its claim proved, refuses a stale (more than 120 s), foreign-audience, tampered, other-role or replayed signature with 403 `bad_signature` and a `state_denied` security event, and stores it in the history entry inside the hash chain. Entries written before this hash exactly as they did, so every existing chain still verifies.
-
-Unsigned writes are still accepted in this phase and are recorded as unsigned. Every read says so: `derived.signing` (`signed`, `unsigned`, `bad`) on `state_get`, `state_list` and `/v1/state/get|list`, and a `writes` column in `synapse state export` (**UNSIGNED**, **PARTLY SIGNED**, **BAD SIGNATURE**). `synapse state new|set` sign by default (`Daemon::state_create_signed` and `state_patch_signed` in `synapsed-client`). The route's body takes an optional `sig {nonce, signed_at, signature}`. Requiring signatures is ROADMAP row 50.
-
-Breaking for code that builds `HistoryEntry` or implements `StateStore` by hand: `HistoryEntry` has a new `sig` field and the trait has `create_signed` and `patch_signed` (`create` and `patch` remain as provided methods that record an unsigned write).
