@@ -1,3 +1,0 @@
-Docs: how a refused launch is cleared, and that a dry run spends it (ROADMAP row 49)
-
-The lane-launch spec's C4a now says what is built: the `launch-clear` route and client method exist, the `synapsectl launch-clear` CLI does not (new low-priority ROADMAP row 49). It also records that a refusal is terminal for the signal id (role plus the enqueue time of the oldest queued message), so new mail never re-signals it, that a launcher dry run with the wake switch off spends the signal as `refused`, that `launch: null` is normal, and that the sender allowlist (no wildcard, environment over file) gates which mail signals.
