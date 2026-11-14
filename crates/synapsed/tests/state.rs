@@ -468,3 +468,227 @@ async fn the_checker_reports_facts_and_readers_see_them_derived() {
     );
     d.stop().await;
 }
+
+// ---- S7a: client-signed writes ----
+
+/// The `sig` object `role` would send for this write, signed for `audience` at `signed_at`.
+#[allow(clippy::too_many_arguments)]
+fn sig_for(
+    d: &Running,
+    role: &str,
+    audience: &str,
+    op: &str,
+    target: &str,
+    expected: u64,
+    body_hash: &str,
+    nonce: &str,
+    signed_at: DateTime<Utc>,
+) -> Value {
+    let identity = Keystore::open(d.home.path())
+        .unwrap()
+        .role(role, Utc::now())
+        .unwrap();
+    let text = synapse::state::signing_text(&synapse::state::SignedWrite {
+        signer: &identity.global_id,
+        audience,
+        op,
+        target,
+        expected_revision: expected,
+        body_hash,
+        nonce,
+        signed_at,
+    });
+    let signature = identity.crypto.sign_message(&text).unwrap();
+    json!({
+        "nonce": nonce,
+        "signed_at": signed_at.to_rfc3339(),
+        "signature": synapse::state::sig_hex(&signature),
+    })
+}
+
+fn create_hash(record: &Value) -> String {
+    let typed: synapse::state::NewRecord = serde_json::from_value(record.clone()).unwrap();
+    synapse::state::body_hash(&typed)
+}
+
+fn now_after_start(d: &Running) -> DateTime<Utc> {
+    Utc::now().max(d.started_at + chrono::Duration::seconds(1))
+}
+
+const NONCE_A: &str = "000102030405060708090a0b0c0d0e0f";
+const NONCE_B: &str = "101112131415161718191a1b1c1d1e1f";
+
+#[tokio::test]
+async fn a_signed_write_is_recorded_as_signed_and_an_unsigned_one_as_unsigned() {
+    let d = start(&[]).await;
+    let a = claim(&d, "alpha").await;
+    let inst = instance_id(&d);
+
+    let record = new_record("signed");
+    let mut body = record.clone();
+    body["sig"] = sig_for(
+        &d,
+        "alpha",
+        &inst,
+        "create",
+        "-",
+        0,
+        &create_hash(&record),
+        NONCE_A,
+        now_after_start(&d),
+    );
+    let (status, created) = call(&d, Some(&a), "/v1/state/create", Some(body)).await;
+    assert_eq!(status, 200, "{created}");
+
+    let patch = json!({"notes": "hello"});
+    let typed: synapse::state::Patch = serde_json::from_value(patch.clone()).unwrap();
+    let sig = sig_for(
+        &d,
+        "alpha",
+        &inst,
+        "patch",
+        "T-1",
+        1,
+        &synapse::state::body_hash(&typed),
+        NONCE_B,
+        now_after_start(&d),
+    );
+    let (status, patched) = call(
+        &d,
+        Some(&a),
+        "/v1/state/patch",
+        Some(json!({"id": "T-1", "expected_revision": 1, "patch": patch, "sig": sig})),
+    )
+    .await;
+    assert_eq!(status, 200, "{patched}");
+
+    // An unsigned write is still accepted in phase 1, and is marked as such on every read.
+    let (status, _) = call(
+        &d,
+        Some(&a),
+        "/v1/state/patch",
+        Some(json!({"id": "T-1", "expected_revision": 2, "patch": {"notes": "x"}})),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (_, got) = call(&d, Some(&a), "/v1/state/get?id=T-1", None).await;
+    assert_eq!(
+        got["record"]["derived"]["signing"],
+        json!({"signed": 2, "unsigned": 1, "bad": 0}),
+        "{got}"
+    );
+    let (_, listed) = call(&d, Some(&a), "/v1/state/list", None).await;
+    assert_eq!(listed["records"][0]["derived"]["signing"]["unsigned"], 1);
+    let (_, history) = call(&d, Some(&a), "/v1/state/history?id=T-1", None).await;
+    let entries = history["entries"].as_array().unwrap();
+    assert!(entries[0]["sig"]["signature"].is_string());
+    assert!(entries[2].get("sig").is_none(), "{history}");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn a_signature_that_is_not_the_sessions_own_is_refused_and_an_event() {
+    let d = start(&[]).await;
+    let (a, _b) = (claim(&d, "alpha").await, claim(&d, "beta").await);
+    let inst = instance_id(&d);
+    let record = new_record("forged");
+    let hash = create_hash(&record);
+    let at = now_after_start(&d);
+
+    // Beta's key signs, alpha's session sends it.
+    let mut body = record.clone();
+    body["sig"] = sig_for(&d, "beta", &inst, "create", "-", 0, &hash, NONCE_A, at);
+    let (status, refused) = call(&d, Some(&a), "/v1/state/create", Some(body)).await;
+    assert_eq!(
+        (status, refused["error"].as_str()),
+        (403, Some("bad_signature")),
+        "{refused}"
+    );
+
+    // Alpha's key, but over a different body.
+    let mut body = new_record("tampered");
+    body["sig"] = sig_for(&d, "alpha", &inst, "create", "-", 0, &hash, NONCE_A, at);
+    assert_eq!(
+        call(&d, Some(&a), "/v1/state/create", Some(body)).await.0,
+        403
+    );
+
+    // Signed for another daemon.
+    let mut body = record.clone();
+    body["sig"] = sig_for(
+        &d,
+        "alpha",
+        "another-instance",
+        "create",
+        "-",
+        0,
+        &hash,
+        NONCE_A,
+        at,
+    );
+    assert_eq!(
+        call(&d, Some(&a), "/v1/state/create", Some(body)).await.0,
+        403
+    );
+
+    // Signed too long ago.
+    let mut body = record.clone();
+    let old = Utc::now() - chrono::Duration::seconds(600);
+    body["sig"] = sig_for(&d, "alpha", &inst, "create", "-", 0, &hash, NONCE_A, old);
+    assert_eq!(
+        call(&d, Some(&a), "/v1/state/create", Some(body)).await.0,
+        403
+    );
+
+    // A malformed sig is a 400, not a pass.
+    let mut body = record.clone();
+    body["sig"] = json!({"nonce": "zz", "signed_at": at.to_rfc3339(), "signature": "zz"});
+    assert_eq!(
+        call(&d, Some(&a), "/v1/state/create", Some(body)).await.0,
+        400
+    );
+
+    // None of them created anything.
+    let (_, listed) = call(&d, Some(&a), "/v1/state/list", None).await;
+    assert_eq!(listed["records"], json!([]), "{listed}");
+    let events = std::fs::read_to_string(d.home.path().join(SECURITY_EVENTS_FILE)).unwrap();
+    assert!(events.contains("state_denied"), "{events}");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn one_signed_write_is_accepted_once() {
+    let d = start(&[]).await;
+    let a = claim(&d, "alpha").await;
+    let inst = instance_id(&d);
+    let record = new_record("once");
+    let sig = sig_for(
+        &d,
+        "alpha",
+        &inst,
+        "create",
+        "-",
+        0,
+        &create_hash(&record),
+        NONCE_A,
+        now_after_start(&d),
+    );
+    let mut body = record.clone();
+    body["sig"] = sig.clone();
+    assert_eq!(
+        call(&d, Some(&a), "/v1/state/create", Some(body.clone()))
+            .await
+            .0,
+        200
+    );
+    let (status, again) = call(&d, Some(&a), "/v1/state/create", Some(body)).await;
+    assert_eq!(
+        (status, again["error"].as_str()),
+        (403, Some("bad_signature")),
+        "{again}"
+    );
+    let (_, listed) = call(&d, Some(&a), "/v1/state/list", None).await;
+    assert_eq!(listed["records"].as_array().unwrap().len(), 1, "{listed}");
+    d.stop().await;
+}

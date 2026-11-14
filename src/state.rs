@@ -28,7 +28,13 @@ pub use derived::{
 };
 
 mod export;
+mod signed;
 pub use export::{View, escape_cell, render_json, render_markdown};
+pub use signed::{
+    SignedWrite, Signing, WRITE_DOMAIN_TAG, WRITE_WINDOW_SECS, WriteSig, body_hash, canonical_body,
+    entry_signature_ok, fresh, hex as sig_hex, signing_text, summarize, unhex as sig_unhex,
+    verify_text,
+};
 
 #[cfg(feature = "mailbox-redb")]
 mod redb_backend;
@@ -328,6 +334,9 @@ pub struct HistoryEntry {
     pub writer: String,
     pub written_at: DateTime<Utc>,
     pub change: Change,
+    /// The writer's own signature, when the client signed (S7). Inside the hash when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sig: Option<WriteSig>,
     pub prev_hash: String,
     pub hash: String,
 }
@@ -339,6 +348,8 @@ struct HashInput<'a> {
     writer: &'a str,
     written_micros: i64,
     change: &'a Change,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sig: &'a Option<WriteSig>,
     prev_hash: &'a str,
 }
 
@@ -350,6 +361,7 @@ impl HistoryEntry {
             writer: &self.writer,
             written_micros: self.written_at.timestamp_micros(),
             change: &self.change,
+            sig: &self.sig,
             prev_hash: &self.prev_hash,
         };
         // Struct field order is fixed, so this serialisation is deterministic.
@@ -567,15 +579,37 @@ pub struct Filter {
 
 /// The transport-neutral API. The daemon, the CLI, agent tool servers and a future Commy binding all call this.
 pub trait StateStore {
+    /// Create a record. `sig` is the writer's verified signature, kept in the history entry; the
+    /// caller (a binding) has already checked it against the session's key.
+    fn create_signed(
+        &self,
+        caller: &Caller,
+        new: NewRecord,
+        sig: Option<WriteSig>,
+        now: DateTime<Utc>,
+    ) -> Result<Record, StateError>;
+    /// [`StateStore::create_signed`] without a signature: the entry is recorded as unsigned.
     fn create(
         &self,
         caller: &Caller,
         new: NewRecord,
         now: DateTime<Utc>,
-    ) -> Result<Record, StateError>;
+    ) -> Result<Record, StateError> {
+        self.create_signed(caller, new, None, now)
+    }
     fn get(&self, caller: &Caller, id: &str) -> Result<Option<Record>, StateError>;
     fn list(&self, caller: &Caller, filter: &Filter) -> Result<Vec<Record>, StateError>;
     /// Apply `patch` iff the record is still at `expected`; see [`StateError::StaleRevision`].
+    fn patch_signed(
+        &self,
+        caller: &Caller,
+        id: &str,
+        expected: u64,
+        patch: Patch,
+        sig: Option<WriteSig>,
+        now: DateTime<Utc>,
+    ) -> Result<Record, StateError>;
+    /// [`StateStore::patch_signed`] without a signature: the entry is recorded as unsigned.
     fn patch(
         &self,
         caller: &Caller,
@@ -583,7 +617,9 @@ pub trait StateStore {
         expected: u64,
         patch: Patch,
         now: DateTime<Utc>,
-    ) -> Result<Record, StateError>;
+    ) -> Result<Record, StateError> {
+        self.patch_signed(caller, id, expected, patch, None, now)
+    }
     fn history(&self, caller: &Caller, id: &str) -> Result<Vec<HistoryEntry>, StateError>;
     /// A record with what is derived about it at `now`.
     fn get_view(
@@ -705,13 +741,15 @@ impl<B: Backend> StateEngine<B> {
                 states.insert(id.clone(), r.state);
             }
         }
-        Ok(derive(
+        let mut derived = derive(
             record,
             &|spec| facts.get(spec.as_str()).cloned(),
             &|id| states.get(id).copied(),
             now,
             &self.staleness,
-        ))
+        );
+        derived.signing = summarize(&txn.history(&record.id)?);
+        Ok(derived)
     }
 }
 
@@ -794,6 +832,7 @@ fn append_entry(
     record: &Record,
     writer: &str,
     change: Change,
+    sig: Option<WriteSig>,
     now: DateTime<Utc>,
 ) -> Result<(), StateError> {
     let prev_hash = txn
@@ -806,6 +845,7 @@ fn append_entry(
         writer: writer.to_string(),
         written_at: now,
         change,
+        sig,
         prev_hash,
         hash: String::new(),
     };
@@ -831,10 +871,11 @@ fn append_entry(
 }
 
 impl<B: Backend> StateStore for StateEngine<B> {
-    fn create(
+    fn create_signed(
         &self,
         caller: &Caller,
         new: NewRecord,
+        sig: Option<WriteSig>,
         now: DateTime<Utc>,
     ) -> Result<Record, StateError> {
         if !(caller.write || caller.admin) {
@@ -847,7 +888,7 @@ impl<B: Backend> StateStore for StateEngine<B> {
             let id = format!("T-{}", txn.next_number()?);
             let record = from_new(&id, &new, now);
             validate(&record, txn)?;
-            append_entry(txn, &record, &caller.role, Change::Create(new), now)?;
+            append_entry(txn, &record, &caller.role, Change::Create(new), sig, now)?;
             // The baseline `refresh_derived` compares against: a change after this is a flip.
             txn.put_derived_flags(&record.id, &self.derive_in(&*txn, &record, now)?.flags())?;
             Ok(record)
@@ -873,12 +914,13 @@ impl<B: Backend> StateStore for StateEngine<B> {
         })
     }
 
-    fn patch(
+    fn patch_signed(
         &self,
         caller: &Caller,
         id: &str,
         expected: u64,
         patch: Patch,
+        sig: Option<WriteSig>,
         now: DateTime<Utc>,
     ) -> Result<Record, StateError> {
         if patch.fields().is_empty() {
@@ -909,7 +951,7 @@ impl<B: Backend> StateStore for StateEngine<B> {
             next.revision = expected + 1;
             next.updated_at = now;
             validate(&next, txn)?;
-            append_entry(txn, &next, &caller.role, Change::Patch(patch), now)?;
+            append_entry(txn, &next, &caller.role, Change::Patch(patch), sig, now)?;
             // A patch may reshape the conditions: what is derived starts over from here.
             txn.put_derived_flags(&next.id, &self.derive_in(&*txn, &next, now)?.flags())?;
             Ok(next)

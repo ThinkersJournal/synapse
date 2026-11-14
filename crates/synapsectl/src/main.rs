@@ -340,7 +340,7 @@ fn state_command(home: &std::path::Path, command: StateCommand) -> Result<(), Ma
                 body["notes"] = json!(notes);
             }
             let daemon = connect(home, &role)?;
-            print_record(&daemon.call(&role.role, "/v1/state/create", Some(&body))?)?;
+            print_record(&daemon.state_create_signed(&role.role, &body)?)?;
         }
         StateCommand::Show { role, id } => {
             if !query(&id) {
@@ -410,9 +410,8 @@ fn state_command(home: &std::path::Path, command: StateCommand) -> Result<(), Ma
             if !blocked_on.is_empty() || clear_blocked_on {
                 put("blocked_on", json!(blockers(&blocked_on)?));
             }
-            let body = json!({ "id": id, "expected_revision": rev, "patch": patch });
             let daemon = connect(home, &role)?;
-            print_record(&daemon.call(&role.role, "/v1/state/patch", Some(&body))?)?;
+            print_record(&daemon.state_patch_signed(&role.role, &id, rev, &json!(patch))?)?;
         }
         StateCommand::Export {
             role,

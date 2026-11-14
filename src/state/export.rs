@@ -160,6 +160,23 @@ fn last_verified(record: &Record, derived: &Derived, now: DateTime<Utc>) -> Stri
     text
 }
 
+/// How the record's writes were signed (S7). Unsigned is shown, never read as fine.
+fn writes(derived: &Derived) -> String {
+    let s = derived.signing;
+    let total = s.signed + s.unsigned + s.bad;
+    if s.bad > 0 {
+        format!("**BAD SIGNATURE** ({} of {total})", s.bad)
+    } else if total == 0 {
+        String::from("-")
+    } else if s.unsigned == 0 {
+        format!("{} signed", s.signed)
+    } else if s.signed == 0 {
+        String::from("**UNSIGNED**")
+    } else {
+        format!("**PARTLY SIGNED** {}/{total}", s.signed)
+    }
+}
+
 /// The Markdown board. `generated_at` is the only wall-clock value in the body besides the ages,
 /// which are relative to it, so the same inputs and `generated_at` give the same bytes.
 #[must_use]
@@ -168,11 +185,11 @@ pub fn render_markdown(views: &[View], generated_at: DateTime<Utc>) -> String {
         "# Shared state\n\ngenerated_at: {}\n\n",
         generated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     );
-    out.push_str("| id | title | owner | state | blocked on | verify | last verified |\n");
-    out.push_str("|---|---|---|---|---|---|---|\n");
+    out.push_str("| id | title | owner | state | blocked on | verify | last verified | writes |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|\n");
     for (record, derived) in sorted(views) {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
             escape_cell(&record.id),
             escape_cell(&record.title),
             escape_cell(&record.owner),
@@ -180,6 +197,7 @@ pub fn render_markdown(views: &[View], generated_at: DateTime<Utc>) -> String {
             blocked_on(record, derived, generated_at),
             verify(record, derived, generated_at),
             last_verified(record, derived, generated_at),
+            writes(derived),
         ));
     }
     out
@@ -255,6 +273,49 @@ mod tests {
         assert!(md.contains("**STALE**"), "{md}");
         assert!(md.contains("not observed"), "{md}");
         assert!(md.contains("Ship \\| it now"), "{md}");
+    }
+
+    #[test]
+    fn the_writes_column_says_unsigned_partly_signed_and_bad() {
+        use crate::state::Signing;
+        let mut d = view_with(vec![], State::Open).1;
+        for (signing, want) in [
+            (
+                Signing {
+                    signed: 0,
+                    unsigned: 2,
+                    bad: 0,
+                },
+                "**UNSIGNED**",
+            ),
+            (
+                Signing {
+                    signed: 1,
+                    unsigned: 1,
+                    bad: 0,
+                },
+                "**PARTLY SIGNED** 1/2",
+            ),
+            (
+                Signing {
+                    signed: 3,
+                    unsigned: 0,
+                    bad: 0,
+                },
+                "3 signed",
+            ),
+            (
+                Signing {
+                    signed: 1,
+                    unsigned: 0,
+                    bad: 1,
+                },
+                "**BAD SIGNATURE** (1 of 2)",
+            ),
+        ] {
+            d.signing = signing;
+            assert_eq!(writes(&d), want);
+        }
     }
 
     #[test]
