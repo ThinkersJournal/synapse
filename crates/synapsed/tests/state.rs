@@ -515,12 +515,15 @@ fn now_after_start(d: &Running) -> DateTime<Utc> {
     Utc::now().max(d.started_at + chrono::Duration::seconds(1))
 }
 
-const NONCE_A: &str = "000102030405060708090a0b0c0d0e0f";
-const NONCE_B: &str = "101112131415161718191a1b1c1d1e1f";
+/// A fresh random nonce, 32 hex characters, as a client makes one.
+fn nonce() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
 
 #[tokio::test]
 async fn a_signed_write_is_recorded_as_signed_and_an_unsigned_one_as_unsigned() {
     let d = start(&[]).await;
+    let (nonce_a, nonce_b) = (nonce(), nonce());
     let a = claim(&d, "alpha").await;
     let inst = instance_id(&d);
 
@@ -534,7 +537,7 @@ async fn a_signed_write_is_recorded_as_signed_and_an_unsigned_one_as_unsigned() 
         "-",
         0,
         &create_hash(&record),
-        NONCE_A,
+        &nonce_a,
         now_after_start(&d),
     );
     let (status, created) = call(&d, Some(&a), "/v1/state/create", Some(body)).await;
@@ -550,7 +553,7 @@ async fn a_signed_write_is_recorded_as_signed_and_an_unsigned_one_as_unsigned() 
         "T-1",
         1,
         &synapse::state::body_hash(&typed),
-        NONCE_B,
+        &nonce_b,
         now_after_start(&d),
     );
     let (status, patched) = call(
@@ -590,6 +593,7 @@ async fn a_signed_write_is_recorded_as_signed_and_an_unsigned_one_as_unsigned() 
 #[tokio::test]
 async fn a_signature_that_is_not_the_sessions_own_is_refused_and_an_event() {
     let d = start(&[]).await;
+    let nonce_a = nonce();
     let (a, _b) = (claim(&d, "alpha").await, claim(&d, "beta").await);
     let inst = instance_id(&d);
     let record = new_record("forged");
@@ -598,7 +602,7 @@ async fn a_signature_that_is_not_the_sessions_own_is_refused_and_an_event() {
 
     // Beta's key signs, alpha's session sends it.
     let mut body = record.clone();
-    body["sig"] = sig_for(&d, "beta", &inst, "create", "-", 0, &hash, NONCE_A, at);
+    body["sig"] = sig_for(&d, "beta", &inst, "create", "-", 0, &hash, &nonce_a, at);
     let (status, refused) = call(&d, Some(&a), "/v1/state/create", Some(body)).await;
     assert_eq!(
         (status, refused["error"].as_str()),
@@ -608,7 +612,7 @@ async fn a_signature_that_is_not_the_sessions_own_is_refused_and_an_event() {
 
     // Alpha's key, but over a different body.
     let mut body = new_record("tampered");
-    body["sig"] = sig_for(&d, "alpha", &inst, "create", "-", 0, &hash, NONCE_A, at);
+    body["sig"] = sig_for(&d, "alpha", &inst, "create", "-", 0, &hash, &nonce_a, at);
     assert_eq!(
         call(&d, Some(&a), "/v1/state/create", Some(body)).await.0,
         403
@@ -624,7 +628,7 @@ async fn a_signature_that_is_not_the_sessions_own_is_refused_and_an_event() {
         "-",
         0,
         &hash,
-        NONCE_A,
+        &nonce_a,
         at,
     );
     assert_eq!(
@@ -635,7 +639,7 @@ async fn a_signature_that_is_not_the_sessions_own_is_refused_and_an_event() {
     // Signed too long ago.
     let mut body = record.clone();
     let old = Utc::now() - chrono::Duration::seconds(600);
-    body["sig"] = sig_for(&d, "alpha", &inst, "create", "-", 0, &hash, NONCE_A, old);
+    body["sig"] = sig_for(&d, "alpha", &inst, "create", "-", 0, &hash, &nonce_a, old);
     assert_eq!(
         call(&d, Some(&a), "/v1/state/create", Some(body)).await.0,
         403
@@ -660,6 +664,7 @@ async fn a_signature_that_is_not_the_sessions_own_is_refused_and_an_event() {
 #[tokio::test]
 async fn one_signed_write_is_accepted_once() {
     let d = start(&[]).await;
+    let nonce_a = nonce();
     let a = claim(&d, "alpha").await;
     let inst = instance_id(&d);
     let record = new_record("once");
@@ -671,7 +676,7 @@ async fn one_signed_write_is_accepted_once() {
         "-",
         0,
         &create_hash(&record),
-        NONCE_A,
+        &nonce_a,
         now_after_start(&d),
     );
     let mut body = record.clone();
