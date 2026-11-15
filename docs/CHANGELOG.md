@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.253): ROADMAP row 30 records S7a as built
+
+Row 30 now says S7a (client-signed state writes, phase 1) is merged (#362 design, #363) and that S7b is row 50, blocked until the MCP and channel adapters have write tools to sign with.
+
 ### Added (rc.252): client-signed state writes, phase 1 (ROADMAP row 30 S7a, row 50)
 
 A writer can now sign a shared-state write with its own role key. The signed text binds the signer, the daemon instance, the operation, the record id, the expected revision, a SHA-256 of the canonical body (sorted keys, derived from the parsed value), a nonce and a time. The daemon checks it against the leaf key its claim proved, refuses a stale (more than 120 s), foreign-audience, tampered, other-role or replayed signature with 403 `bad_signature` and a `state_denied` security event, and stores it in the history entry inside the hash chain. Entries written before this hash exactly as they did, so every existing chain still verifies.
