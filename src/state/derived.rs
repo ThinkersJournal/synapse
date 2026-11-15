@@ -156,6 +156,10 @@ pub struct Derived {
     pub stale: bool,
     /// The record is `blocked` and every blocker is cleared. A flag, not a state change.
     pub unblocked: bool,
+    /// How many of the record's writes are signed (S7), unsigned, or carry a signature that does not
+    /// verify. Filled by the store from the history; `derive` itself leaves it zero.
+    #[serde(default)]
+    pub signing: super::Signing,
 }
 
 /// What `refresh_derived` remembers per record, to notify once per change.
@@ -297,5 +301,6 @@ pub fn derive(
         last_verified_by,
         stale,
         unblocked,
+        signing: super::Signing::default(),
     }
 }

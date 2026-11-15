@@ -225,6 +225,9 @@ struct Session {
     epoch: u64,
     /// The verified leaf certificate's grants at claim time.
     permissions: Vec<synapse::certificate::Permission>,
+    /// The leaf certificate's Ed25519 signing key, which the claim proved: what a signed state write
+    /// is checked against.
+    signing_key: [u8; 32],
     /// When a call last used this session (the claim, until the first call): the sliding window the
     /// session ttl is measured from.
     last_used: DateTime<Utc>,
@@ -247,6 +250,9 @@ struct Shared {
     state: synapse::state::StateEngine<synapse::state::RedbBackend>,
     /// Woken after a state write, so its notices go out at once rather than on the retry tick.
     state_nudge: tokio::sync::Notify,
+    /// Nonces of signed state writes accepted inside the freshness window, so one signed write is
+    /// accepted once. In memory: after a restart the window and `started_at` cover it, as for claims.
+    write_nonces: Mutex<HashMap<String, DateTime<Utc>>>,
     presence: Mutex<HashMap<String, Presence>>,
     /// Cumulative per-role counters for `/v1/stats`, loaded from and flushed to `stats.json` in the
     /// home, so a restart keeps them (`since` is when counting began, `daemon_started` this run).
@@ -763,6 +769,7 @@ impl Daemon {
                         .map_err(|e| DaemonError::Store(StoreError(e.to_string())))?,
                 ),
                 state_nudge: tokio::sync::Notify::new(),
+                write_nonces: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
                 presence: Mutex::new(HashMap::new()),
                 stats: Mutex::new(loaded.0),
@@ -1607,6 +1614,11 @@ fn claim_inner(
                     .chain
                     .first()
                     .map(|c| c.permissions.clone())
+                    .unwrap_or_default(),
+                signing_key: req
+                    .chain
+                    .first()
+                    .map(|c| c.subject_signing_key)
                     .unwrap_or_default(),
                 last_used: Utc::now(),
             },

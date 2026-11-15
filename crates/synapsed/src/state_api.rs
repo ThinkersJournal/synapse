@@ -6,7 +6,8 @@
 use axum::extract::State;
 use synapse::certificate::Permission;
 use synapse::state::{
-    Caller, Derived, FactReport, Filter, NewRecord, Patch, Record, StateError, StateStore,
+    Caller, Derived, FactReport, Filter, NewRecord, Patch, Record, SignedWrite, StateError,
+    StateStore, WriteSig,
 };
 
 use super::{
@@ -77,16 +78,118 @@ fn reply(value: serde_json::Value) -> Response {
     axum::Json(value).into_response()
 }
 
+/// What a client adds to sign a write (S7): the daemon supplies the rest of the signed text (the
+/// signer from the session, its own instance id, the op, the target, the revision and the body it parsed).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SigIn {
+    nonce: String,
+    signed_at: chrono::DateTime<Utc>,
+    signature: String,
+}
+
+/// Split an optional `sig` off a request body, leaving what the typed request parses.
+fn split_sig(mut value: serde_json::Value) -> Result<(serde_json::Value, Option<SigIn>), ApiError> {
+    let sig = match value.as_object_mut().and_then(|o| o.remove("sig")) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => Some(serde_json::from_value::<SigIn>(v).map_err(|e| {
+            ApiError::new(StatusCode::BAD_REQUEST, "malformed", format!("sig: {e}"))
+        })?),
+    };
+    Ok((value, sig))
+}
+
+fn bad_signature(shared: &Shared, session: &Session, why: &str) -> ApiError {
+    shared.security.emit(
+        SecurityEventKind::StateDenied,
+        "synapsed/state",
+        &session.global_id,
+        why,
+    );
+    ApiError::new(StatusCode::FORBIDDEN, "bad_signature", why.to_string())
+}
+
+/// Check a client's signature over this write against the session's own key, and that it is fresh
+/// and unused. `None` (no `sig`) is an unsigned write, accepted and recorded as unsigned in phase 1.
+fn checked_sig<T: serde::Serialize>(
+    shared: &Shared,
+    session: &Session,
+    sig: Option<SigIn>,
+    op: &str,
+    target: &str,
+    expected_revision: u64,
+    body: &T,
+) -> Result<Option<WriteSig>, ApiError> {
+    let Some(sig) = sig else {
+        return Ok(None);
+    };
+    let now = Utc::now();
+    let nonce_ok = sig.nonce.len() == 32 && synapse::state::sig_unhex(&sig.nonce).is_some();
+    let sig_ok = sig.signature.len() == 128 && synapse::state::sig_unhex(&sig.signature).is_some();
+    if !nonce_ok || !sig_ok {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "malformed",
+            "sig: nonce is 32 hex characters and signature 128",
+        ));
+    }
+    if !synapse::state::fresh(sig.signed_at, now) || sig.signed_at < shared.started_at {
+        return Err(bad_signature(shared, session, "stale signature"));
+    }
+    let key = synapse::state::sig_hex(&session.signing_key);
+    let body_hash = synapse::state::body_hash(body);
+    let text = synapse::state::signing_text(&SignedWrite {
+        signer: &session.global_id,
+        audience: &shared.instance_id,
+        op,
+        target,
+        expected_revision,
+        body_hash: &body_hash,
+        nonce: &sig.nonce,
+        signed_at: sig.signed_at,
+    });
+    if !synapse::state::verify_text(&key, &text, &sig.signature) {
+        return Err(bad_signature(shared, session, "signature does not verify"));
+    }
+    {
+        let mut seen = shared.write_nonces.lock().map_err(|_| {
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "store_unavailable", "lock")
+        })?;
+        let horizon = now - chrono::Duration::seconds(synapse::state::WRITE_WINDOW_SECS * 2);
+        seen.retain(|_, at| *at > horizon);
+        if seen.contains_key(&sig.nonce) {
+            return Err(bad_signature(shared, session, "signature already used"));
+        }
+        seen.insert(sig.nonce.clone(), now);
+    }
+    Ok(Some(WriteSig {
+        signer: session.global_id.clone(),
+        audience: shared.instance_id.clone(),
+        key,
+        nonce: sig.nonce,
+        signed_at: sig.signed_at,
+        signature: sig.signature,
+    }))
+}
+
 pub(crate) async fn create(
     State(shared): State<Arc<Shared>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let session = authed(&shared, &headers)?;
-    let new: NewRecord = parse(&headers, &body)?;
+    let (value, sig) = split_sig(parse(&headers, &body)?)?;
+    let new: NewRecord = serde_json::from_value(value).map_err(|e| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "malformed",
+            format!("invalid body: {e}"),
+        )
+    })?;
+    let sig = checked_sig(&shared, &session, sig, "create", "-", 0, &new)?;
     let record = shared
         .state
-        .create(&caller(&session), new, Utc::now())
+        .create_signed(&caller(&session), new, sig, Utc::now())
         .map_err(|e| refuse(&shared, &session, "create", e))?;
     shared.state_nudge.notify_one();
     Ok(reply(json!({ "record": record })))
@@ -155,14 +258,31 @@ pub(crate) async fn patch(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let session = authed(&shared, &headers)?;
-    let body: PatchBody = parse(&headers, &body)?;
+    let (value, sig) = split_sig(parse(&headers, &body)?)?;
+    let body: PatchBody = serde_json::from_value(value).map_err(|e| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "malformed",
+            format!("invalid body: {e}"),
+        )
+    })?;
+    let sig = checked_sig(
+        &shared,
+        &session,
+        sig,
+        "patch",
+        &body.id,
+        body.expected_revision,
+        &body.patch,
+    )?;
     let record = shared
         .state
-        .patch(
+        .patch_signed(
             &caller(&session),
             &body.id,
             body.expected_revision,
             body.patch,
+            sig,
             Utc::now(),
         )
         .map_err(|e| refuse(&shared, &session, "patch", e))?;

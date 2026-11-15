@@ -461,6 +461,80 @@ impl Daemon {
         )
     }
 
+    /// `POST /v1/state/create`, signed with `role`'s own key (shared-state slice S7): the daemon
+    /// checks the signature against the key its claim proved and keeps it in the history entry.
+    /// `new` is the record as the route takes it; it is parsed here exactly as the daemon parses it,
+    /// so both sides hash the same canonical body.
+    pub fn state_create_signed(&self, role: &str, new: &Value) -> Result<Value, MailError> {
+        let typed: synapse::state::NewRecord = serde_json::from_value(new.clone())
+            .map_err(|e| MailError::Usage(format!("not a record: {e}")))?;
+        let sig =
+            self.sign_state_write(role, "create", "-", 0, &synapse::state::body_hash(&typed))?;
+        let mut body = new.clone();
+        body["sig"] = sig;
+        self.call(role, "/v1/state/create", Some(&body))
+    }
+
+    /// `POST /v1/state/patch`, signed like [`Daemon::state_create_signed`].
+    pub fn state_patch_signed(
+        &self,
+        role: &str,
+        id: &str,
+        expected_revision: u64,
+        patch: &Value,
+    ) -> Result<Value, MailError> {
+        let typed: synapse::state::Patch = serde_json::from_value(patch.clone())
+            .map_err(|e| MailError::Usage(format!("not a patch: {e}")))?;
+        let sig = self.sign_state_write(
+            role,
+            "patch",
+            id,
+            expected_revision,
+            &synapse::state::body_hash(&typed),
+        )?;
+        let body = json!({
+            "id": id,
+            "expected_revision": expected_revision,
+            "patch": patch,
+            "sig": sig,
+        });
+        self.call(role, "/v1/state/patch", Some(&body))
+    }
+
+    /// The `sig` object of a state write: the role key's signature over the text the daemon will rebuild.
+    fn sign_state_write(
+        &self,
+        role: &str,
+        op: &str,
+        target: &str,
+        expected_revision: u64,
+        body_hash: &str,
+    ) -> Result<Value, MailError> {
+        let identity = load_role(&self.home, role, Utc::now())?;
+        let nonce = hex(&random_bytes::<16>()?);
+        // The daemon refuses a signature dated before its own start, as it does a claim.
+        let signed_at = Utc::now().max(self.started_at + chrono::Duration::seconds(1));
+        let text = synapse::state::signing_text(&synapse::state::SignedWrite {
+            signer: &identity.global_id,
+            audience: &self.instance_id,
+            op,
+            target,
+            expected_revision,
+            body_hash,
+            nonce: &nonce,
+            signed_at,
+        });
+        let signature = identity
+            .crypto
+            .sign_message(&text)
+            .map_err(|e| MailError::Usage(format!("cannot sign the write: {e}")))?;
+        Ok(json!({
+            "nonce": nonce,
+            "signed_at": signed_at.to_rfc3339(),
+            "signature": hex(&signature),
+        }))
+    }
+
     /// The cached session for this daemon instance, else a claim. Under the role lock, so two
     /// first commands for one role claim once rather than superseding each other (review I4).
     fn session(&self, role: &str) -> Result<Cached, MailError> {
