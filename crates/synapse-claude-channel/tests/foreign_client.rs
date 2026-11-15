@@ -272,8 +272,10 @@ async fn a_hand_written_client_negotiates_receives_the_push_and_acks_it() {
             "send",
             "set_summary",
             "share",
+            "state_create",
             "state_get",
             "state_list",
+            "state_patch",
             "whoami"
         ],
         "{tools}"

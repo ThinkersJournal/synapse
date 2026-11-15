@@ -469,6 +469,60 @@ pub struct StateListArgs {
     pub party: Option<String>,
 }
 
+/// Arguments of the `state_create` tool.
+#[derive(Deserialize, JsonSchema)]
+pub struct StateCreateArgs {
+    /// What the thread is about.
+    pub title: String,
+    /// Every role that may read and write the record. Include yourself and the owner.
+    pub parties: Vec<String>,
+    /// The role responsible for the record.
+    pub owner: String,
+    /// open (default), blocked, waiting, done or cancelled.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// What a blocked record waits on: `{"record": "T-41"}` or
+    /// `{"condition": {"fact": "pr_state:o/r#1", "op": "eq", "value": "merged"}}`.
+    #[serde(default)]
+    pub blocked_on: Vec<Value>,
+    /// Conditions the checker verifies: `{"fact": "...", "op": "eq|ge|exists|absent", "value": "..."}`.
+    #[serde(default)]
+    pub verify: Vec<Value>,
+    /// Free-form notes.
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// Arguments of the `state_patch` tool.
+#[derive(Deserialize, JsonSchema)]
+pub struct StatePatchArgs {
+    /// The record id, such as `T-41`.
+    pub id: String,
+    /// The `revision` you read (`state_get`); the write is refused if the record has moved on.
+    pub expected_revision: u64,
+    /// New title (replaces the old one).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// New party list (replaces the old one).
+    #[serde(default)]
+    pub parties: Option<Vec<String>>,
+    /// New owner.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// New state: open, blocked, waiting, done or cancelled.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// New blockers (replaces the old list), shaped as in `state_create`.
+    #[serde(default)]
+    pub blocked_on: Option<Vec<Value>>,
+    /// New verify conditions (replaces the old list), shaped as in `state_create`.
+    #[serde(default)]
+    pub verify: Option<Vec<Value>>,
+    /// New notes (replace the old ones).
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
 /// A record id as the daemon allocates it (`T-<n>`), checked before it reaches a URL.
 fn state_id(id: &str) -> Result<&str, String> {
     let digits = id.strip_prefix("T-").unwrap_or("");
@@ -808,6 +862,80 @@ impl SynapseMcpServer {
         let path = path.trim_end_matches(['?', '&']).to_string();
         self.daemon(move |daemon, role| {
             let mut reply = daemon.call(role, &path, None)?;
+            safe_strings(&mut reply);
+            Ok(reply)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Create a shared-state record (a cross-role thread). The write is signed with your role key, so the history shows it was you. Returns the record with its id. Parties are told it exists."
+    )]
+    pub async fn state_create(
+        &self,
+        Parameters(args): Parameters<StateCreateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut body = json!({
+            "title": args.title,
+            "parties": args.parties,
+            "owner": args.owner,
+            "blocked_on": args.blocked_on,
+            "verify": args.verify,
+        });
+        if let Some(state) = args.state {
+            body["state"] = json!(state);
+        }
+        if let Some(notes) = args.notes {
+            body["notes"] = json!(notes);
+        }
+        self.daemon(move |daemon, role| {
+            let mut reply = daemon.state_create_signed(role, &body)?;
+            safe_strings(&mut reply);
+            Ok(reply)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Change fields of a shared-state record you are a party to. Each field you pass replaces that whole field; fields you omit are left alone. Pass the `revision` you read as expected_revision: if the record has moved on the write is refused and you re-read it. Signed with your role key."
+    )]
+    pub async fn state_patch(
+        &self,
+        Parameters(args): Parameters<StatePatchArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = match state_id(&args.id) {
+            Ok(id) => id.to_string(),
+            Err(why) => return refuse(why),
+        };
+        let mut patch = serde_json::Map::new();
+        if let Some(v) = args.title {
+            patch.insert("title".into(), json!(v));
+        }
+        if let Some(v) = args.parties {
+            patch.insert("parties".into(), json!(v));
+        }
+        if let Some(v) = args.owner {
+            patch.insert("owner".into(), json!(v));
+        }
+        if let Some(v) = args.state {
+            patch.insert("state".into(), json!(v));
+        }
+        if let Some(v) = args.blocked_on {
+            patch.insert("blocked_on".into(), json!(v));
+        }
+        if let Some(v) = args.verify {
+            patch.insert("verify".into(), json!(v));
+        }
+        if let Some(v) = args.notes {
+            patch.insert("notes".into(), json!(v));
+        }
+        if patch.is_empty() {
+            return refuse("nothing to change: pass at least one field".to_string());
+        }
+        let patch = Value::Object(patch);
+        let revision = args.expected_revision;
+        self.daemon(move |daemon, role| {
+            let mut reply = daemon.state_patch_signed(role, &id, revision, &patch)?;
             safe_strings(&mut reply);
             Ok(reply)
         })
