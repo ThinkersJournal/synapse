@@ -273,8 +273,10 @@ async fn the_tool_set_and_the_untrusted_wording() {
             "send",
             "set_summary",
             "share",
+            "state_create",
             "state_get",
             "state_list",
+            "state_patch",
             "whoami"
         ]
     );
@@ -961,4 +963,56 @@ async fn a_malformed_share_is_refused_before_the_daemon_hears_it() {
     // The control: a well-formed share for a room that does not exist reaches the daemon.
     let why = alice.refused("share", good).await;
     assert!(why.contains("no such") || why.contains("unknown"), "{why}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn state_write_tools_create_and_patch_signed_and_refuse_bad_input() {
+    let home = Home::new();
+    let alice = agent(&home, "alice").await;
+    let bob = agent(&home, "bob").await;
+
+    let made = alice
+        .ok(
+            "state_create",
+            json!({"title": "ship it", "parties": ["alice", "bob"], "owner": "alice"}),
+        )
+        .await;
+    assert_eq!(made["record"]["id"], "T-1", "{made}");
+    assert_eq!(made["record"]["revision"], 1, "{made}");
+
+    // Bob, a party, patches at the revision he read; a stale revision is refused.
+    let patched = bob
+        .ok(
+            "state_patch",
+            json!({"id": "T-1", "expected_revision": 1, "notes": "on it"}),
+        )
+        .await;
+    assert_eq!(patched["record"]["revision"], 2, "{patched}");
+    let stale = bob
+        .refused(
+            "state_patch",
+            json!({"id": "T-1", "expected_revision": 1, "notes": "again"}),
+        )
+        .await;
+    assert!(!stale.is_empty(), "{stale}");
+
+    // Refused before the daemon hears them.
+    let why = alice
+        .refused(
+            "state_patch",
+            json!({"id": "x", "expected_revision": 1, "notes": "n"}),
+        )
+        .await;
+    assert!(why.contains("T-41"), "{why}");
+    let why = alice
+        .refused("state_patch", json!({"id": "T-1", "expected_revision": 2}))
+        .await;
+    assert!(why.contains("nothing to change"), "{why}");
+    let why = alice
+        .refused(
+            "state_create",
+            json!({"title": "x", "parties": ["alice"], "owner": "alice", "state": "nope"}),
+        )
+        .await;
+    assert!(!why.is_empty(), "{why}");
 }
