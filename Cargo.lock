@@ -1377,9 +1377,9 @@ dependencies = [
 
 [[package]]
 name = "genai"
-version = "0.7.3"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0361e6fb702a22e099ff01431b31696001aaac544fc11d98a1e6090bde49bba0"
+checksum = "2b22dc71d886d749ed4779019af1543ec9f8b8860b9701fa0932856e40d36a20"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -2616,9 +2616,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "persistant"
-version = "0.16.8"
+version = "0.16.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24e2363d01a148d398172d8e9cd3e298798bd24ca7de960e5ac27eb61e324e70"
+checksum = "dc0815f9254317bda7bc5bdeec41fe779e47de74cbeb7346ea437a475f0226af"
 dependencies = [
  "futures-util",
  "opendal",
@@ -2635,18 +2635,18 @@ dependencies = [
 
 [[package]]
 name = "persistant-blob"
-version = "0.16.8"
+version = "0.16.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13f62619fe032d551ccafc0f174be52d2c8ce09a2c40df0be28abaf2327f8a4f"
+checksum = "97cac2f7af94ac4edbc401f655d2b3bab25adf179e90a76a823ecf19fe0cb0a6"
 dependencies = [
  "persistant-core",
 ]
 
 [[package]]
 name = "persistant-core"
-version = "0.16.8"
+version = "0.16.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac4b6ffc92252bea46e3aad4fc9259d3422b8ca9bfe32c2f1de5864798ed4856"
+checksum = "6b834814df39136c95d909d4bac9ab6844567f62917a08f61be0bd3fc992437f"
 dependencies = [
  "capant",
  "windows-sys 0.61.2",
@@ -2654,9 +2654,9 @@ dependencies = [
 
 [[package]]
 name = "persistant-kv"
-version = "0.16.8"
+version = "0.16.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91ea8fdff24b50864b7e9412dd83dffa714462666cb1d96eafc3af7d0f7ae1f5"
+checksum = "7d064df0b89eb3b5493474e9a67d1e963baf6172a15c7321fe4b232e1623b2a6"
 dependencies = [
  "persistant-blob",
  "persistant-core",
@@ -2667,9 +2667,9 @@ dependencies = [
 
 [[package]]
 name = "persistant-opendal"
-version = "0.16.8"
+version = "0.16.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b7b6f9ab54521ca5572cb643a841a76cf6e665b78bcfc8f4b5a844b829ff239"
+checksum = "f39be12bcc2f25f122eaec9500829780cc89dfab01f2e5d43df9139a65d5ab28"
 dependencies = [
  "futures-util",
  "opendal",
@@ -2680,9 +2680,9 @@ dependencies = [
 
 [[package]]
 name = "persistant-relational"
-version = "0.16.8"
+version = "0.16.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96e07fe3e5a8b1146959666867bc80a735f56ed04f0fd47abf9fcff3fe1a73e"
+checksum = "c7d7dcf6fb1fbea2a2d14d30695299072e1f1e096d924bd55103ffa6893d9feb"
 dependencies = [
  "persistant-core",
  "unisql-core",
@@ -2690,10 +2690,11 @@ dependencies = [
 
 [[package]]
 name = "persistant-sqlx"
-version = "0.16.8"
+version = "0.16.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d52a7f50eefa85e1e3490eda2565573d5724c135f839a312fa313a7cd978067"
+checksum = "1f0fa174266abf27e68e81632da5d4a451b3d47f9d6ec250e14259fae6a5a9a7"
 dependencies = [
+ "chrono",
  "persistant-core",
  "persistant-relational",
  "sqlx",
@@ -3780,6 +3781,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cfg-if",
+ "chrono",
  "crc",
  "crossbeam-queue",
  "either",
@@ -3800,7 +3802,6 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.21",
- "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -3855,6 +3856,7 @@ dependencies = [
  "bitflags 2.13.2",
  "byteorder",
  "bytes",
+ "chrono",
  "crc",
  "digest 0.11.3",
  "dotenvy",
@@ -3869,7 +3871,6 @@ dependencies = [
  "sha2 0.11.1",
  "sqlx-core",
  "thiserror 2.0.21",
- "time",
  "tracing",
 ]
 
@@ -3883,6 +3884,7 @@ dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
  "byteorder",
+ "chrono",
  "crc",
  "dotenvy",
  "etcetera",
@@ -3904,7 +3906,6 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.21",
- "time",
  "tracing",
  "whoami",
 ]
@@ -3916,6 +3917,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c"
 dependencies = [
  "atoi",
+ "chrono",
  "flume",
  "form_urlencoded",
  "futures-channel",
@@ -3929,7 +3931,6 @@ dependencies = [
  "serde",
  "sqlx-core",
  "thiserror 2.0.21",
- "time",
  "tracing",
  "url",
 ]
@@ -4859,9 +4860,9 @@ checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 
 [[package]]
 name = "uuid"
-version = "1.29.0"
+version = "1.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
+checksum = "bed99139f7dac9b5cfe5f17be4d66dc7079a34dee1d74bcc77217119240e267c"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
