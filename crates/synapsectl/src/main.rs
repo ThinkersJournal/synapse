@@ -124,6 +124,38 @@ enum Command {
         /// The role to revive (a name, not `name@account`).
         target: String,
     },
+    /// List the launch signals: roles with mail and no live session, as the daemon's JSON reply.
+    /// Only the configured launcher role may call it.
+    Waiting {
+        #[command(flatten)]
+        role: RoleArg,
+        /// Hold the request up to this many seconds for a signal (0 answers at once).
+        #[arg(long, default_value_t = 0)]
+        wait: u64,
+    },
+    /// Answer one launch signal. Only the configured launcher role may call it; a signal that is
+    /// no longer open answers `stale_signal`.
+    LaunchResult {
+        #[command(flatten)]
+        role: RoleArg,
+        /// The role the signal is for (a name, not `name@account`).
+        target: String,
+        /// The signal id, as `waiting` printed it.
+        #[arg(long)]
+        signal_id: String,
+        /// The epoch, as `waiting` printed it.
+        #[arg(long)]
+        epoch: String,
+        /// Which attempt this answers, as `waiting` printed it.
+        #[arg(long)]
+        attempt: u32,
+        /// started, already-running, refused or failed.
+        #[arg(long)]
+        outcome: String,
+        /// A short reason code.
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Forget a role's launch state (a `refused` or `unreachable` verdict included) and start a
     /// new epoch, so the launcher tries it again. Only the configured launcher role may do this.
     LaunchClear {
@@ -1392,6 +1424,40 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 "revived: {}",
                 printable(reply["role"].as_str().unwrap_or(""))
             );
+        }
+        Command::Waiting { role, wait } => {
+            let daemon = connect(&home, &role)?;
+            let reply = daemon.waiting(&role.role, wait)?;
+            println!("{reply}");
+        }
+        Command::LaunchResult {
+            role,
+            target,
+            signal_id,
+            epoch,
+            attempt,
+            outcome,
+            reason,
+        } => {
+            let outcome = synapsed_client::LaunchOutcome::ALL
+                .into_iter()
+                .find(|o| o.as_str() == outcome)
+                .ok_or_else(|| {
+                    MailError::Usage(
+                        "outcome is started, already-running, refused or failed".into(),
+                    )
+                })?;
+            let daemon = connect(&home, &role)?;
+            daemon.launch_result(
+                &role.role,
+                &signal_id,
+                &epoch,
+                attempt,
+                &target,
+                outcome,
+                reason.as_deref(),
+            )?;
+            println!("answered: {} {}", printable(&target), outcome.as_str());
         }
         Command::LaunchClear { role, target } => {
             let daemon = connect(&home, &role)?;
