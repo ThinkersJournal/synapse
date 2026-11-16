@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.255): move the CodeRipper portfolio pin to 0.47.5
+
+The portfolio workflow call in `.github/workflows/ci_cd.yml` now pins coderipper at c72a6e03 (0.47.5). The rule-id migration tool found nothing to rename: `.coderipper.toml` names no renamed rule and no workflow passes one.
+
 ### Added (rc.254): state_create and state_patch MCP tools, signed with the role key (ROADMAP row 30, S5b)
 
 The MCP adapter and the Claude channel adapter (which serves the same tools) can now write shared state, not just read it. `state_create` makes a record; `state_patch` changes fields at an expected revision. Both go through `Daemon::state_create_signed` / `state_patch_signed`, so the history entry carries the role's own signature (S7a). Arguments are checked before the daemon hears them, and replies are escaped with `safe_text` since a record's text is another agent's. This is the adapter half of ROADMAP row 50 (`state.require_signed_writes`).
