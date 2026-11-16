@@ -1377,9 +1377,9 @@ dependencies = [
 
 [[package]]
 name = "genai"
-version = "0.7.3"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0361e6fb702a22e099ff01431b31696001aaac544fc11d98a1e6090bde49bba0"
+checksum = "2b22dc71d886d749ed4779019af1543ec9f8b8860b9701fa0932856e40d36a20"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3207,9 +3207,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.9.0"
+version = "3.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d24a7e92f4bcaa36b97fa93c4fa7ca8f3e669eced949345b3462dba333c7f909"
+checksum = "b5949e504d5ab9944a168259afc0c39ac0230627b6ec5367ace194c59bcbe163"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -3234,9 +3234,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.9.0"
+version = "3.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3140f24a766f80f9ec1607bde85680959a69b83d46fa9ce87dadab7e67ab029"
+checksum = "b98a686693ee91b665c6f89f182fca6e141c8a63dc113b11b38c1bf3491606b7"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -4033,7 +4033,7 @@ dependencies = [
 
 [[package]]
 name = "synapse"
-version = "6.0.0-rc.258"
+version = "6.0.0-rc.259"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4104,7 +4104,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-agent"
-version = "6.0.0-rc.258"
+version = "6.0.0-rc.259"
 dependencies = [
  "genai",
  "serde_json",
@@ -4119,7 +4119,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-claude-channel"
-version = "6.0.0-rc.258"
+version = "6.0.0-rc.259"
 dependencies = [
  "base64 0.23.1",
  "rmcp",
@@ -4134,7 +4134,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mailbox-persistant"
-version = "6.0.0-rc.258"
+version = "6.0.0-rc.259"
 dependencies = [
  "chrono",
  "persistant",
@@ -4150,7 +4150,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mcp-server"
-version = "6.0.0-rc.258"
+version = "6.0.0-rc.259"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4170,7 +4170,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-security"
-version = "6.0.0-rc.258"
+version = "6.0.0-rc.259"
 dependencies = [
  "chrono",
  "serde_json",
@@ -4180,7 +4180,7 @@ dependencies = [
 
 [[package]]
 name = "synapsectl"
-version = "6.0.0-rc.258"
+version = "6.0.0-rc.259"
 dependencies = [
  "chrono",
  "clap",
@@ -4196,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed"
-version = "6.0.0-rc.258"
+version = "6.0.0-rc.259"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4218,7 +4218,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed-client"
-version = "6.0.0-rc.258"
+version = "6.0.0-rc.259"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4859,9 +4859,9 @@ checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 
 [[package]]
 name = "uuid"
-version = "1.29.0"
+version = "1.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
+checksum = "bed99139f7dac9b5cfe5f17be4d66dc7079a34dee1d74bcc77217119240e267c"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
