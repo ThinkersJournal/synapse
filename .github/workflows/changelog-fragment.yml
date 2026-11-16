@@ -26,6 +26,8 @@ jobs:
       - name: The tools do what they say
         run: python3 tools/test_fragments.py
       - name: One fragment, or a manual bump
-        run: python3 tools/check-fragment.py "origin/${{ github.base_ref }}"
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: python3 tools/check-fragment.py "origin/${{ github.base_ref }}" --author "$PR_AUTHOR"
       - name: The version-bearing file list is complete
         run: python3 tools/stamp-version.py --check
