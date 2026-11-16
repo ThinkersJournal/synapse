@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.257): `synapsectl launch-clear <target> --role <launcher>` (ROADMAP row 49)
+
+A thin CLI over the existing `POST /v1/launch-clear` route and `Daemon::launch_clear`: it forgets the target role's launch state (a `refused` or `unreachable` verdict included), starts a new epoch and prints it. Only the configured launcher role may call it; any other role gets the daemon's refusal. Until now only AgentLife's `launcher --clear` could do this.
+
+— lane: synapse
+
 ### Fixed (rc.256): KeyPair's Debug no longer prints the private key (CodeRipper SEC-012)
 
 `synapse::auth::utils::KeyPair` derived `Debug`, so `{:?}` of a key pair, or of a struct holding one, wrote the private key bytes to a log. `Debug` is now written by hand and shows `<redacted>` for `private_key`. Test: `debug_never_prints_the_private_key`.
