@@ -28,11 +28,22 @@ pub enum KeyAlgorithm {
     Ed25519,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KeyPair {
     pub public_key: Vec<u8>,
     pub private_key: Vec<u8>,
     pub algorithm: KeyAlgorithm,
+}
+
+/// A hand-written `Debug` so a logged or `{:?}`-printed key pair never carries the private key.
+impl std::fmt::Debug for KeyPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyPair")
+            .field("public_key", &self.public_key)
+            .field("private_key", &"<redacted>")
+            .field("algorithm", &self.algorithm)
+            .finish()
+    }
 }
 
 pub struct KeyManager {
@@ -329,5 +340,24 @@ pub struct JsValue;
 impl Default for JsValue {
     fn default() -> Self {
         Self
+    }
+}
+
+#[cfg(test)]
+mod keypair_debug_tests {
+    use super::*;
+
+    #[test]
+    fn debug_never_prints_the_private_key() {
+        let kp = KeyPair {
+            public_key: vec![1, 2, 3],
+            private_key: vec![0xAB, 0xCD, 0xEF, 0x77],
+            algorithm: KeyAlgorithm::Ed25519,
+        };
+        let shown = format!("{kp:?} {kp:#?}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        for leak in ["171", "205", "239", "119", "AB", "ab"] {
+            assert!(!shown.contains(leak), "{leak} leaked: {shown}");
+        }
     }
 }
