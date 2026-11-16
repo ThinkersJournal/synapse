@@ -124,6 +124,14 @@ enum Command {
         /// The role to revive (a name, not `name@account`).
         target: String,
     },
+    /// Forget a role's launch state (a `refused` or `unreachable` verdict included) and start a
+    /// new epoch, so the launcher tries it again. Only the configured launcher role may do this.
+    LaunchClear {
+        #[command(flatten)]
+        role: RoleArg,
+        /// The role whose launch state to clear (a name, not `name@account`).
+        target: String,
+    },
     /// Stop the daemon cleanly (it exits 0, so the scheduled task does not retry). Needs the
     /// `daemon-admin` grant. Start it again afterwards the way you started it.
     Shutdown {
@@ -1383,6 +1391,15 @@ fn run(cli: Cli) -> Result<(), MailError> {
             println!(
                 "revived: {}",
                 printable(reply["role"].as_str().unwrap_or(""))
+            );
+        }
+        Command::LaunchClear { role, target } => {
+            let daemon = connect(&home, &role)?;
+            let reply = daemon.launch_clear(&role.role, &target)?;
+            println!(
+                "cleared: {} (epoch {})",
+                printable(&target),
+                printable(reply["epoch"].as_str().unwrap_or(""))
             );
         }
         Command::Shutdown { role } => {

@@ -1430,3 +1430,31 @@ fn the_checker_reports_forge_facts_and_the_daemon_derives_them() {
         "and never to crates.io: {seen:?}"
     );
 }
+
+/// `synapsectl launch-clear` reaches the daemon's route: the launcher role clears and gets an
+/// epoch back; any other role is refused.
+#[test]
+fn launch_clear_works_for_the_launcher_role_only() {
+    let home = Home::new();
+    let first = home
+        .command(&["claim", "--role", "agentlife-launcher"])
+        .env("SYNAPSE_LAUNCHER_ROLES", "agentlife-launcher")
+        .output()
+        .expect("the synapse binary runs");
+    assert_eq!(first.status.code(), Some(0), "{first:?}");
+    home.ok(&["claim", "--role", "beta"]);
+
+    let out = home
+        .command(&["launch-clear", "beta", "--role", "agentlife-launcher"])
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("cleared: beta (epoch "), "{text}");
+
+    let refused = home
+        .command(&["launch-clear", "beta", "--role", "beta"])
+        .output()
+        .expect("runs");
+    assert_ne!(refused.status.code(), Some(0), "{refused:?}");
+}
