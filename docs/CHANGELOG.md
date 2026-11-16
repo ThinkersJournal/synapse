@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.258): docker/login-action 4.6.0 to 4.8.0
+
+CI workflow only (Dependabot #313): the pinned docker/login-action in ci_cd.yml moves from 4.6.0 to 4.8.0. No shipped code changes.
+
+— lane: synapse
+
 ### Added (rc.257): `synapsectl launch-clear <target> --role <launcher>` (ROADMAP row 49)
 
 A thin CLI over the existing `POST /v1/launch-clear` route and `Daemon::launch_clear`: it forgets the target role's launch state (a `refused` or `unreachable` verdict included), starts a new epoch and prints it. Only the configured launcher role may call it; any other role gets the daemon's refusal. Until now only AgentLife's `launcher --clear` could do this.
