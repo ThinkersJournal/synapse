@@ -936,6 +936,22 @@ enum StorageCommand {
         #[arg(long)]
         against: Option<std::path::PathBuf>,
     },
+    /// Fold an older `.redb` mailbox into the `.sqlite` one that stays: roles keep the higher epoch,
+    /// messages the target neither holds nor acked are added in a fresh sequence, acked history is
+    /// the union, a message the source acked is dropped from the target, rooms only the source has
+    /// are added. A DRY RUN unless `--apply`. Use COPIES of both files, and never open the live
+    /// redb file: opening it creates its tables.
+    Import {
+        /// The `.redb` file to read (a copy).
+        #[arg(long)]
+        from: std::path::PathBuf,
+        /// The `.sqlite` file to write.
+        #[arg(long)]
+        into: std::path::PathBuf,
+        /// Write the plan. Without it nothing changes and the plan is only printed.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1537,6 +1553,9 @@ fn storage(home: &std::path::Path, command: StorageCommand) -> Result<(), MailEr
     if let StorageCommand::Inspect { file, against } = &command {
         return inspect_mailboxes(file, against.as_deref());
     }
+    if let StorageCommand::Import { from, into, apply } = &command {
+        return import_mailboxes(from, into, *apply);
+    }
     let listed = listing(&MailboxNeeds::MAILBOX).map_err(|e| usage(&e))?;
     match command {
         StorageCommand::List => {
@@ -1557,7 +1576,9 @@ fn storage(home: &std::path::Path, command: StorageCommand) -> Result<(), MailEr
                 println!("no store recorded in this home; `synapse storage use <id>` records one");
             }
         }
-        StorageCommand::Inspect { .. } => unreachable!("handled before the listing"),
+        StorageCommand::Inspect { .. } | StorageCommand::Import { .. } => {
+            unreachable!("handled before the listing")
+        }
         StorageCommand::Use { id, file, url_env } => {
             if !listed.iter().any(|l| l.id == id) {
                 let ids: Vec<_> = listed.iter().map(|l| l.id).collect();
@@ -1615,6 +1636,53 @@ fn load_dump(path: &std::path::Path) -> Result<synapse::mailbox::migrate::Dump, 
         }
         _ => Err(usage(&"the file must end in .redb or .sqlite")),
     }
+}
+
+/// `synapse storage import`: plan (always) and write (with `--apply`) the fold of a redb mailbox into
+/// a sqlite one. The write is one transaction and is read back and compared with the plan.
+#[cfg(feature = "storage")]
+fn import_mailboxes(
+    from: &std::path::Path,
+    into: &std::path::Path,
+    apply: bool,
+) -> Result<(), MailError> {
+    use synapse::mailbox::migrate::{apply_import, dump, plan_import};
+    let usage = |e: &dyn std::fmt::Display| MailError::Usage(e.to_string());
+    if from.extension().and_then(|e| e.to_str()) != Some("redb")
+        || into.extension().and_then(|e| e.to_str()) != Some("sqlite")
+    {
+        return Err(usage(&"--from must be a .redb file and --into a .sqlite file"));
+    }
+    let source = load_dump(from)?;
+    if !into.is_file() {
+        return Err(usage(&format!("{}: no such file", into.display())));
+    }
+    let store = synapse_mailbox_persistant::SqliteMailStore::open(into)
+        .map_err(|e| usage(&format!("{}: {e}", into.display())))?;
+    let target = dump(&store).map_err(|e| usage(&e))?;
+    let plan = plan_import(&target, &source);
+    let r = &plan.report;
+    println!("import {} -> {}", from.display(), into.display());
+    println!("roles: {} added, {} raised to the source's higher epoch", r.roles_added, r.roles_raised);
+    println!(
+        "messages: {} added ({} dead letters), {} already queued, {} left out as already acked, {} dropped as acked in the source",
+        r.messages_added, r.dead_added, r.skipped_present, r.skipped_acked, r.messages_dropped
+    );
+    println!("acked history: {} entries added; rooms: {} added", r.acks_added, r.rooms_added);
+    println!("sequence counter: {} -> {}", r.seq_before, r.seq_after);
+    if !apply {
+        println!("dry run: nothing written (add --apply to write it)");
+        return Ok(());
+    }
+    let after = apply_import(&store, &plan).map_err(|e| usage(&e))?;
+    println!(
+        "applied and read back equal to the plan: {} roles, {} queued messages, {} acked, seq {}",
+        after.roles.roles.len(),
+        after.messages(),
+        after.acked.len(),
+        after.seq
+    );
+    Ok(())
 }
 
 /// `synapse storage inspect`: counts of one mailbox file, then the differences from another.
