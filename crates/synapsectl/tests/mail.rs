@@ -1458,3 +1458,61 @@ fn launch_clear_works_for_the_launcher_role_only() {
         .expect("runs");
     assert_ne!(refused.status.code(), Some(0), "{refused:?}");
 }
+
+/// `synapsectl waiting` and `launch-result` reach the daemon's routes as the launcher role: an empty
+/// poll prints no roles, an answer to no open signal is `stale_signal`, a made-up outcome is refused
+/// before any call, and another role is not allowed to poll.
+#[test]
+fn waiting_and_launch_result_work_for_the_launcher_role_only() {
+    let home = Home::new();
+    let first = home
+        .command(&["claim", "--role", "agentlife-launcher"])
+        .env("SYNAPSE_LAUNCHER_ROLES", "agentlife-launcher")
+        .output()
+        .expect("the synapse binary runs");
+    assert_eq!(first.status.code(), Some(0), "{first:?}");
+    home.ok(&["claim", "--role", "beta"]);
+
+    let polled = home
+        .command(&["waiting", "--role", "agentlife-launcher"])
+        .output()
+        .expect("runs");
+    assert_eq!(polled.status.code(), Some(0), "{polled:?}");
+    let text = String::from_utf8_lossy(&polled.stdout);
+    assert!(text.contains("\"roles\":[]"), "{text}");
+
+    let args = |outcome: &'static str| {
+        [
+            "launch-result",
+            "beta",
+            "--role",
+            "agentlife-launcher",
+            "--signal-id",
+            "beta:none",
+            "--epoch",
+            "e1",
+            "--attempt",
+            "1",
+            "--outcome",
+            outcome,
+        ]
+    };
+    let stale = home.command(&args("failed")).output().expect("runs");
+    assert_ne!(stale.status.code(), Some(0), "{stale:?}");
+    assert!(
+        String::from_utf8_lossy(&stale.stderr).contains("stale_signal"),
+        "{stale:?}"
+    );
+    let bad = home.command(&args("maybe")).output().expect("runs");
+    assert_ne!(bad.status.code(), Some(0), "{bad:?}");
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("outcome is"),
+        "{bad:?}"
+    );
+
+    let refused = home
+        .command(&["waiting", "--role", "beta"])
+        .output()
+        .expect("runs");
+    assert_ne!(refused.status.code(), Some(0), "{refused:?}");
+}
