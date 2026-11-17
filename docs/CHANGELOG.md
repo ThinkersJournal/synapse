@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.260): `synapsectl waiting` and `synapsectl launch-result` (ROADMAP row 49, cutover spec section 7 item 3)
+
+Thin CLIs over the existing `GET /v1/waiting` and `POST /v1/launch-result` routes and their client methods, for operators and for the launcher's tests. `waiting [--wait N]` prints the daemon's JSON reply; `launch-result <target> --signal-id --epoch --attempt --outcome [--reason]` answers one signal (outcome: started, already-running, refused, failed). Only the configured launcher role may call either; a signal no longer open answers `stale_signal`. With `launch-clear` (#369) the whole launcher surface is on the CLI.
+
+— lane: synapse
+
 ### Changed (rc.259): uuid 1.29.2, genai 0.7.4, rmcp and rmcp-macros 3.10.0
 
 Cargo.lock only (Dependabot #370): uuid 1.29.0 to 1.29.2, genai 0.7.3 to 0.7.4, rmcp and rmcp-macros 3.9.0 to 3.10.0. No manifest change; CHANGELOG states the newest-versions rule.
