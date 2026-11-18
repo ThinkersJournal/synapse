@@ -1651,7 +1651,9 @@ fn import_mailboxes(
     if from.extension().and_then(|e| e.to_str()) != Some("redb")
         || into.extension().and_then(|e| e.to_str()) != Some("sqlite")
     {
-        return Err(usage(&"--from must be a .redb file and --into a .sqlite file"));
+        return Err(usage(
+            &"--from must be a .redb file and --into a .sqlite file",
+        ));
     }
     let source = load_dump(from)?;
     if !into.is_file() {
@@ -1663,12 +1665,18 @@ fn import_mailboxes(
     let plan = plan_import(&target, &source);
     let r = &plan.report;
     println!("import {} -> {}", from.display(), into.display());
-    println!("roles: {} added, {} raised to the source's higher epoch", r.roles_added, r.roles_raised);
+    println!(
+        "roles: {} added, {} raised to the source's higher epoch",
+        r.roles_added, r.roles_raised
+    );
     println!(
         "messages: {} added ({} dead letters), {} already queued, {} left out as already acked, {} dropped as acked in the source",
         r.messages_added, r.dead_added, r.skipped_present, r.skipped_acked, r.messages_dropped
     );
-    println!("acked history: {} entries added; rooms: {} added", r.acks_added, r.rooms_added);
+    println!(
+        "acked history: {} entries added; rooms: {} added",
+        r.acks_added, r.rooms_added
+    );
     println!("sequence counter: {} -> {}", r.seq_before, r.seq_after);
     if !apply {
         println!("dry run: nothing written (add --apply to write it)");

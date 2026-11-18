@@ -1,0 +1,41 @@
+# cargo-deny configuration (advisories, licences, bans, sources). Template: fishstringer's deny.toml.
+# An advisory acknowledgement is the PM's call at gate. cargo-deny has no expiry field, so each
+# ignore below states its own, and removing it is the way an expiry is honoured.
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+ignore = [
+    # chrono is unmaintained; pm-platform ruling 2026-11-17: ignore with a reason and an expiry,
+    # never waive the check. Path: async-imap, auto-discovery and others
+    # (`cargo tree --workspace --all-features -i chrono`). ROADMAP row 52 moves off it.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; revisit by 2026-12-17 (ROADMAP row 52: move to jiff or time)" },
+    # pin-utils is unmaintained, pulled in by async-imap (`cargo tree --workspace --all-features -i pin-utils`); no vulnerability, no fix.
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained, transitive via async-imap; revisit by 2026-12-17" },
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",                # quoted_printable
+    "CDLA-Permissive-2.0", # webpki-root-certs (Mozilla root list)
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

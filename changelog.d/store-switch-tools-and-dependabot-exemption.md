@@ -1,4 +1,4 @@
-Added, Changed: `synapse storage inspect` and `storage import` for a home with two mailbox stores; a Dependabot PR that touches only dependency files needs no fragment
+Added, Changed, Fixed: `synapse storage inspect` and `storage import` for a home with two mailbox stores; a Dependabot PR that touches only dependency files needs no fragment; `synapsed` refuses an unaccounted-for SQLite file instead of choosing redb beside it; a `cargo deny` job
 
 **`synapse storage inspect <file> [--against <file>]`** prints a `.redb` or `.sqlite` mailbox file's sequence, role count (retired ones apart), rooms, acked history, queued messages and, per queue, the leased count and oldest enqueue time (a `dead:<role>` queue is a role's dead letters). With `--against` it lists roles and epochs that differ, queued message ids on one side only, and acked counts. Never a message body. Read-only in intent; inspect COPIES: opening a redb file creates its tables, and the running daemon holds the live one locked.
 
@@ -7,5 +7,9 @@ Added, Changed: `synapse storage inspect` and `storage import` for a home with t
 **Operator note, measured on a scratch home:** the store id for `storage use` is `sqlite-full`, with `--file mailbox.sqlite` to keep an existing file. Once `mailbox-store.json` records it, an unpinned daemon opens that file and never creates an empty `mailbox.redb`. A `SYNAPSE_MAILBOX_STORE=sqlite` pin still goes through the migration check, so with both files present and no marker it refuses to start until the redb file is moved aside.
 
 **`tools/check-fragment.py --author <login>`** (the workflow passes the PR author): a PR by `dependabot[bot]` that changes only `Cargo.lock` or `.github/workflows/*.yml` passes with no fragment and no bump; any other author, or a bot PR touching anything else, is judged as before. Why: no Dependabot PR had ever merged here because the check failed every one on "no fragment" (#313, #370 got fragments by hand). The PM still stamps a version at the gate, so a merged bot PR needs its changelog line written then. Tests: `tools/test_fragments.py`.
+
+**synapsed no longer picks redb beside a SQLite file (Fixed).** With no pin and no `mailbox-store.json`, a home holding `mailbox.sqlite` and no `mailbox.redb`, or both files and no `mailbox.sqlite.migrated`, now exits 2 naming `synapse storage use <id>` and `storage inspect`, and creates and records nothing. Before, an unpinned start chose redb there and made a second store (2026-11-16). A redb-only home, a recorded choice, a pin and a migrated home behave as before. Tests: `crates/synapsed/tests/select.rs`; the refusal test fails with the call removed.
+
+**`cargo deny` job and `deny.toml`:** advisories, licences, bans and sources run in CI (template: fishstringer). Two unmaintained-crate advisories are acknowledged with reasons, to be revisited by 2026-12-17: RUSTSEC-2026-0543 (chrono, ROADMAP row 52) and RUSTSEC-2026-0441 (pin-utils, via async-imap). Locally at this commit: `advisories ok, bans ok, licenses ok, sources ok`. `cargo audit` is unchanged.
 
 — lane: synapse

@@ -23,6 +23,14 @@ A. **Copy sqlite with its sidecars, inspect.** `Copy-Item $H\mailbox.sqlite*  $B
    MUST come with it, under the same names: a lone renamed file silently loses the WAL). Nobody holds sqlite while
    the daemon serves redb. Then `$TOOLS storage inspect $B\sqlite\mailbox.sqlite`.
 B. **Stop the daemon:** `synapse shutdown --role <a role with daemon-admin>` (exit 0, so the task does not retry).
+   **Before the window, check the grant reached the session (2026-11-17: it did not, and `shutdown` was refused
+   403).** `synapse id grant --role R daemon-admin` only writes the account home's `grants` file. A session's
+   permissions are the ones in the certificate presented at claim (`crates/synapsed/src/lib.rs`, the claim path),
+   and the certificate gets the grant only when it is issued again: `Keystore::provision_role` (the account-key
+   side: the launcher or PM) reissues a role's certificate when its grants differ from the installed one, and a
+   role-only home never renews itself. So after the grant: reprovision R's home, restart or re-claim R's session,
+   and test the grant with a dry call BEFORE the window (a 403 on `shutdown` means no `daemon-admin` in that
+   session's certificate; 401 means no session). Cause read from the code, not reproduced on the live home.
    Read back that pid 22692 is gone (`Get-Process -Id 22692` errors). Between B and E a legacy lane's CLI call can
    auto-start a daemon with no pin, which would lock redb again: C fails loudly if so (a locked file cannot be copied).
 C. **Copy the redb file, never open the original:** `Copy-Item $H\mailbox.redb $B\redb\mailbox.redb`.
