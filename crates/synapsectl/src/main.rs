@@ -926,6 +926,32 @@ enum StorageCommand {
         #[arg(long, value_name = "VAR")]
         url_env: Option<String>,
     },
+    /// Read-only counts of a mailbox file, and with `--against` what differs from another one. Open a
+    /// COPY, never a live file: opening a redb file creates its tables, and the running daemon holds
+    /// the live one locked. Prints ids, senders and times; never a message body.
+    Inspect {
+        /// A `.redb` or `.sqlite` mailbox file (an existing file; nothing is created).
+        file: std::path::PathBuf,
+        /// A second mailbox file to compare with: roles and queued message ids on one side only.
+        #[arg(long)]
+        against: Option<std::path::PathBuf>,
+    },
+    /// Fold an older `.redb` mailbox into the `.sqlite` one that stays: roles keep the higher epoch,
+    /// messages the target neither holds nor acked are added in a fresh sequence, acked history is
+    /// the union, a message the source acked is dropped from the target, rooms only the source has
+    /// are added. A DRY RUN unless `--apply`. Use COPIES of both files, and never open the live
+    /// redb file: opening it creates its tables.
+    Import {
+        /// The `.redb` file to read (a copy).
+        #[arg(long)]
+        from: std::path::PathBuf,
+        /// The `.sqlite` file to write.
+        #[arg(long)]
+        into: std::path::PathBuf,
+        /// Write the plan. Without it nothing changes and the plan is only printed.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1524,6 +1550,12 @@ fn storage(home: &std::path::Path, command: StorageCommand) -> Result<(), MailEr
     use synapse::mailbox::MailboxNeeds;
     use synapse_mailbox_persistant::needs::{StoreChoice, listing};
     let usage = |e: &dyn std::fmt::Display| MailError::Usage(e.to_string());
+    if let StorageCommand::Inspect { file, against } = &command {
+        return inspect_mailboxes(file, against.as_deref());
+    }
+    if let StorageCommand::Import { from, into, apply } = &command {
+        return import_mailboxes(from, into, *apply);
+    }
     let listed = listing(&MailboxNeeds::MAILBOX).map_err(|e| usage(&e))?;
     match command {
         StorageCommand::List => {
@@ -1543,6 +1575,9 @@ fn storage(home: &std::path::Path, command: StorageCommand) -> Result<(), MailEr
             if recorded.is_none() {
                 println!("no store recorded in this home; `synapse storage use <id>` records one");
             }
+        }
+        StorageCommand::Inspect { .. } | StorageCommand::Import { .. } => {
+            unreachable!("handled before the listing")
         }
         StorageCommand::Use { id, file, url_env } => {
             if !listed.iter().any(|l| l.id == id) {
@@ -1577,6 +1612,192 @@ fn storage(home: &std::path::Path, command: StorageCommand) -> Result<(), MailEr
             );
         }
     }
+    Ok(())
+}
+
+/// Read a mailbox file into a [`synapse::mailbox::migrate::Dump`]. The file must exist: opening a
+/// missing sqlite or redb path would create one.
+#[cfg(feature = "storage")]
+fn load_dump(path: &std::path::Path) -> Result<synapse::mailbox::migrate::Dump, MailError> {
+    use synapse::mailbox::migrate::dump;
+    let usage = |e: &dyn std::fmt::Display| MailError::Usage(format!("{}: {e}", path.display()));
+    if !path.is_file() {
+        return Err(usage(&"no such file"));
+    }
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("redb") => {
+            let store = synapse::mailbox::RedbStore::open(path).map_err(|e| usage(&e))?;
+            dump(&store).map_err(|e| usage(&e))
+        }
+        Some("sqlite") => {
+            let store =
+                synapse_mailbox_persistant::SqliteMailStore::open(path).map_err(|e| usage(&e))?;
+            dump(&store).map_err(|e| usage(&e))
+        }
+        _ => Err(usage(&"the file must end in .redb or .sqlite")),
+    }
+}
+
+/// `synapse storage import`: plan (always) and write (with `--apply`) the fold of a redb mailbox into
+/// a sqlite one. The write is one transaction and is read back and compared with the plan.
+#[cfg(feature = "storage")]
+fn import_mailboxes(
+    from: &std::path::Path,
+    into: &std::path::Path,
+    apply: bool,
+) -> Result<(), MailError> {
+    use synapse::mailbox::migrate::{apply_import, dump, plan_import};
+    let usage = |e: &dyn std::fmt::Display| MailError::Usage(e.to_string());
+    if from.extension().and_then(|e| e.to_str()) != Some("redb")
+        || into.extension().and_then(|e| e.to_str()) != Some("sqlite")
+    {
+        return Err(usage(
+            &"--from must be a .redb file and --into a .sqlite file",
+        ));
+    }
+    let source = load_dump(from)?;
+    if !into.is_file() {
+        return Err(usage(&format!("{}: no such file", into.display())));
+    }
+    let store = synapse_mailbox_persistant::SqliteMailStore::open(into)
+        .map_err(|e| usage(&format!("{}: {e}", into.display())))?;
+    let target = dump(&store).map_err(|e| usage(&e))?;
+    let plan = plan_import(&target, &source);
+    let r = &plan.report;
+    println!("import {} -> {}", from.display(), into.display());
+    println!(
+        "roles: {} added, {} raised to the source's higher epoch",
+        r.roles_added, r.roles_raised
+    );
+    println!(
+        "messages: {} added ({} dead letters), {} already queued, {} left out as already acked, {} dropped as acked in the source",
+        r.messages_added, r.dead_added, r.skipped_present, r.skipped_acked, r.messages_dropped
+    );
+    println!(
+        "acked history: {} entries added; rooms: {} added",
+        r.acks_added, r.rooms_added
+    );
+    println!("sequence counter: {} -> {}", r.seq_before, r.seq_after);
+    if !apply {
+        println!("dry run: nothing written (add --apply to write it)");
+        return Ok(());
+    }
+    let after = apply_import(&store, &plan).map_err(|e| usage(&e))?;
+    println!(
+        "applied and read back equal to the plan: {} roles, {} queued messages, {} acked, seq {}",
+        after.roles.roles.len(),
+        after.messages(),
+        after.acked.len(),
+        after.seq
+    );
+    Ok(())
+}
+
+/// `synapse storage inspect`: counts of one mailbox file, then the differences from another.
+#[cfg(feature = "storage")]
+fn inspect_mailboxes(
+    file: &std::path::Path,
+    against: Option<&std::path::Path>,
+) -> Result<(), MailError> {
+    let a = load_dump(file)?;
+    println!("== {}", file.display());
+    let retired = a
+        .roles
+        .roles
+        .values()
+        .filter(|r| r.retired_at.is_some())
+        .count();
+    println!(
+        "seq {}; roles {} ({} retired); rooms {}; acked {}; queued messages {} (dead included)",
+        a.seq,
+        a.roles.roles.len(),
+        retired,
+        a.rooms.rooms.len(),
+        a.acked.len(),
+        a.messages()
+    );
+    if let Some(newest) = a.roles.roles.values().map(|r| r.claimed_at).max() {
+        println!("newest role claim {}", newest.to_rfc3339());
+    }
+    for (queue, rows) in &a.queues {
+        let leased = rows.iter().filter(|m| m.lease.is_some()).count();
+        let oldest = rows
+            .iter()
+            .map(|m| m.enqueued_at)
+            .min()
+            .map(|t| t.to_rfc3339());
+        println!(
+            "queue {}: {} message(s), {} leased, oldest {}",
+            printable(queue),
+            rows.len(),
+            leased,
+            oldest.unwrap_or_default()
+        );
+    }
+    let Some(other) = against else {
+        return Ok(());
+    };
+    let b = load_dump(other)?;
+    println!(
+        "== differences: {} (A) against {} (B)",
+        file.display(),
+        other.display()
+    );
+    for (role, rec) in &a.roles.roles {
+        match b.roles.roles.get(role) {
+            None => println!(
+                "role only in A: {} epoch {} claimed {}",
+                printable(role),
+                rec.epoch,
+                rec.claimed_at.to_rfc3339()
+            ),
+            Some(o) if o.epoch != rec.epoch => println!(
+                "role epoch differs: {} A={} B={}",
+                printable(role),
+                rec.epoch,
+                o.epoch
+            ),
+            Some(_) => {}
+        }
+    }
+    for (role, rec) in &b.roles.roles {
+        if !a.roles.roles.contains_key(role) {
+            println!(
+                "role only in B: {} epoch {} claimed {}",
+                printable(role),
+                rec.epoch,
+                rec.claimed_at.to_rfc3339()
+            );
+        }
+    }
+    let ids = |d: &synapse::mailbox::migrate::Dump| {
+        d.queues
+            .iter()
+            .flat_map(|(q, rows)| {
+                rows.iter()
+                    .map(move |m| (q.clone(), m.envelope.message_id.clone()))
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let (ia, ib) = (ids(&a), ids(&b));
+    for (queue, id) in &ia {
+        if !ib.contains(&(queue.clone(), id.clone())) {
+            println!("queued only in A: {} {}", printable(queue), printable(id));
+        }
+    }
+    for (queue, id) in &ib {
+        if !ia.contains(&(queue.clone(), id.clone())) {
+            println!("queued only in B: {} {}", printable(queue), printable(id));
+        }
+    }
+    let acked_only = |x: &synapse::mailbox::migrate::Dump, y: &synapse::mailbox::migrate::Dump| {
+        x.acked.keys().filter(|k| !y.acked.contains_key(*k)).count()
+    };
+    println!(
+        "acked only in A: {}; acked only in B: {}",
+        acked_only(&a, &b),
+        acked_only(&b, &a)
+    );
     Ok(())
 }
 

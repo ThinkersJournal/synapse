@@ -49,17 +49,60 @@ mod sqlite {
     }
 
     #[test]
-    fn a_home_with_a_mailbox_file_and_no_record_stays_on_redb_and_records_nothing() {
-        for file in ["mailbox.redb", "mailbox.sqlite"] {
+    fn a_home_with_only_a_redb_file_and_no_record_stays_on_redb_and_records_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("mailbox.redb"), b"x").unwrap();
+        assert_eq!(
+            select_store(home.path(), None, false).unwrap(),
+            Selection::Kind(StoreKind::Redb)
+        );
+        assert!(!home.path().join("mailbox-store.json").exists());
+    }
+
+    /// The 2026-11-16 trap: an unpinned start chose redb beside the task's SQLite store, so the home
+    /// held two stores. A SQLite file the redb file does not account for is refused, never guessed,
+    /// and nothing is created or recorded.
+    #[test]
+    fn a_sqlite_file_with_no_record_and_no_migration_marker_is_refused() {
+        for with_redb in [false, true] {
             let home = tempfile::tempdir().unwrap();
-            std::fs::write(home.path().join(file), b"x").unwrap();
-            assert_eq!(
-                select_store(home.path(), None, false).unwrap(),
-                Selection::Kind(StoreKind::Redb),
-                "{file}"
+            std::fs::write(home.path().join("mailbox.sqlite"), b"x").unwrap();
+            if with_redb {
+                std::fs::write(home.path().join("mailbox.redb"), b"x").unwrap();
+            }
+            let err = select_store(home.path(), None, false).unwrap_err();
+            assert!(
+                err.contains("refusing to pick one silently") && err.contains("storage use"),
+                "{err}"
             );
-            assert!(!home.path().join("mailbox-store.json").exists(), "{file}");
+            assert!(!home.path().join("mailbox-store.json").exists());
         }
+    }
+
+    #[test]
+    fn a_migrated_home_is_left_to_the_migration_check_and_a_pin_or_record_still_wins() {
+        let home = tempfile::tempdir().unwrap();
+        for f in ["mailbox.redb", "mailbox.sqlite", "mailbox.sqlite.migrated"] {
+            std::fs::write(home.path().join(f), b"x").unwrap();
+        }
+        assert_eq!(
+            select_store(home.path(), None, false).unwrap(),
+            Selection::Kind(StoreKind::Redb)
+        );
+        // The control for the refusal above: the same sqlite-only home is served once a choice is
+        // recorded or a pin is given.
+        let only = tempfile::tempdir().unwrap();
+        std::fs::write(only.path().join("mailbox.sqlite"), b"x").unwrap();
+        assert_eq!(
+            select_store(only.path(), Some("sqlite"), false).unwrap(),
+            Selection::Kind(StoreKind::Sqlite)
+        );
+        let choice = StoreChoice::new("sqlite-full", Some("mailbox.sqlite")).unwrap();
+        choice.write(only.path()).unwrap();
+        assert_eq!(
+            select_store(only.path(), None, false).unwrap(),
+            Selection::Named(choice)
+        );
     }
 
     #[test]

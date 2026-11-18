@@ -58,9 +58,8 @@ pub fn select_store(
         if let Some(choice) = StoreChoice::read(home).map_err(|e| e.to_string())? {
             return Ok(Selection::Named(choice));
         }
-        if home.join(StoreKind::Redb.file_name()).exists()
-            || home.join(StoreKind::Sqlite.file_name()).exists()
-        {
+        refuse_ambiguous_files(home)?;
+        if home.join(StoreKind::Redb.file_name()).exists() {
             return Ok(Selection::Kind(StoreKind::Redb));
         }
         let Ok(listed) = listing(&synapse::mailbox::MailboxNeeds::MAILBOX) else {
@@ -80,7 +79,33 @@ pub fn select_store(
     }
     #[cfg(not(feature = "sqlite-store"))]
     {
-        let _ = home;
+        refuse_ambiguous_files(home)?;
         Ok(Selection::Kind(StoreKind::Redb))
     }
+}
+
+/// With no pin and no recorded choice, a home holding a `mailbox.sqlite` that the redb file does not
+/// account for is not decided here. Opening redb beside it would create a second, empty store and
+/// leave two stores in one home (the 2026-11-16 auto-start that chose redb next to the task's
+/// SQLite store). Only the operator knows which file holds the mail, so say what to run.
+fn refuse_ambiguous_files(home: &Path) -> Result<(), String> {
+    let sqlite = home.join(StoreKind::Sqlite.file_name());
+    if !sqlite.exists() {
+        return Ok(());
+    }
+    let redb = home.join(StoreKind::Redb.file_name());
+    // `mailbox.sqlite.migrated` is the marker `migration::prepare` leaves after a verified copy: the
+    // home is on SQLite by design, and the daemon's own migration check owns that case.
+    if redb.exists() && home.join(crate::migration::MARKER_FILE).exists() {
+        return Ok(());
+    }
+    let have = if redb.exists() {
+        "both mailbox.redb and mailbox.sqlite"
+    } else {
+        "mailbox.sqlite but no mailbox.redb"
+    };
+    Err(format!(
+        "{} holds {have} and records no store choice (mailbox-store.json): refusing to pick one silently. Run `synapse storage use <id>` to record the store that holds the mail (`synapse storage inspect` compares the files), or pin it with storage.id in synapsed.toml",
+        home.display()
+    ))
 }

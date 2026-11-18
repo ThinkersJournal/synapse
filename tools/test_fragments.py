@@ -267,6 +267,24 @@ class PullRequest(Repo):
         git(self.root, "add", "-A")
         git(self.root, "commit", "-q", "-m", "pr")
 
+    def author_verdict(self, author):
+        done = run([sys.executable, CHECK, "main", "--author", author], self.root, check=False)
+        return done.returncode, done.stderr
+
+    def test_a_dependabot_lock_bump_needs_no_fragment_and_nobody_else_is_exempt(self):
+        put(self.root, "Cargo.lock", "# bumped\n")
+        self.commit()
+        self.assertEqual(self.author_verdict("dependabot[bot]")[0], 0)
+        code, why = self.author_verdict("someone")
+        self.assertEqual(code, 1)
+        self.assertIn("no CHANGELOG fragment", why)
+
+    def test_a_dependabot_pr_that_touches_source_is_not_exempt(self):
+        put(self.root, "Cargo.lock", "# bumped\n")
+        put(self.root, "src/x.rs", "fn main() {}\n")
+        self.commit()
+        self.assertEqual(self.author_verdict("dependabot[bot]")[0], 1)
+
     def test_one_fragment_passes(self):
         put(self.root, "changelog.d/a.md", FRAGMENT)
         self.commit()
