@@ -16,7 +16,6 @@
 use crate::{
     CryptoManager,
     config::Config,
-    email_server::SynapseEmailServer,
     error::Result,
     identity::IdentityRegistry,
     security_events::SecuritySink,
@@ -24,6 +23,8 @@ use crate::{
     transport::{TransportRoute, abstraction::MessageUrgency, router::MultiTransportRouter},
     types::{MessageType, SecureMessage, SecurityLevel, SimpleMessage},
 };
+#[cfg(feature = "email")]
+use crate::email_server::SynapseEmailServer;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -57,6 +58,7 @@ pub struct SynapseRouter {
     /// Multi-transport router for fast communication
     multi_transport: Option<Arc<MultiTransportRouter>>,
     /// Local email server (SMTP/IMAP) for when we're externally accessible
+#[cfg(feature = "email")]
     email_server: Option<Arc<SynapseEmailServer>>,
     /// Configuration, used by `ensure_email_transport` to build the real
     /// `EmailTransportImpl` via `ProductionTransportProvider::create_email_transport`.
@@ -86,6 +88,7 @@ impl SynapseRouter {
             email: Arc::new(RwLock::new(None)),
             trust_store: Arc::new(RwLock::new(TrustStore::new())),
             multi_transport: None,
+            #[cfg(feature = "email")]
             email_server: None,
             config,
             our_global_id,
@@ -107,6 +110,7 @@ impl SynapseRouter {
         let Some(sink) = self.security_sink.get() else {
             return;
         };
+        #[cfg(feature = "email")]
         if let Some(server) = &self.email_server {
             server.set_security_sink(Arc::clone(sink));
         }
@@ -134,6 +138,7 @@ impl SynapseRouter {
         );
 
         // Start email server if available
+        #[cfg(feature = "email")]
         if let Some(ref email_server) = self.email_server {
             email_server.start().await?;
             info!("Email server started successfully");
@@ -232,22 +237,35 @@ impl SynapseRouter {
         }
     }
 
-    /// Get access to the email server for configuration
+    /// Get access to the email server for configuration (needs the `email` feature)
+    #[cfg(feature = "email")]
     pub fn email_server(&self) -> Option<Arc<SynapseEmailServer>> {
         self.email_server.clone()
     }
 
     /// Check if we're running our own email server
     pub fn is_running_email_server(&self) -> bool {
-        self.email_server_enabled && self.email_server.is_some()
+        #[cfg(feature = "email")]
+        {
+            self.email_server_enabled && self.email_server.is_some()
+        }
+        #[cfg(not(feature = "email"))]
+        {
+            false
+        }
     }
 
     /// Get email server connectivity information
     pub fn email_server_connectivity(&self) -> Option<String> {
-        if let Some(ref server) = self.email_server {
-            let connectivity = server.get_connectivity();
-            Some(format!("{:?}", connectivity.recommended_config))
-        } else {
+        #[cfg(feature = "email")]
+        {
+            self.email_server.as_ref().map(|server| {
+                let connectivity = server.get_connectivity();
+                format!("{:?}", connectivity.recommended_config)
+            })
+        }
+        #[cfg(not(feature = "email"))]
+        {
             None
         }
     }
@@ -1582,6 +1600,7 @@ mod tests {
 
     // P7 follow-up (a3): a router holding a `SynapseEmailServer` passes its sink on, so the
     // server's login guard records to it.
+    #[cfg(feature = "email")]
     #[tokio::test]
     async fn the_email_server_records_to_the_routers_sink() {
         use crate::email_server::{
