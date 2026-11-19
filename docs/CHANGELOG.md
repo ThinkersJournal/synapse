@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.262): ROADMAP row 54 (email as an opt-in feature) and the stale shared-state rows 30 and 50
+
+ROADMAP.md only; no code. Row 54 records the agreed split of `email` out of `native-base` (the PM's 2026-11-18 ask from agentlife): measured at origin/main 0a811e31, `lettre` is a non-optional dependency and the email modules are compiled unconditionally, so the feature list alone drops nothing; the entry names the work, the breaking surface and the check (`cargo tree -i lettre` empty under `native-base`, present under `native`). Rows 30 and 50 said the adapters had no write tools; #366 (rc.254) merged `state_create` and `state_patch`, so both now say that, name the test that shows it, and keep S7b as not built. Found by pm-platform's claims-to-command audit.
+
+— lane: synapse
+
 ### Added, Changed, Fixed (rc.261): `synapse storage inspect` and `storage import` for a home with two mailbox stores; a Dependabot PR that touches only dependency files needs no fragment; `synapsed` refuses an unaccounted-for SQLite file instead of choosing redb beside it; a `cargo deny` job
 
 **`synapse storage inspect <file> [--against <file>]`** prints a `.redb` or `.sqlite` mailbox file's sequence, role count (retired ones apart), rooms, acked history, queued messages and, per queue, the leased count and oldest enqueue time (a `dead:<role>` queue is a role's dead letters). With `--against` it lists roles and epochs that differ, queued message ids on one side only, and acked counts. Never a message body. Read-only in intent; inspect COPIES: opening a redb file creates its tables, and the running daemon holds the live one locked.
