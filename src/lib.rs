@@ -207,7 +207,9 @@ pub mod circuit_breaker;
 pub mod connectivity;
 pub mod crypto;
 pub mod delivery_ack;
+#[cfg(feature = "email")]
 pub mod email;
+#[cfg(feature = "email")]
 pub mod email_server;
 pub mod identity;
 pub mod keystore;
@@ -227,6 +229,7 @@ pub mod transport;
 
 // Re-export commonly used types
 pub use crypto::CryptoManager;
+#[cfg(feature = "email")]
 pub use email::EmailTransport;
 pub use sender_auth::{SenderProof, SenderVerdict, TrustStore};
 

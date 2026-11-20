@@ -623,7 +623,8 @@ impl IdentityRegistry {
             .collect()
     }
 
-    /// Import contacts from email configuration
+    /// Import contacts from email configuration (needs the `email` feature)
+    #[cfg(feature = "email")]
     pub async fn import_email_contacts(
         &self,
         email_config: &crate::types::EmailConfig,
@@ -750,6 +751,7 @@ impl IdentityRegistry {
     // Private helper methods
 
     /// Extract contacts from email transport
+    #[cfg(feature = "email")]
     async fn extract_email_contacts(
         &self,
         _email_transport: &crate::email::EmailTransport,

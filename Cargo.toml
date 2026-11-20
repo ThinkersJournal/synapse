@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.262"
+version = "6.0.0-rc.263"
 
 [package]
 name = "synapse"
@@ -109,7 +109,7 @@ futures-util = { version = "0.3", optional = true }
 # async-std (async-imap's own default runtime).
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"], optional = true }
 # `tokio1` with lettre's default `native-tls` is a compile_error unless `tokio1-native-tls` is on too.
-lettre = { version = "0.11", features = ["tokio1-native-tls"] }
+lettre = { version = "0.11", features = ["tokio1-native-tls"], optional = true }
 mail-parser = { version = "1.0", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 native-tls = { version = "0.2", optional = true }
@@ -370,10 +370,13 @@ nat_traversal = [
 # default: it brings async-imap and, through it, the unmaintained pin-utils.
 imap = ["dep:async-imap"]
 
-# Email feature (adds email server capabilities). lettre is a regular, non-optional dependency (see
-# its Cargo.toml comment); async-imap is behind the separate `imap` feature.
+# Email feature (the SMTP/IMAP transport and server). OPT-IN outside `native`: `native-base` (what
+# `synapsed-client` and agentlife take) does not carry it, so a consumer that never sends mail ships no
+# SMTP stack (`cargo tree -i lettre` is empty under `native-base`). async-imap is behind the separate
+# `imap` feature.
 email = [
     "core",
+    "dep:lettre",
     "dep:mail-parser",
     "dep:native-tls",
     "dep:tokio-rustls",
@@ -384,7 +387,7 @@ email = [
 jwt = ["dep:jsonwebtoken"]
 
 # Full native platform support (the original working config but with updated deps)
-native = ["native-base", "jwt"]
+native = ["native-base", "jwt", "email"]
 
 # `native` without `jwt`. Database, cache and auth features were retired in rc.83 (board 199, 200).
 native-base = [
@@ -392,7 +395,6 @@ native-base = [
     "mailbox-redb",
     "networking",
     "nat_traversal",
-    "email",
     "crypto",
     "http",
     "mdns",
