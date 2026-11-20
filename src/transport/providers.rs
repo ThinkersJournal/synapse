@@ -10,7 +10,7 @@ use super::{
 use crate::{config::Config, error::Result, types::SecureMessage};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Transport provider trait for dependency injection
 #[async_trait]
@@ -111,6 +111,13 @@ impl TransportProvider for ProductionTransportProvider {
         Ok(None)
     }
 
+    #[cfg(not(feature = "email"))]
+    async fn create_email_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
+        // Built without the `email` feature: there is no SMTP stack to start.
+        Ok(None)
+    }
+
+    #[cfg(feature = "email")]
     async fn create_email_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>> {
         use crate::transport::email_unified::EmailTransportImpl;
         use std::collections::HashMap;
@@ -168,7 +175,7 @@ impl TransportProvider for ProductionTransportProvider {
                 Ok(Some(Arc::new(transport) as Arc<dyn abstraction::Transport>))
             }
             Err(e) => {
-                warn!("Failed to initialize email transport: {}", e);
+                tracing::warn!("Failed to initialize email transport: {}", e);
                 Ok(None)
             }
         }

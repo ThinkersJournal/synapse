@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Breaking, Changed (rc.263): `email` is an opt-in feature outside `native-base` (ROADMAP row 54)
+
+`lettre` is now an optional dependency (`dep:lettre` under `email`), and `email` moved from `native-base` to `native`. The `email` and `email_server` modules, `transport::email_unified` and their re-exports, the email arm of `create_email_transport` in `transport/providers.rs` (a stub returning `Ok(None)` without the feature), the `email_server` field of the merged router and the email contact import in `identity.rs` are cfg-gated.
+
+**Who is hit:** consumers that depend on `synapse` with only `native-base` (agentlife, `synapsed-client`) no longer get `EmailTransport` or `SynapseSmtpServer`; enable `email` (or `native`) to keep them.
+
+**Evidence:** `cargo tree -p synapse --no-default-features --features native-base -i lettre -e normal` is empty, as is `-p synapsed-client -i lettre`; `--features native` shows `lettre`. `cargo clippy -D warnings` is clean under `native-base` and `--workspace --all-targets`; the email lib tests (21), smtp (3), `email_security_events` (11), `email_server_has_no_default_users` (2) and `synapsed` tests pass.
+
 ### Docs (rc.262): ROADMAP row 54 (email as an opt-in feature) and the stale shared-state rows 30 and 50
 
 ROADMAP.md only; no code. Row 54 records the agreed split of `email` out of `native-base` (the PM's 2026-11-18 ask from agentlife): measured at origin/main 0a811e31, `lettre` is a non-optional dependency and the email modules are compiled unconditionally, so the feature list alone drops nothing; the entry names the work, the breaking surface and the check (`cargo tree -i lettre` empty under `native-base`, present under `native`). Rows 30 and 50 said the adapters had no write tools; #366 (rc.254) merged `state_create` and `state_patch`, so both now say that, name the test that shows it, and keep S7b as not built. Found by pm-platform's claims-to-command audit.
