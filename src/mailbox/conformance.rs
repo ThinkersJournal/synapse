@@ -19,7 +19,7 @@
 
 use super::{
     Acked, Depth, DurabilityClass, Enqueued, Envelope, Fanout, MailConfig, MailError, MailStore,
-    Mailbox, REQUIRED_DURABILITY, Stored,
+    Mailbox, Nacked, REQUIRED_DURABILITY, Stored,
 };
 use crate::certificate::RevocationLookup;
 use crate::keystore::Keystore;
@@ -349,6 +349,41 @@ pub fn ack_is_idempotent<S: MailStore>(make: impl Fn() -> S) {
     assert_eq!(mb.ack(LANE, epoch, "m1", t0()).unwrap(), Acked::Removed);
     assert_eq!(
         mb.ack(LANE, epoch, "m1", t0()).unwrap(),
+        Acked::AlreadyAcked
+    );
+}
+
+pub fn nack_removes_for_good_reports_the_sender_and_is_idempotent<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    // No lease yet: refused, and the message is untouched.
+    assert!(matches!(
+        mb.nack(LANE, epoch, "m1", t0()),
+        Err(MailError::NotYourLease)
+    ));
+    assert!(matches!(
+        mb.nack(LANE, epoch, "nope", t0()),
+        Err(MailError::NotFound)
+    ));
+    mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
+    let got = mb.nack(LANE, epoch, "m1", t0()).unwrap();
+    assert!(
+        matches!(&got, Nacked::Declined { to, message_id, .. } if to == LANE && message_id == "m1"),
+        "{got:?}"
+    );
+    // Gone for good: not redelivered, a resend of the same id is a duplicate, a repeat is a no-op.
+    let later = t0() + chrono::Duration::hours(1);
+    assert!(mb.fetch(LANE, epoch, 10, None, later).unwrap().is_empty());
+    assert_eq!(
+        mb.nack(LANE, epoch, "m1", later).unwrap(),
+        Nacked::AlreadyHandled
+    );
+    assert_eq!(
+        mb.ack(LANE, epoch, "m1", later).unwrap(),
         Acked::AlreadyAcked
     );
 }
@@ -1131,6 +1166,10 @@ pub fn run_all<S: MailStore>(make: impl Fn() -> S) {
         only_the_lease_holder_acks(&make)
     });
     case("ack_is_idempotent", || ack_is_idempotent(&make));
+    case(
+        "nack_removes_for_good_reports_the_sender_and_is_idempotent",
+        || nack_removes_for_good_reports_the_sender_and_is_idempotent(&make),
+    );
     case(
         "the_bound_refuses_by_count_and_by_bytes_and_keeps_the_queue",
         || the_bound_refuses_by_count_and_by_bytes_and_keeps_the_queue(&make),

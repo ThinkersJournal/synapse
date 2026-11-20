@@ -354,6 +354,16 @@ pub struct AckArgs {
     pub message_id: String,
 }
 
+/// Arguments of the `nack` tool.
+#[derive(Deserialize, JsonSchema)]
+pub struct NackArgs {
+    /// A message_id that `fetch` returned.
+    pub message_id: String,
+    /// Why you decline it, in a few words (optional).
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 /// Arguments of the room tools.
 #[derive(Deserialize, JsonSchema)]
 pub struct RoomArgs {
@@ -758,6 +768,23 @@ impl SynapseMcpServer {
                 role,
                 "/v1/ack",
                 Some(&json!({"message_id": args.message_id})),
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Decline a message you cannot handle (the counterpart of ack): it is removed and not delivered again, and its sender is told with a [DECLINED] mail carrying your reason so it can pass the message on. Use the message_id that fetch returned; reason is optional, short text."
+    )]
+    pub async fn nack(
+        &self,
+        Parameters(args): Parameters<NackArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.daemon(move |daemon, role| {
+            daemon.call(
+                role,
+                "/v1/nack",
+                Some(&json!({"message_id": args.message_id, "reason": args.reason})),
             )
         })
         .await

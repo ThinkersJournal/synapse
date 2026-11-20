@@ -44,6 +44,7 @@ cases!(
     a_takeover_frees_the_old_leases_at_once,
     only_the_lease_holder_acks,
     ack_is_idempotent,
+    nack_removes_for_good_reports_the_sender_and_is_idempotent,
     the_bound_refuses_by_count_and_by_bytes_and_keeps_the_queue,
     sweep_deletes_old_acked_history_never_queued_mail,
     a_lease_outside_the_range_is_refused,

@@ -259,6 +259,19 @@ pub enum Acked {
     AlreadyAcked,
 }
 
+/// What a [`Mailbox::nack`] came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Nacked {
+    /// The message left the receiver's queue for good; the caller tells `from`.
+    Declined {
+        to: String,
+        from: String,
+        message_id: String,
+    },
+    /// It was acked or declined before; nothing changed and nobody is told again.
+    AlreadyHandled,
+}
+
 /// One role's mailbox depth at a moment (S-1): what `fetch` would hand out next, what the role's
 /// current epoch holds, and when the oldest of either arrived. Acked mail is in neither.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1340,6 +1353,53 @@ impl<S: MailStore> Mailbox<S> {
             txn.record_ack(role, message_id, now)
                 .map_err(MailError::Store)?;
             outcome = Acked::Removed;
+            Ok(())
+        })?;
+        Ok(outcome)
+    }
+
+    /// Decline a message this epoch holds the lease on ("cannot handle this, pass it on"): it is
+    /// removed from the queue and recorded as handled, so it is never redelivered, and the caller
+    /// tells the sender. Idempotent: a repeat, or a nack after an ack, is
+    /// [`Nacked::AlreadyHandled`]. A message the epoch holds no lease on is
+    /// [`MailError::NotYourLease`]; an unknown one is [`MailError::NotFound`].
+    pub fn nack(
+        &mut self,
+        role: &str,
+        epoch: u64,
+        message_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Nacked, MailError> {
+        self.live()?;
+        self.roles
+            .check(role, epoch)
+            .map_err(MailError::Superseded)?;
+        let mut outcome = Nacked::AlreadyHandled;
+        self.store.write(&mut |txn| {
+            outcome = Nacked::AlreadyHandled;
+            if txn
+                .acked_at(role, message_id)
+                .map_err(MailError::Store)?
+                .is_some()
+            {
+                return Ok(());
+            }
+            let stored = txn
+                .queued(role, message_id)
+                .map_err(MailError::Store)?
+                .ok_or(MailError::NotFound)?;
+            match stored.lease {
+                Some(held) if held.epoch == epoch => {}
+                _ => return Err(MailError::NotYourLease),
+            }
+            txn.remove(role, message_id).map_err(MailError::Store)?;
+            txn.record_ack(role, message_id, now)
+                .map_err(MailError::Store)?;
+            outcome = Nacked::Declined {
+                to: role.to_string(),
+                from: stored.envelope.from.clone(),
+                message_id: message_id.to_string(),
+            };
             Ok(())
         })?;
         Ok(outcome)
