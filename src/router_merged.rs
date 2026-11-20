@@ -13,6 +13,8 @@
 //! expected to wire in, matching this same plan's own Step 4 code sample, which hard-codes
 //! `multi_transport: None` in `new()` even though the field is declared.
 
+#[cfg(feature = "email")]
+use crate::email_server::SynapseEmailServer;
 use crate::{
     CryptoManager,
     config::Config,
@@ -23,8 +25,6 @@ use crate::{
     transport::{TransportRoute, abstraction::MessageUrgency, router::MultiTransportRouter},
     types::{MessageType, SecureMessage, SecurityLevel, SimpleMessage},
 };
-#[cfg(feature = "email")]
-use crate::email_server::SynapseEmailServer;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -58,7 +58,7 @@ pub struct SynapseRouter {
     /// Multi-transport router for fast communication
     multi_transport: Option<Arc<MultiTransportRouter>>,
     /// Local email server (SMTP/IMAP) for when we're externally accessible
-#[cfg(feature = "email")]
+    #[cfg(feature = "email")]
     email_server: Option<Arc<SynapseEmailServer>>,
     /// Configuration, used by `ensure_email_transport` to build the real
     /// `EmailTransportImpl` via `ProductionTransportProvider::create_email_transport`.
