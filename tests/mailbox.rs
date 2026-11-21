@@ -187,6 +187,7 @@ fn malformed_envelopes_are_refused() {
             from: from.into(),
             body: vec![],
             mode: None,
+            fire_and_forget: false,
         };
         assert_eq!(
             mb.enqueue(env, suite::t0()),

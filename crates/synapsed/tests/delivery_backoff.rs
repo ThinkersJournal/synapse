@@ -284,3 +284,39 @@ async fn an_ack_at_the_second_attempt_stops_redelivery_and_sends_no_notice() {
     assert!(fetch(&d, &a).await.is_empty(), "no notice for a");
     assert_eq!(dead_lettered(&d, &a, "b").await, 0);
 }
+
+/// `delivery.mode = fire_and_forget` (messaging step 2b): leased once, never redelivered, and its sender
+/// is never told it ran out; an unknown mode is refused, never ignored.
+#[tokio::test]
+async fn fire_and_forget_is_delivered_once_and_its_sender_is_not_told() {
+    let d = start(&[]).await;
+    let a = claim(&d, "a").await;
+    let b = claim(&d, "b").await;
+    let post = |mode: &str, id: &str| {
+        json!({"to": "b@acct", "message_id": id, "body_b64": B64.encode(b"ping"),
+               "delivery": {"mode": mode}})
+    };
+    let (status, reply) = call(
+        &d,
+        Some(&a),
+        "/v1/send",
+        Some(post("fire_and_forget", "f1")),
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    let (status, reply) = call(&d, Some(&a), "/v1/send", Some(post("sometimes", "f2"))).await;
+    assert_eq!(status, 400, "an unknown mode is refused: {reply}");
+
+    let first = fetch(&d, &b).await;
+    assert_eq!(first.len(), 1);
+    // Reliable mail would come back after its 300 ms gap; this one must not.
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert!(fetch(&d, &b).await.is_empty(), "not redelivered");
+    }
+    assert_eq!(dead_lettered(&d, &a, "b").await, 1, "set aside, counted");
+    assert!(
+        fetch(&d, &a).await.is_empty(),
+        "no [UNACKED] notice for the sender"
+    );
+}

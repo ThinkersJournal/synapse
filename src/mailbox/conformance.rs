@@ -138,6 +138,7 @@ pub fn env(id: &str, to: &str, body: &[u8]) -> Envelope {
         from: "peer@acct".to_string(),
         body: body.to_vec(),
         mode: None,
+        fire_and_forget: false,
     }
 }
 

@@ -354,6 +354,8 @@ struct Meta {
     body_len: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mode: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    fire_and_forget: bool,
 }
 
 impl Meta {
@@ -365,6 +367,7 @@ impl Meta {
                 from: self.from,
                 body,
                 mode: self.mode,
+                fire_and_forget: self.fire_and_forget,
             },
             seq: self.seq,
             enqueued_at: self.enqueued_at,
@@ -724,6 +727,7 @@ impl<K: KvBackend + Send + Sync + 'static> MailTxn for Tx<'_, K> {
             attempts: stored.attempts,
             body_len,
             mode: stored.envelope.mode.clone(),
+            fire_and_forget: stored.envelope.fire_and_forget,
         };
         let raw = serde_json::to_vec(&meta).map_err(|e| se("encode", e))?;
         let qkey = self.qkey(role, seq);

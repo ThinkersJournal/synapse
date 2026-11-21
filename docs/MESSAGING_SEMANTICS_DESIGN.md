@@ -34,7 +34,14 @@ it explicitly (slice 2b).
   `nack_removes_for_good_reports_the_sender_and_is_idempotent` in the mailbox conformance suite (runs on the memory,
   redb and persistant stores), `nack_declines_a_message_and_the_sender_is_told` in the MCP adapter tests.
 
-## 3. Slice 2b: sender-settable modes (PLANNED)
+## 3. Slice 2b: sender-settable modes (`fire_and_forget` BUILT; the rest PLANNED)
+
+Built: `POST /v1/send {..., "delivery": {"mode": "fire_and_forget"}}`. The envelope carries `fire_and_forget`
+(persisted in the memory, redb and persistant stores); it is leased once, never redelivered, set aside quietly and
+counted in `dead_lettered`, and its sender gets no `[UNACKED]`. `reliable` or no `delivery` is today's behaviour;
+any other mode is `400 malformed`. Test: `fire_and_forget_is_delivered_once_and_its_sender_is_not_told` in
+`crates/synapsed/tests/delivery_backoff.rs`. Not yet: the MCP `send` tool parameter, room modes, TTL.
+
 
 `send` gains an optional `delivery` object; absent means today's behaviour (reliable direct). The sender's request is
 capped by each receiver's policy (a later step); every refusal is returned to the sender, never silent.

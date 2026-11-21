@@ -71,8 +71,8 @@ impl MailConfig {
     }
 
     /// Deliveries after which this message is set aside: one for the single-delivery sender's.
-    fn cap_for(&self, from: &str) -> u32 {
-        if self.single_delivery_from.as_deref() == Some(from) {
+    fn cap_for(&self, from: &str, fire_and_forget: bool) -> u32 {
+        if fire_and_forget || self.single_delivery_from.as_deref() == Some(from) {
             1
         } else {
             self.delivery_cap()
@@ -99,6 +99,8 @@ pub struct Exhausted {
     pub enqueued_at: DateTime<Utc>,
     /// How many times it was leased.
     pub attempts: u32,
+    /// The sender asked for fire and forget: set aside quietly, nobody is told.
+    pub quiet: bool,
 }
 
 impl Default for MailConfig {
@@ -130,6 +132,11 @@ pub struct Envelope {
     /// in every envelope written before ROADMAP row 41 P2b, and not written when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// The sender asked for no redelivery and no `[UNACKED]` notice (delivery mode
+    /// `fire_and_forget`, docs/MESSAGING_SEMANTICS_DESIGN.md section 3): it is leased once and set
+    /// aside quietly when that lease runs out. Not written when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fire_and_forget: bool,
 }
 
 impl fmt::Debug for Envelope {
@@ -1263,7 +1270,7 @@ impl<S: MailStore> Mailbox<S> {
                 // Leased `max_deliveries` times already and still here: set it aside, body and all,
                 // instead of leasing it again. If the dead set is itself full it stays queued: a
                 // message is never dropped to make room.
-                let cap = config.cap_for(&stored.envelope.from);
+                let cap = config.cap_for(&stored.envelope.from, stored.envelope.fire_and_forget);
                 if cap > 0 && stored.attempts >= cap {
                     let (count, bytes) = txn.stats(&dead_set).map_err(MailError::Store)?;
                     if count < config.max_messages
@@ -1279,6 +1286,7 @@ impl<S: MailStore> Mailbox<S> {
                             message_id: id,
                             enqueued_at: stored.enqueued_at,
                             attempts: stored.attempts,
+                            quiet: stored.envelope.fire_and_forget,
                         });
                         txn.put(&dead_set, stored).map_err(MailError::Store)?;
                         continue;
@@ -1474,7 +1482,8 @@ impl<S: MailStore> Mailbox<S> {
                 for role in roles.roles.keys() {
                     let mut due = Vec::new();
                     txn.scan(role, &mut |stored| {
-                        let cap = config.cap_for(&stored.envelope.from);
+                        let cap =
+                            config.cap_for(&stored.envelope.from, stored.envelope.fire_and_forget);
                         if cap > 0
                             && stored.attempts >= cap
                             && stored.lease.as_ref().is_none_or(|held| held.until <= now)
@@ -1502,6 +1511,7 @@ impl<S: MailStore> Mailbox<S> {
                             message_id: id,
                             enqueued_at: stored.enqueued_at,
                             attempts: stored.attempts,
+                            quiet: stored.envelope.fire_and_forget,
                         });
                         txn.put(&dead_set, stored).map_err(MailError::Store)?;
                     }
@@ -1533,7 +1543,9 @@ impl<S: MailStore> Mailbox<S> {
                 };
                 // A single-delivery message (a daemon notice) stays dead: it was told once, and a
                 // restart must not bring its stale text back.
-                if config.single_delivery_from.as_deref() == Some(stored.envelope.from.as_str()) {
+                if stored.envelope.fire_and_forget
+                    || config.single_delivery_from.as_deref() == Some(stored.envelope.from.as_str())
+                {
                     continue;
                 }
                 let (count, bytes) = txn.stats(role).map_err(MailError::Store)?;
@@ -1646,6 +1658,8 @@ struct Meta {
     body_len: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mode: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    fire_and_forget: bool,
 }
 
 #[cfg(feature = "mailbox-redb")]
@@ -1921,6 +1935,7 @@ mod redb_migration_tests {
                             from: "peer@acct".into(),
                             body: b"x".to_vec(),
                             mode: None,
+                            fire_and_forget: false,
                         },
                         seq: 1,
                         enqueued_at: at,
@@ -2101,6 +2116,7 @@ impl RedbTxn<'_> {
                 from: meta.from,
                 body: self.body(role, seq)?,
                 mode: meta.mode,
+                fire_and_forget: meta.fire_and_forget,
             },
             seq,
             enqueued_at: meta.enqueued_at,
@@ -2286,6 +2302,7 @@ impl MailTxn for RedbTxn<'_> {
             attempts: stored.attempts,
             body_len,
             mode: stored.envelope.mode.clone(),
+            fire_and_forget: stored.envelope.fire_and_forget,
         };
         let raw = serde_json::to_vec(&meta).map_err(|e| store_err("meta encode")(&e))?;
         {
@@ -2579,6 +2596,7 @@ mod dotted_recipient_tests {
             from: "pm@acct".into(),
             body: Vec::new(),
             mode: None,
+            fire_and_forget: false,
         })
     }
 

@@ -567,6 +567,7 @@ fn queue_alert(shared: &Shared, roles: &[String], fallback: &Arc<dyn SecuritySin
             from: format!("{ALERT_SENDER}@{}", shared.account),
             body: body.clone(),
             mode: None,
+            fire_and_forget: false,
         };
         let result = match shared.mailbox.lock() {
             Ok(mut mailbox) => mailbox.enqueue(envelope, now).map(|_| ()),
@@ -616,6 +617,7 @@ fn deliver_state_notices_once(shared: &Shared) -> bool {
             from: format!("{STATE_SENDER}@{}", shared.account),
             body: notice.body().into_bytes(),
             mode: None,
+            fire_and_forget: false,
         };
         let queued = match shared.mailbox.lock() {
             Ok(mut mailbox) => mailbox.enqueue(envelope, Utc::now()).is_ok(),
@@ -1644,6 +1646,17 @@ struct SendBody {
     /// behaviour (the soft lint); see `synapse::message_format::Mode`.
     #[serde(default)]
     mode: Option<String>,
+    /// Delivery mode (docs/MESSAGING_SEMANTICS_DESIGN.md section 3): `reliable` (the default) or
+    /// `fire_and_forget`. Anything else is refused, never ignored.
+    #[serde(default)]
+    delivery: Option<DeliveryRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliveryRequest {
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 async fn send(
@@ -1699,12 +1712,22 @@ async fn send(
         }
     };
     let declared_mode = body.mode.clone();
+    let fire_and_forget = match body.delivery.as_ref().and_then(|d| d.mode.as_deref()) {
+        None | Some("reliable") => false,
+        Some("fire_and_forget") => true,
+        Some(_) => {
+            return Err(malformed(
+                "delivery.mode must be reliable or fire_and_forget",
+            ));
+        }
+    };
     let envelope = Envelope {
         message_id: message_id.clone(),
         to: body.to,
         from: session.global_id.clone(),
         body: body_bytes,
         mode: declared_mode,
+        fire_and_forget,
     };
     // A post to a room fans out to its members (docs/ROOMS_DESIGN.md section 9). Presence is read
     // before the mailbox lock is taken, so the two locks are never held in the other order.
@@ -1969,6 +1992,7 @@ fn post_to_room(
             from: me.to_string(),
             body: envelope.body.clone(),
             mode: envelope.mode.clone(),
+            fire_and_forget: false,
         });
     }
     let outcomes = mailbox.enqueue_many(&copies, now)?;
@@ -2320,6 +2344,7 @@ fn declined_notice(
         from: notice_from,
         body: format!("[DECLINED] to={role} id={message_id} reason={reason}").into_bytes(),
         mode: None,
+        fire_and_forget: false,
     }
 }
 
@@ -2551,6 +2576,10 @@ fn report_exhausted(shared: &Shared) {
     let notice_from = format!("{NOTICE_SENDER}@{}", shared.account);
     for gone in exhausted {
         count(shared, &gone.to, |c| c.dead_lettered += 1);
+        // Fire and forget: the sender asked not to be told, so nobody is.
+        if gone.quiet {
+            continue;
+        }
         // A room copy is not told one by one: its sender hears once per post, after the grace.
         if let Some((base, room)) = room_copy(&gone.message_id) {
             if gone.from != notice_from
@@ -2727,6 +2756,7 @@ fn stall_sweep(shared: &Shared, now: DateTime<Utc>) {
             from: notice_from.clone(),
             body: body.into_bytes(),
             mode: None,
+            fire_and_forget: false,
         };
         if let Err(e) = mailbox.enqueue(envelope, now) {
             eprintln!("synapsed: a [STALLED] notice was not queued: {e}");
@@ -2763,6 +2793,7 @@ fn flush_room_notices(shared: &Shared, notice_from: &str, now: DateTime<Utc>) {
             from: notice_from.to_string(),
             body: format!("[ROOM-UNACKED] room={room} id={id} unacked={unacked}").into_bytes(),
             mode: None,
+            fire_and_forget: false,
         };
         let Ok(mut mailbox) = shared.mailbox.lock() else {
             return;
@@ -2797,6 +2828,7 @@ fn unacked_notice(gone: &Exhausted, account: &str, now: DateTime<Utc>) -> Option
         )
         .into_bytes(),
         mode: None,
+        fire_and_forget: false,
     })
 }
 
@@ -3948,6 +3980,7 @@ mod tests {
             message_id: "a@acct/m1".into(),
             enqueued_at: Utc::now() - chrono::Duration::minutes(31),
             attempts: 4,
+            quiet: false,
         }
     }
 
