@@ -619,6 +619,41 @@ async fn a_non_member_holding_the_post_grant_posts_and_receives_nothing() {
     d.stop().await;
 }
 
+/// `delivery.mode = room_broadcast` (messaging step 2b): every member gets one copy that is never
+/// redelivered and never reported as unacked; it is refused for a direct recipient.
+#[tokio::test]
+async fn a_room_broadcast_is_delivered_once_and_the_sender_hears_no_unacked() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    let ops = claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev", "ops"]).await;
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    assert_eq!(join(&d, &ops, "lounge").await.0, 200);
+    let body = |to: &str| {
+        json!({"to": to, "message_id": "b1", "body_b64": B64.encode(b"all hands"),
+               "delivery": {"mode": "room_broadcast"}})
+    };
+    let (status, reply) = call(&d, &pm, "/v1/send", Some(body("lounge@acct"))).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["room"]["delivered"], 2);
+    let (status, reply) = call(&d, &pm, "/v1/send", Some(body("dev@acct"))).await;
+    assert_eq!(status, 400, "a broadcast needs a room: {reply}");
+    assert_eq!(inbox(&d, &dev).await.len(), 1);
+    assert_eq!(inbox(&d, &ops).await.len(), 1);
+    // Reliable copies would return after the 300 ms gap and end in an unacked notice.
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert!(inbox(&d, &dev).await.is_empty(), "not redelivered");
+    }
+    assert!(
+        inbox(&d, &pm).await.is_empty(),
+        "the sender is told nothing"
+    );
+    d.stop().await;
+}
+
 #[tokio::test]
 async fn the_post_grant_does_not_imply_join() {
     let d = start(home_with_a_poster()).await;

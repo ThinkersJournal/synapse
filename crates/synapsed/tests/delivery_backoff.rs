@@ -34,6 +34,10 @@ impl Running {
 
 /// A daemon whose account has granted `grants` (role, permission) before anyone claims.
 async fn start(grants: &[(&str, Permission)]) -> Running {
+    start_ttl(grants, None).await
+}
+
+async fn start_ttl(grants: &[(&str, Permission)], ttl: Option<chrono::Duration>) -> Running {
     let home = tempfile::tempdir().unwrap();
     Keystore::init_account(home.path(), "acct").expect("init account");
     let store = Keystore::open(home.path()).unwrap();
@@ -49,6 +53,7 @@ async fn start(grants: &[(&str, Permission)]) -> Running {
     let daemon = Daemon::open(&cfg)
         .expect("open daemon")
         .with_redelivery_gaps(vec![chrono::Duration::milliseconds(300); 3])
+        .with_queue_ttl(ttl)
         .with_redelivery_check(Duration::from_millis(50));
     let started_at = daemon.started_at();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -319,4 +324,33 @@ async fn fire_and_forget_is_delivered_once_and_its_sender_is_not_told() {
         fetch(&d, &a).await.is_empty(),
         "no [UNACKED] notice for the sender"
     );
+}
+
+/// A message nobody reads for longer than the queue ttl is set aside and its sender told once with
+/// `[EXPIRED]` (messaging step 2b); it is not offered to the receiver afterwards.
+#[tokio::test]
+async fn an_unread_message_expires_and_its_sender_is_told() {
+    let d = start_ttl(&[], Some(chrono::Duration::milliseconds(400))).await;
+    let a = claim(&d, "a").await;
+    let b = claim(&d, "b").await;
+    send(&d, &a, "t1", "[STATUS] lane=a doing=x").await;
+    let mut notice = Vec::new();
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        notice = fetch(&d, &a).await;
+        if !notice.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(notice.len(), 1, "one notice");
+    let body = text(&notice[0]);
+    assert!(
+        body.starts_with("[EXPIRED] to=b id=a@acct/t1 age="),
+        "{body}"
+    );
+    assert!(
+        fetch(&d, &b).await.is_empty(),
+        "expired mail is not offered"
+    );
+    assert_eq!(dead_lettered(&d, &a, "b").await, 1);
 }

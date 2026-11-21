@@ -899,6 +899,18 @@ impl Daemon {
         self.with_session_ttl(chrono::Duration::hours(i64::from(hours.max(1))))
     }
 
+    /// How long an unread message may sit in a queue before it is set aside as expired and its
+    /// sender told (`[EXPIRED]`); none by default. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_queue_ttl(mut self, ttl: Option<chrono::Duration>) -> Daemon {
+        self.shared
+            .mailbox
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_ttl(ttl);
+        self
+    }
+
     /// Sets the redelivery back-off: how long an unacked message stays hidden after each delivery.
     /// The count of gaps is also how many deliveries it gets before it is set aside as dead and its
     /// sender is told; empty turns the back-off off. Call after `open`, before `serve`.
@@ -1712,12 +1724,14 @@ async fn send(
         }
     };
     let declared_mode = body.mode.clone();
-    let fire_and_forget = match body.delivery.as_ref().and_then(|d| d.mode.as_deref()) {
+    let delivery_mode = body.delivery.as_ref().and_then(|d| d.mode.as_deref());
+    let fire_and_forget = match delivery_mode {
         None | Some("reliable") => false,
-        Some("fire_and_forget") => true,
+        // A room post to everyone, no ack required: each copy is fire and forget.
+        Some("fire_and_forget" | "room_broadcast") => true,
         Some(_) => {
             return Err(malformed(
-                "delivery.mode must be reliable or fire_and_forget",
+                "delivery.mode must be reliable, fire_and_forget or room_broadcast",
             ));
         }
     };
@@ -1735,6 +1749,9 @@ async fn send(
         .rooms_snapshot()
         .rooms
         .contains_key(&envelope.to);
+    if delivery_mode == Some("room_broadcast") && !is_room {
+        return Err(malformed("delivery.mode room_broadcast is for a room"));
+    }
     if is_room {
         let seen: HashMap<String, DateTime<Utc>> = locked(&shared.presence)?
             .iter()
@@ -1992,7 +2009,7 @@ fn post_to_room(
             from: me.to_string(),
             body: envelope.body.clone(),
             mode: envelope.mode.clone(),
-            fire_and_forget: false,
+            fire_and_forget: envelope.fire_and_forget,
         });
     }
     let outcomes = mailbox.enqueue_many(&copies, now)?;
@@ -2822,10 +2839,14 @@ fn unacked_notice(gone: &Exhausted, account: &str, now: DateTime<Utc>) -> Option
         message_id: format!("{notice_from}/unacked-{}", uuid::Uuid::new_v4()),
         to: gone.from.clone(),
         from: notice_from,
-        body: format!(
-            "[UNACKED] to={role} id={} age={age} attempts={}",
-            gone.message_id, gone.attempts
-        )
+        body: if gone.expired {
+            format!("[EXPIRED] to={role} id={} age={age}", gone.message_id)
+        } else {
+            format!(
+                "[UNACKED] to={role} id={} age={age} attempts={}",
+                gone.message_id, gone.attempts
+            )
+        }
         .into_bytes(),
         mode: None,
         fire_and_forget: false,
@@ -3981,6 +4002,7 @@ mod tests {
             enqueued_at: Utc::now() - chrono::Duration::minutes(31),
             attempts: 4,
             quiet: false,
+            expired: false,
         }
     }
 

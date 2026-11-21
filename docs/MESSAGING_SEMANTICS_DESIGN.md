@@ -40,7 +40,12 @@ Built: `POST /v1/send {..., "delivery": {"mode": "fire_and_forget"}}`. The envel
 (persisted in the memory, redb and persistant stores); it is leased once, never redelivered, set aside quietly and
 counted in `dead_lettered`, and its sender gets no `[UNACKED]`. `reliable` or no `delivery` is today's behaviour;
 any other mode is `400 malformed`. Test: `fire_and_forget_is_delivered_once_and_its_sender_is_not_told` in
-`crates/synapsed/tests/delivery_backoff.rs`. The MCP `send` tool takes `delivery` too (test `send_takes_a_delivery_mode_and_the_daemon_refuses_an_unknown_one`). Not yet: room modes, TTL.
+`crates/synapsed/tests/delivery_backoff.rs`. The MCP `send` tool takes `delivery` too (test `send_takes_a_delivery_mode_and_the_daemon_refuses_an_unknown_one`). `room_broadcast` (rooms only, `400` for a direct recipient) makes every copy fire and forget; test
+`a_room_broadcast_is_delivered_once_and_the_sender_hears_no_unacked` in `crates/synapsed/tests/rooms.rs`.
+Queue TTL: `MailConfig::ttl` / `Daemon::with_queue_ttl` (off by default; no default value has been ruled): an unread
+message older than it is set aside in the dead set and its sender gets one `[EXPIRED] to=<role> id=<id> age=<time>`;
+test `an_unread_message_expires_and_its_sender_is_told` in `delivery_backoff.rs`. Not yet: `room_any`, `room_all`
+(they need the outcome tracking of slice 2c).
 
 
 `send` gains an optional `delivery` object; absent means today's behaviour (reliable direct). The sender's request is

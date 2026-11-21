@@ -57,6 +57,11 @@ pub struct MailConfig {
     /// daemon sets it to its own notice sender, so a notice (`[UNACKED]`) does not keep arriving
     /// with the age and attempts it had when it was made.
     pub single_delivery_from: Option<String>,
+    /// How long a message may sit in a queue before it is set aside as expired (`None`: no limit),
+    /// counted from when it was enqueued. An unread message then ends in the dead set and its
+    /// sender is told, like one whose deliveries ran out (docs/MESSAGING_SEMANTICS_DESIGN.md
+    /// section 3). A message leased at that moment is left alone until its lease runs out.
+    pub ttl: Option<Duration>,
 }
 
 impl MailConfig {
@@ -101,6 +106,8 @@ pub struct Exhausted {
     pub attempts: u32,
     /// The sender asked for fire and forget: set aside quietly, nobody is told.
     pub quiet: bool,
+    /// Set aside because it sat past the queue `ttl`, not because its deliveries ran out.
+    pub expired: bool,
 }
 
 impl Default for MailConfig {
@@ -115,6 +122,7 @@ impl Default for MailConfig {
             max_deliveries: 10,
             redelivery_gaps: Vec::new(),
             single_delivery_from: None,
+            ttl: None,
         }
     }
 }
@@ -772,6 +780,11 @@ impl<S: MailStore> Mailbox<S> {
     }
 
     /// Replace the redelivery back-off (see [`MailConfig::redelivery_gaps`]); empty turns it off.
+    /// Set the queue time limit (see [`MailConfig::ttl`]).
+    pub fn set_ttl(&mut self, ttl: Option<Duration>) {
+        self.config.ttl = ttl;
+    }
+
     pub fn set_redelivery_gaps(&mut self, gaps: Vec<Duration>) {
         self.config.redelivery_gaps = gaps;
     }
@@ -1287,6 +1300,7 @@ impl<S: MailStore> Mailbox<S> {
                             enqueued_at: stored.enqueued_at,
                             attempts: stored.attempts,
                             quiet: stored.envelope.fire_and_forget,
+                            expired: false,
                         });
                         txn.put(&dead_set, stored).map_err(MailError::Store)?;
                         continue;
@@ -1476,7 +1490,10 @@ impl<S: MailStore> Mailbox<S> {
         let config = self.config.clone();
         let roles = self.roles.snapshot();
         let mut moved: Vec<Exhausted> = Vec::new();
-        if config.delivery_cap() > 0 || config.single_delivery_from.is_some() {
+        if config.delivery_cap() > 0
+            || config.single_delivery_from.is_some()
+            || config.ttl.is_some()
+        {
             self.store.write(&mut |txn| {
                 moved.clear();
                 for role in roles.roles.keys() {
@@ -1484,17 +1501,19 @@ impl<S: MailStore> Mailbox<S> {
                     txn.scan(role, &mut |stored| {
                         let cap =
                             config.cap_for(&stored.envelope.from, stored.envelope.fire_and_forget);
-                        if cap > 0
-                            && stored.attempts >= cap
-                            && stored.lease.as_ref().is_none_or(|held| held.until <= now)
-                        {
-                            due.push(stored.clone());
+                        let idle = stored.lease.as_ref().is_none_or(|held| held.until <= now);
+                        let ran_out = cap > 0 && stored.attempts >= cap;
+                        let stale = config
+                            .ttl
+                            .is_some_and(|ttl| stored.enqueued_at + ttl <= now);
+                        if idle && (ran_out || stale) {
+                            due.push((stored.clone(), !ran_out));
                         }
                         true
                     })
                     .map_err(MailError::Store)?;
                     let dead_set = dead_role(role);
-                    for mut stored in due {
+                    for (mut stored, expired) in due {
                         let (count, bytes) = txn.stats(&dead_set).map_err(MailError::Store)?;
                         if count >= config.max_messages
                             || bytes.saturating_add(stored.envelope.body.len() as u64)
@@ -1512,6 +1531,7 @@ impl<S: MailStore> Mailbox<S> {
                             enqueued_at: stored.enqueued_at,
                             attempts: stored.attempts,
                             quiet: stored.envelope.fire_and_forget,
+                            expired,
                         });
                         txn.put(&dead_set, stored).map_err(MailError::Store)?;
                     }
