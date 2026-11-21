@@ -48,23 +48,72 @@ impl Default for LauncherConfig {
     }
 }
 
+/// Which senders may raise a launch signal (`launch.senders_mode`; CireSnave 2026-11-21: "remove the
+/// allow list requirement so we don't have to keep updating the allow list ... Until then, we can make
+/// it anyone"). The default is the fail-closed list. A later `ancestors` mode (only an ancestor of the
+/// target may wake it) needs the hierarchy of `docs/HIERARCHY-DESIGN.md` and is refused until it exists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SendersMode {
+    /// Only the listed senders (today's behaviour; an empty list allows nobody).
+    #[default]
+    List,
+    /// Every authenticated sender, no list.
+    Any,
+}
+
+impl SendersMode {
+    /// Parse a `launch.senders_mode` value.
+    ///
+    /// # Errors
+    /// A message for the operator when the value is not a mode that exists.
+    pub fn parse(value: &str) -> Result<SendersMode, String> {
+        match value.trim() {
+            "list" => Ok(SendersMode::List),
+            "any" => Ok(SendersMode::Any),
+            "ancestors" => Err(
+                "launch.senders_mode: `ancestors` is not built yet (it needs the account hierarchy); use `list` or `any`"
+                    .to_string(),
+            ),
+            other => Err(format!(
+                "launch.senders_mode: {other:?} is not a mode (list or any)"
+            )),
+        }
+    }
+}
+
 /// The authenticated senders whose pending mail may raise a launch signal. Shared, so a change
-/// applies on the next poll. Empty allows nobody: it is never "anyone".
+/// applies on the next poll. In `list` mode an empty list allows nobody: it is never "anyone"; only
+/// the explicit `any` mode allows everyone.
 #[derive(Debug, Clone, Default)]
-pub struct LaunchSenders(Arc<RwLock<Vec<String>>>);
+pub struct LaunchSenders(Arc<RwLock<(SendersMode, Vec<String>)>>);
 
 impl LaunchSenders {
     /// Replace the list. Each entry is `role` (this daemon's account) or `role@account`.
     pub fn set(&self, senders: Vec<String>) {
         if let Ok(mut held) = self.0.write() {
-            *held = senders;
+            held.1 = senders;
         }
+    }
+
+    /// Set the mode.
+    pub fn set_mode(&self, mode: SendersMode) {
+        if let Ok(mut held) = self.0.write() {
+            held.0 = mode;
+        }
+    }
+
+    /// The mode in force. A poisoned lock reads as `list` (fail closed).
+    #[must_use]
+    pub fn mode(&self) -> SendersMode {
+        self.0.read().map_or(SendersMode::List, |held| held.0)
     }
 
     /// Whether no sender is allowed. A poisoned lock reads as empty (fail closed).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.read().map_or(true, |held| held.is_empty())
+        self.0.read().map_or(true, |held| {
+            held.0 == SendersMode::List && held.1.is_empty()
+        })
     }
 
     /// Whether `from`, a sender's global id `role@account`, is listed. A bare listed role means
@@ -72,14 +121,15 @@ impl LaunchSenders {
     #[must_use]
     pub fn allows(&self, from: &str, account: &str) -> bool {
         self.0.read().is_ok_and(|held| {
-            held.iter().any(|entry| {
-                if entry.contains('@') {
-                    entry == from
-                } else {
-                    from.split_once('@')
-                        .is_some_and(|(role, acct)| role == entry && acct == account)
-                }
-            })
+            held.0 == SendersMode::Any
+                || held.1.iter().any(|entry| {
+                    if entry.contains('@') {
+                        entry == from
+                    } else {
+                        from.split_once('@')
+                            .is_some_and(|(role, acct)| role == entry && acct == account)
+                    }
+                })
         })
     }
 }

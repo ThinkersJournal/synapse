@@ -525,3 +525,30 @@ async fn send_tells_the_sender_whether_the_recipient_is_online() {
     );
     d.stop().await;
 }
+
+/// `launch.senders_mode = any` (CireSnave 2026-11-21): every authenticated sender raises a signal with no
+/// list; `list` (the default) stays fail-closed, and switching back stops it again.
+#[tokio::test]
+async fn any_mode_signals_for_an_unlisted_sender_and_list_mode_does_not() {
+    let d = start_with(&["overmind"], &[]).await;
+    let (launcher, _beta, gamma) = two_senders(&d).await;
+    send_to_alpha(&d, &gamma, "m1").await;
+    silence(&d).await;
+    let (_, w) = get(&d, "/v1/waiting", &launcher).await;
+    assert_eq!(
+        w["roles"],
+        json!([]),
+        "list mode with an empty list: nobody: {w}"
+    );
+    d.senders.set_mode(synapsed::SendersMode::Any);
+    let (s, w) = get(&d, "/v1/waiting", &launcher).await;
+    assert_eq!(s, 200, "{w}");
+    assert_eq!(
+        w["roles"][0]["count"], 1,
+        "any mode: gamma is not listed and signals: {w}"
+    );
+    d.senders.set_mode(synapsed::SendersMode::List);
+    let (_, w) = get(&d, "/v1/waiting", &launcher).await;
+    assert_eq!(w["roles"], json!([]), "back to list mode: {w}");
+    d.stop().await;
+}

@@ -68,7 +68,7 @@ use synapse::security_events::{
 use synapse_security::{AlertSink, AlertTransport, FanoutSink, FileSink};
 
 pub mod launch;
-pub use launch::{LaunchSenders, LauncherConfig};
+pub use launch::{LaunchSenders, LauncherConfig, SendersMode};
 pub use select::{Selection, select_store};
 
 /// Where and how the daemon runs.
@@ -882,6 +882,14 @@ impl Daemon {
     #[must_use]
     pub fn with_launch_senders(self, senders: Vec<String>) -> Daemon {
         self.shared.launch_senders.set(senders);
+        self
+    }
+
+    /// Sets who may raise a launch signal: `List` (the default) or `Any` (every authenticated
+    /// sender). Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_launch_senders_mode(self, mode: SendersMode) -> Daemon {
+        self.shared.launch_senders.set_mode(mode);
         self
     }
 
