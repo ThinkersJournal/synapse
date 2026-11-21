@@ -1,3 +1,0 @@
-Added: `launch.senders_mode` (`list`, the default, or `any`): with `any` every authenticated sender's pending mail may raise a launch signal and no allow list is kept (CireSnave 2026-11-21)
-
-`SYNAPSE_LAUNCH_SENDERS_MODE` or `launch.senders_mode` in `synapsed.toml`; the daemon re-reads it every 5 s with `launch.senders`. `list` is unchanged and fail-closed (an empty list allows nobody). `ancestors` is refused with a message until the account hierarchy exists (`docs/HIERARCHY-DESIGN.md` section 5). The rate cap and launch record are unchanged. Evidence: `any_mode_signals_for_an_unlisted_sender_and_list_mode_does_not` (`crates/synapsed/tests/launch.rs`) and `launch_senders_mode_defaults_to_list_and_takes_any_but_not_ancestors_yet` (`tests/settings.rs`).
