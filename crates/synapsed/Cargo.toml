@@ -30,6 +30,7 @@ ring = "0.17"
 uuid = { version = "1.6", features = ["v4"] }
 configurant = "0.7"
 synapse-mailbox-persistant = { path = "../synapse-mailbox-persistant", version = "6.0.0-rc.264", optional = true }
+synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.264" }
 
 [features]
 # On by default (ROADMAP row 42, slice A): a new home is served from PersistAnt SQLite (WAL,
@@ -40,7 +41,6 @@ sqlite-store = ["dep:synapse-mailbox-persistant"]
 
 [dev-dependencies]
 synapse = { path = "../..", version = "6.0.0-rc.264", features = ["mailbox-conformance"] }
-synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.264" }
 reqwest = { version = "0.13.5", features = ["json"] }
 tempfile = "3.0"
 ed25519-dalek = { version = "3.0.0", features = ["pkcs8", "pem"] }

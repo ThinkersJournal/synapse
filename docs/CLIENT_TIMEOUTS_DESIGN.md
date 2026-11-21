@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # Client timeouts under load (design note, pm-platform [TASK] 2026-11-21)
 
-Status: **design note first; tests and fixes follow in the same PR.** Facts below were read at `origin/main`
+Status: **built (R1-R6), tests in `crates/synapsed-client/src/timeout_tests.rs`, `src/timeout.rs` and `crates/synapsed/tests/latency_file.rs`; one mutation run per rule, except R2's "connect never spawns", which is covered by `locate` returning `Slow`/`Found` (a test through `connect` could start a real `synapsed` from PATH when it breaks).** Facts below were read at `origin/main`
 `c6fcc4a4` unless marked *unverified*. The task came from the PM's measurement (2026-11-21 22:25Z: daemon pid
 50276 alive holding the store, an HTTP probe took 3.2 s at 100% CPU) and CireSnave's question (verbatim per
 the PM): *"Can the timeouts be based on a running average so when things take longer it allows them to take
@@ -31,8 +31,8 @@ How a slow daemon is read today:
 2. Only `read_announce` checks that the announced **pid is alive** (`daemon_alive`); that result is thrown away
    once the probe is silent. So a live pid with a slow answer and a dead daemon look identical.
 3. `connect` (the CLI path; not `connect_existing`) then **spawns another `synapsed`**. `synapsed` exits with code
-   2 on a startup refusal (`crates/synapsed/src/main.rs` lines 62-140 return `ExitCode::from(2)`; which of them
-   is the held store lock was *not* identified for this note).
+   2 on a startup refusal (`crates/synapsed/src/main.rs` lines 62-140 return `ExitCode::from(2)`; a second daemon on
+   the same home is refused by redb's file lock, `Daemon::open`, `crates/synapsed/src/lib.rs:680`).
 4. `Daemon::call` / `request` make one attempt. A transport failure is returned as
    `MailError::Transport(e.without_url().to_string())`, which for a reqwest connect or timeout error prints only
    `error sending request`. The message does not say which of connect, read timeout or total timeout fired.
