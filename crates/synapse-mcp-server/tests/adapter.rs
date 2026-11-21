@@ -268,6 +268,7 @@ async fn the_tool_set_and_the_untrusted_wording() {
             "leave",
             "list",
             "members",
+            "nack",
             "revoke_share",
             "rooms",
             "send",
@@ -285,6 +286,68 @@ async fn the_tool_set_and_the_untrusted_wording() {
         let description = tool.description.as_deref().unwrap_or("");
         assert!(description.contains("UNTRUSTED"), "{name}: {description}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nack_declines_a_message_and_the_sender_is_told() {
+    let home = Home::new();
+    let alice = agent(&home, "alice").await;
+    let bob = agent(&home, "bob").await;
+    alice
+        .ok(
+            "send",
+            json!({"to": "bob", "body": "take this", "message_id": "n1"}),
+        )
+        .await;
+    let fetched = bob.ok("fetch", json!({})).await;
+    let id = fetched["messages"][0]["message_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let reply = bob
+        .ok("nack", json!({"message_id": id, "reason": "not my area"}))
+        .await;
+    assert_eq!(reply["outcome"], "declined", "{reply}");
+    let mut notice = String::new();
+    for _ in 0..40 {
+        let got = alice.ok("fetch", json!({})).await;
+        if let Some(m) = got["messages"].as_array().and_then(|m| m.first()) {
+            notice = m["body"].as_str().unwrap().to_string();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        notice,
+        "[DECLINED] to=bob id=alice@acct/n1 reason=not_my_area"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_takes_a_delivery_mode_and_the_daemon_refuses_an_unknown_one() {
+    let home = Home::new();
+    let alice = agent(&home, "alice").await;
+    let bob = agent(&home, "bob").await;
+    let sent = alice
+        .ok(
+            "send",
+            json!({"to": "bob", "body": "once", "message_id": "d1", "delivery": "fire_and_forget"}),
+        )
+        .await;
+    assert_eq!(sent["outcome"], "queued", "{sent}");
+    let refused = alice
+        .refused(
+            "send",
+            json!({"to": "bob", "body": "x", "message_id": "d2", "delivery": "sometimes"}),
+        )
+        .await;
+    assert!(refused.contains("delivery.mode"), "{refused}");
+    let fetched = bob.ok("fetch", json!({})).await;
+    assert_eq!(
+        fetched["messages"].as_array().unwrap().len(),
+        1,
+        "{fetched}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

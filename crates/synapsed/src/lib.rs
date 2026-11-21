@@ -57,7 +57,7 @@ use synapse::certificate::{RevocationLookup, chain_from_pem};
 use synapse::keystore::{Keystore, KeystoreError};
 use synapse::mailbox::{
     Acked, Depth, DurabilityClass, Enqueued, Envelope, Exhausted, MailConfig, MailError, MailStore,
-    MailTxn, Mailbox, RedbStore, StoreError,
+    MailTxn, Mailbox, Nacked, RedbStore, StoreError,
 };
 use synapse::roles::{ClaimRequest, RolesState};
 use synapse::security_events::{
@@ -567,6 +567,7 @@ fn queue_alert(shared: &Shared, roles: &[String], fallback: &Arc<dyn SecuritySin
             from: format!("{ALERT_SENDER}@{}", shared.account),
             body: body.clone(),
             mode: None,
+            fire_and_forget: false,
         };
         let result = match shared.mailbox.lock() {
             Ok(mut mailbox) => mailbox.enqueue(envelope, now).map(|_| ()),
@@ -616,6 +617,7 @@ fn deliver_state_notices_once(shared: &Shared) -> bool {
             from: format!("{STATE_SENDER}@{}", shared.account),
             body: notice.body().into_bytes(),
             mode: None,
+            fire_and_forget: false,
         };
         let queued = match shared.mailbox.lock() {
             Ok(mut mailbox) => mailbox.enqueue(envelope, Utc::now()).is_ok(),
@@ -1061,6 +1063,7 @@ impl Daemon {
             .route("/v1/send", post(send))
             .route("/v1/fetch", post(fetch))
             .route("/v1/ack", post(ack))
+            .route("/v1/nack", post(nack))
             .route("/v1/dead", get(dead))
             .route("/v1/requeue", post(requeue))
             .route("/v1/heartbeat", post(heartbeat))
@@ -1643,6 +1646,17 @@ struct SendBody {
     /// behaviour (the soft lint); see `synapse::message_format::Mode`.
     #[serde(default)]
     mode: Option<String>,
+    /// Delivery mode (docs/MESSAGING_SEMANTICS_DESIGN.md section 3): `reliable` (the default) or
+    /// `fire_and_forget`. Anything else is refused, never ignored.
+    #[serde(default)]
+    delivery: Option<DeliveryRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliveryRequest {
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 async fn send(
@@ -1698,12 +1712,22 @@ async fn send(
         }
     };
     let declared_mode = body.mode.clone();
+    let fire_and_forget = match body.delivery.as_ref().and_then(|d| d.mode.as_deref()) {
+        None | Some("reliable") => false,
+        Some("fire_and_forget") => true,
+        Some(_) => {
+            return Err(malformed(
+                "delivery.mode must be reliable or fire_and_forget",
+            ));
+        }
+    };
     let envelope = Envelope {
         message_id: message_id.clone(),
         to: body.to,
         from: session.global_id.clone(),
         body: body_bytes,
         mode: declared_mode,
+        fire_and_forget,
     };
     // A post to a room fans out to its members (docs/ROOMS_DESIGN.md section 9). Presence is read
     // before the mailbox lock is taken, so the two locks are never held in the other order.
@@ -1968,6 +1992,7 @@ fn post_to_room(
             from: me.to_string(),
             body: envelope.body.clone(),
             mode: envelope.mode.clone(),
+            fire_and_forget: false,
         });
     }
     let outcomes = mailbox.enqueue_many(&copies, now)?;
@@ -2209,6 +2234,120 @@ async fn ack(
     .into_response())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NackBody {
+    message_id: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// `POST /v1/nack`: decline a message the caller holds ("cannot handle this, pass it on"). It leaves
+/// the caller's queue for good and the sender gets one `[DECLINED]` notice carrying the reason, so
+/// the sender can fail over (docs/MESSAGING_SEMANTICS_DESIGN.md section 2). Idempotent.
+async fn nack(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let body: NackBody = parse(&headers, &body)?;
+    if body
+        .reason
+        .as_ref()
+        .is_some_and(|r| r.len() > MAX_NACK_REASON)
+    {
+        return Err(malformed("reason"));
+    }
+    let now = Utc::now();
+    let result =
+        locked(&shared.mailbox)?.nack(&session.global_id, session.epoch, &body.message_id, now);
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(e @ (MailError::NotFound | MailError::NotYourLease)) => {
+            // Counted per role, like a bad ack: recorded only once over budget.
+            let delay = shared.security.over_budget(
+                &shared.security.misuse,
+                &session.global_id,
+                "synapsed/nack",
+                &session.global_id,
+                if matches!(e, MailError::NotFound) {
+                    "not_found"
+                } else {
+                    "not_your_lease"
+                },
+            );
+            return Err(ApiError::from(e).after(delay));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let word = match outcome {
+        Nacked::Declined { .. } => "declined",
+        Nacked::AlreadyHandled => "already_handled",
+    };
+    if let Nacked::Declined {
+        to,
+        from,
+        message_id,
+    } = outcome
+    {
+        count(&shared, &session.global_id, |c| c.nacked += 1);
+        let notice_from = format!("{NOTICE_SENDER}@{}", shared.account);
+        // Never a notice about a notice; a room copy's outcome is reported per post (a later slice).
+        if from != notice_from && room_copy(&message_id).is_none() {
+            let reason = body.reason.as_deref().map(reason_word);
+            let notice =
+                declined_notice(&to, &from, &message_id, reason.as_deref(), &shared.account);
+            if let Err(e) = locked(&shared.mailbox)?.enqueue(notice, now) {
+                eprintln!("synapsed: a [DECLINED] notice was not queued: {e}");
+            }
+        }
+    }
+    Ok(axum::Json(json!({ "outcome": word })).into_response())
+}
+
+/// The longest `reason` a nack may carry, in bytes.
+const MAX_NACK_REASON: usize = 200;
+
+/// The reason as one header value: no spaces (the header format forbids them), at most 60 bytes.
+fn reason_word(reason: &str) -> String {
+    let word: String = reason
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ':') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(60)
+        .collect();
+    word.trim_matches('_').to_string()
+}
+
+/// `[DECLINED] to=<role> id=<message_id> reason=<word>`: the one mail that tells a sender its
+/// message was declined, from the daemon. `reason=-` when the receiver gave none.
+fn declined_notice(
+    to: &str,
+    from: &str,
+    message_id: &str,
+    reason: Option<&str>,
+    account: &str,
+) -> Envelope {
+    let notice_from = format!("{NOTICE_SENDER}@{account}");
+    let role = to.split_once('@').map_or(to, |(r, _)| r);
+    let reason = reason.filter(|r| !r.is_empty()).unwrap_or("-");
+    Envelope {
+        message_id: format!("{notice_from}/declined-{}", uuid::Uuid::new_v4()),
+        to: from.to_string(),
+        from: notice_from,
+        body: format!("[DECLINED] to={role} id={message_id} reason={reason}").into_bytes(),
+        mode: None,
+        fire_and_forget: false,
+    }
+}
+
 /// The caller's dead set (messages leased `max_deliveries` times and never acked), oldest first,
 /// bodies included. Changes nothing.
 async fn dead(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Result<Response, ApiError> {
@@ -2410,6 +2549,8 @@ struct RoleCounters {
     last_ack_at: Option<DateTime<Utc>>,
     /// Messages for the role set aside as dead after their deliveries ran out without an ack.
     dead_lettered: u64,
+    /// Messages the role declined with a nack.
+    nacked: u64,
     /// New messages the role sent whose first line was not a `MESSAGE-FORMATS` v1 header (a soft lint
     /// that never rejects). Compare with `submitted` for the rate.
     lint_warnings: u64,
@@ -2435,6 +2576,10 @@ fn report_exhausted(shared: &Shared) {
     let notice_from = format!("{NOTICE_SENDER}@{}", shared.account);
     for gone in exhausted {
         count(shared, &gone.to, |c| c.dead_lettered += 1);
+        // Fire and forget: the sender asked not to be told, so nobody is.
+        if gone.quiet {
+            continue;
+        }
         // A room copy is not told one by one: its sender hears once per post, after the grace.
         if let Some((base, room)) = room_copy(&gone.message_id) {
             if gone.from != notice_from
@@ -2611,6 +2756,7 @@ fn stall_sweep(shared: &Shared, now: DateTime<Utc>) {
             from: notice_from.clone(),
             body: body.into_bytes(),
             mode: None,
+            fire_and_forget: false,
         };
         if let Err(e) = mailbox.enqueue(envelope, now) {
             eprintln!("synapsed: a [STALLED] notice was not queued: {e}");
@@ -2647,6 +2793,7 @@ fn flush_room_notices(shared: &Shared, notice_from: &str, now: DateTime<Utc>) {
             from: notice_from.to_string(),
             body: format!("[ROOM-UNACKED] room={room} id={id} unacked={unacked}").into_bytes(),
             mode: None,
+            fire_and_forget: false,
         };
         let Ok(mut mailbox) = shared.mailbox.lock() else {
             return;
@@ -2681,6 +2828,7 @@ fn unacked_notice(gone: &Exhausted, account: &str, now: DateTime<Utc>) -> Option
         )
         .into_bytes(),
         mode: None,
+        fire_and_forget: false,
     })
 }
 
@@ -2796,6 +2944,7 @@ async fn stats(
                 "last_fetch_at": c.last_fetch_at.map(|at| at.to_rfc3339()),
                 "last_ack_at": c.last_ack_at.map(|at| at.to_rfc3339()),
                 "dead_lettered": c.dead_lettered,
+                "nacked": c.nacked,
                 "lint_warnings": c.lint_warnings,
             })
         })
@@ -3831,6 +3980,7 @@ mod tests {
             message_id: "a@acct/m1".into(),
             enqueued_at: Utc::now() - chrono::Duration::minutes(31),
             attempts: 4,
+            quiet: false,
         }
     }
 

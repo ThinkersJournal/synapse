@@ -267,6 +267,7 @@ async fn a_hand_written_client_negotiates_receives_the_push_and_acks_it() {
             "leave",
             "list",
             "members",
+            "nack",
             "revoke_share",
             "rooms",
             "send",
