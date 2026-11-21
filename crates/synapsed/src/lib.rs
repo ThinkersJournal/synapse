@@ -26,6 +26,7 @@
 #[cfg(feature = "sqlite-store")]
 pub mod access;
 mod migration;
+mod room_outcome;
 
 pub mod format_lint;
 mod select;
@@ -298,6 +299,10 @@ struct Shared {
     /// Room copies that ran out of deliveries, waiting out [`ROOM_NOTICE_GRACE`] so one post
     /// earns its sender one notice, not one per member; in memory.
     room_unacked: Mutex<RoomUnacked>,
+    /// Room posts sent `room_any` / `room_all`, waiting for their acks; in memory.
+    room_posts: Mutex<room_outcome::Tracker>,
+    /// How long such a post waits before its sender is told it timed out.
+    room_outcome_timeout: chrono::Duration,
     /// A role idle longer than this is retired by the sweep.
     role_ttl: chrono::Duration,
     /// Mail waits this long for an offline role before its senders are told (`[STALLED]`).
@@ -798,6 +803,8 @@ impl Daemon {
                 room_limits: RoomLimits::default(),
                 room_rate: Mutex::new(HashMap::new()),
                 room_unacked: Mutex::new(BTreeMap::new()),
+                room_posts: Mutex::new(room_outcome::Tracker::default()),
+                room_outcome_timeout: chrono::Duration::minutes(10),
                 role_ttl: chrono::Duration::days(DEFAULT_ROLE_TTL_DAYS),
                 stall_after: chrono::Duration::minutes(15),
                 stall_realert: chrono::Duration::hours(6),
@@ -969,6 +976,14 @@ impl Daemon {
     #[must_use]
     pub fn with_room_limits(mut self, limits: RoomLimits) -> Daemon {
         self.shared.room_limits = limits;
+        self
+    }
+
+    /// How long a `room_any` / `room_all` post waits for its acks before its sender is told it
+    /// timed out (default 10 minutes). Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_room_outcome_timeout(mut self, wait: chrono::Duration) -> Daemon {
+        self.shared.room_outcome_timeout = wait;
         self
     }
 
@@ -1729,11 +1744,17 @@ async fn send(
         None | Some("reliable") => false,
         // A room post to everyone, no ack required: each copy is fire and forget.
         Some("fire_and_forget" | "room_broadcast") => true,
+        Some("room_any" | "room_all") => false,
         Some(_) => {
             return Err(malformed(
-                "delivery.mode must be reliable, fire_and_forget or room_broadcast",
+                "delivery.mode must be reliable, fire_and_forget, room_broadcast, room_any or room_all",
             ));
         }
+    };
+    let need = match delivery_mode {
+        Some("room_any") => Some(room_outcome::Need::Any),
+        Some("room_all") => Some(room_outcome::Need::All),
+        _ => None,
     };
     let envelope = Envelope {
         message_id: message_id.clone(),
@@ -1749,8 +1770,10 @@ async fn send(
         .rooms_snapshot()
         .rooms
         .contains_key(&envelope.to);
-    if delivery_mode == Some("room_broadcast") && !is_room {
-        return Err(malformed("delivery.mode room_broadcast is for a room"));
+    if (delivery_mode == Some("room_broadcast") || need.is_some()) && !is_room {
+        return Err(malformed(
+            "delivery.mode room_broadcast, room_any and room_all are for a room",
+        ));
     }
     if is_room {
         let seen: HashMap<String, DateTime<Utc>> = locked(&shared.presence)?
@@ -1759,7 +1782,9 @@ async fn send(
             .collect();
         let mut mailbox = locked(&shared.mailbox)?;
         mailbox.check(&session.global_id, session.epoch)?;
-        if let Some(mut reply) = post_to_room(&shared, &session, &mut mailbox, &envelope, &seen)? {
+        if let Some(mut reply) =
+            post_to_room(&shared, &session, &mut mailbox, &envelope, &seen, need)?
+        {
             drop(mailbox);
             if let Some(warning) = lint {
                 reply["warning"] = Value::String(warning);
@@ -1892,6 +1917,7 @@ fn post_to_room(
     mailbox: &mut Mailbox<DaemonStore>,
     envelope: &Envelope,
     seen: &HashMap<String, DateTime<Utc>>,
+    need: Option<room_outcome::Need>,
 ) -> Result<Option<Value>, ApiError> {
     let rooms = mailbox.rooms_snapshot();
     let Some(room) = rooms.rooms.get(&envelope.to) else {
@@ -2024,6 +2050,34 @@ fn post_to_room(
     for (copy, outcome) in copies.iter().zip(&outcomes) {
         if *outcome == synapse::mailbox::Fanout::Queued {
             count(shared, &copy.to, |c| c.sent += 1);
+        }
+    }
+    if let Some(need) = need {
+        let members: std::collections::BTreeSet<String> = copies
+            .iter()
+            .zip(&outcomes)
+            .filter(|(_, o)| **o == synapse::mailbox::Fanout::Queued)
+            .map(|(c, _)| c.to.clone())
+            .collect();
+        if !members.is_empty()
+            && let Ok(mut tracker) = shared.room_posts.lock()
+        {
+            let id = envelope
+                .message_id
+                .split_once('/')
+                .map_or(envelope.message_id.as_str(), |(_, id)| id)
+                .to_string();
+            tracker.register(
+                copy_id.clone(),
+                room_outcome::Post::new(
+                    need,
+                    me.to_string(),
+                    id,
+                    envelope.to.clone(),
+                    members,
+                    now + shared.room_outcome_timeout,
+                ),
+            );
         }
     }
     count(shared, me, |c| c.submitted += 1);
@@ -2244,6 +2298,12 @@ async fn ack(
             c.acked += 1;
             c.last_ack_at = Some(now);
         });
+        let told = shared
+            .room_posts
+            .lock()
+            .ok()
+            .and_then(|mut t| t.acked(&body.message_id, &session.global_id, now));
+        send_room_outcomes(&shared, told, now);
     }
     Ok(axum::Json(json!({
         "outcome": match outcome { Acked::Removed => "removed", Acked::AlreadyAcked => "already_acked" },
@@ -2309,6 +2369,12 @@ async fn nack(
     } = outcome
     {
         count(&shared, &session.global_id, |c| c.nacked += 1);
+        let told = shared
+            .room_posts
+            .lock()
+            .ok()
+            .and_then(|mut t| t.declined(&message_id, &session.global_id, now));
+        send_room_outcomes(&shared, told, now);
         let notice_from = format!("{NOTICE_SENDER}@{}", shared.account);
         // Never a notice about a notice; a room copy's outcome is reported per post (a later slice).
         if from != notice_from && room_copy(&message_id).is_none() {
@@ -2599,6 +2665,15 @@ fn report_exhausted(shared: &Shared) {
         }
         // A room copy is not told one by one: its sender hears once per post, after the grace.
         if let Some((base, room)) = room_copy(&gone.message_id) {
+            // A post waiting for acks reports through its own outcome, not the per-post count.
+            let told = shared.room_posts.lock().ok().and_then(|mut t| {
+                t.tracked(&gone.message_id)
+                    .then(|| t.dead(&gone.message_id, &gone.to, now))
+            });
+            if let Some(told) = told {
+                send_room_outcomes(shared, told, now);
+                continue;
+            }
             if gone.from != notice_from
                 && let Ok(mut pending) = shared.room_unacked.lock()
             {
@@ -2620,6 +2695,36 @@ fn report_exhausted(shared: &Shared) {
         }
     }
     flush_room_notices(shared, &notice_from, now);
+    let timed_out = shared
+        .room_posts
+        .lock()
+        .map(|mut t| t.expire(now))
+        .unwrap_or_default();
+    for told in timed_out {
+        send_room_outcomes(shared, Some(told), now);
+    }
+}
+
+/// Mail a room post's outcome to its sender, once.
+fn send_room_outcomes(shared: &Shared, told: Option<room_outcome::Outcome>, now: DateTime<Utc>) {
+    let Some(told) = told else {
+        return;
+    };
+    let notice_from = format!("{NOTICE_SENDER}@{}", shared.account);
+    let notice = Envelope {
+        message_id: format!("{notice_from}/room-outcome-{}", uuid::Uuid::new_v4()),
+        to: told.sender,
+        from: notice_from,
+        body: told.body.into_bytes(),
+        mode: None,
+        fire_and_forget: false,
+    };
+    let Ok(mut mailbox) = shared.mailbox.lock() else {
+        return;
+    };
+    if let Err(e) = mailbox.enqueue(notice, now) {
+        eprintln!("synapsed: a [ROOM-OUTCOME] notice was not queued: {e}");
+    }
 }
 
 /// A short age: seconds under two minutes, minutes under two hours, else hours.

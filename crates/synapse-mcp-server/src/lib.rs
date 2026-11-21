@@ -334,7 +334,7 @@ pub struct SendArgs {
     /// MESSAGE-FORMATS v1 message, which the daemon checks and refuses when it is not one).
     #[serde(default)]
     pub mode: Option<String>,
-    /// Delivery: `reliable` (the default: redelivered until acked, you are told when it runs out)
+    /// Delivery: `reliable` (the default: redelivered until acked, you are told when it runs out), `room_broadcast`, `room_any` or `room_all` (room posts: the daemon mails you one `[ROOM-OUTCOME]`)
     /// or `fire_and_forget` (delivered once, never redelivered, nobody tells you if it is not read).
     #[serde(default)]
     pub delivery: Option<String>,

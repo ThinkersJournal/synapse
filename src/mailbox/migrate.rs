@@ -420,6 +420,7 @@ mod import_tests {
                 from: "f".into(),
                 body: id.as_bytes().to_vec(),
                 mode: None,
+                fire_and_forget: false,
             },
             seq,
             enqueued_at: at(1_000 + seq as i64),

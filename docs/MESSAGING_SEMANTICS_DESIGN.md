@@ -44,8 +44,7 @@ any other mode is `400 malformed`. Test: `fire_and_forget_is_delivered_once_and_
 `a_room_broadcast_is_delivered_once_and_the_sender_hears_no_unacked` in `crates/synapsed/tests/rooms.rs`.
 Queue TTL: `MailConfig::ttl` / `Daemon::with_queue_ttl` (off by default; no default value has been ruled): an unread
 message older than it is set aside in the dead set and its sender gets one `[EXPIRED] to=<role> id=<id> age=<time>`;
-test `an_unread_message_expires_and_its_sender_is_told` in `delivery_backoff.rs`. Not yet: `room_any`, `room_all`
-(they need the outcome tracking of slice 2c).
+test `an_unread_message_expires_and_its_sender_is_told` in `delivery_backoff.rs`. `room_any` and `room_all` are built with slice 2c below.
 
 
 `send` gains an optional `delivery` object; absent means today's behaviour (reliable direct). The sender's request is
@@ -63,7 +62,20 @@ Bounded buffers: the per-receiver queue already has `max_messages`/`max_bytes`; 
 (`mailbox_full`) and the sender told. A default `ttl_secs` is added so an unread message expires instead of sitting
 forever; expiry is reported to the sender like a dead letter.
 
-## 4. Slice 2c: outcome to the sender (PLANNED)
+## 4. Slice 2c: outcome to the sender (BUILT for `room_any` / `room_all`)
+
+`send {to: <room>, delivery: {mode: "room_any" | "room_all"}}` (a direct recipient is `400`). The members are the
+copies queued at send time (`crates/synapsed/src/room_outcome.rs`). The sender gets exactly one mail per post:
+`[ROOM-OUTCOME] room=<r> id=<id> mode=any|all result=<acked|complete|failed|incomplete|timeout> acked=<roles>
+declined=<roles> unreachable=<roles> pending=<roles>` (`-` for none). `any`: `acked` at the first ack, `failed` when
+every member declined or ran out. `all`: `complete` when all acked, `incomplete` when nobody is left to wait for
+but not all acked. Either: `timeout` after `Daemon::with_room_outcome_timeout` (default 10 min). Guard: an any-of
+never recalls the other copies once someone acked; they stay queued. Copies of a tracked post are not also counted
+in `[ROOM-UNACKED]`. State is in memory: a restart forgets pending posts (no outcome is sent for them).
+Tests: `room_any_reports_the_first_ack_and_leaves_the_other_copy_alone`, `room_all_waits_for_everyone_and_a_decline_ends_it_incomplete`,
+`an_unanswered_room_all_times_out_once` (`tests/rooms.rs`), four unit tests in `room_outcome.rs`.
+
+Original plan for reference (reliable plain room posts keep `[ROOM-UNACKED]`):
 
 For rooms the sender gets one outcome mail per post: which members acked, which declined, which did not, and what
 happened at the timeout. The roll-call member list is fixed at send time, so a dead lane or a leaver cannot wedge an
