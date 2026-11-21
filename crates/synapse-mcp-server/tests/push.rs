@@ -255,6 +255,7 @@ async fn a_renderer_that_is_not_claude_code_decides_the_capability_the_method_an
             body: "hello from alice".into(),
             message_id: None,
             mode: None,
+            delivery: None,
         }))
         .await
         .expect("send");
@@ -312,6 +313,7 @@ async fn the_generic_loop_pushes_again_after_the_lease_and_acks_at_the_bound() {
             body: "again and again".into(),
             message_id: None,
             mode: None,
+            delivery: None,
         }))
         .await
         .expect("send");
@@ -376,6 +378,7 @@ async fn a_receiver_only_renderer_stops_pushing_at_the_bound_and_never_removes_t
             body: "nobody will ack this".into(),
             message_id: None,
             mode: None,
+            delivery: None,
         }))
         .await
         .expect("send");
@@ -434,6 +437,7 @@ async fn a_client_that_drops_every_push_gets_them_past_the_bound_and_loses_nothi
             body: "dropped on the floor".into(),
             message_id: None,
             mode: None,
+            delivery: None,
         }))
         .await
         .expect("send");
@@ -555,6 +559,7 @@ async fn a_refused_ack_leaves_the_message_pending_and_the_loop_alive() {
             body: "ack me".into(),
             message_id: None,
             mode: None,
+            delivery: None,
         }))
         .await
         .expect("send");

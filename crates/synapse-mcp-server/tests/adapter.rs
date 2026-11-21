@@ -324,6 +324,33 @@ async fn nack_declines_a_message_and_the_sender_is_told() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_takes_a_delivery_mode_and_the_daemon_refuses_an_unknown_one() {
+    let home = Home::new();
+    let alice = agent(&home, "alice").await;
+    let bob = agent(&home, "bob").await;
+    let sent = alice
+        .ok(
+            "send",
+            json!({"to": "bob", "body": "once", "message_id": "d1", "delivery": "fire_and_forget"}),
+        )
+        .await;
+    assert_eq!(sent["outcome"], "queued", "{sent}");
+    let refused = alice
+        .refused(
+            "send",
+            json!({"to": "bob", "body": "x", "message_id": "d2", "delivery": "sometimes"}),
+        )
+        .await;
+    assert!(refused.contains("delivery.mode"), "{refused}");
+    let fetched = bob.ok("fetch", json!({})).await;
+    assert_eq!(
+        fetched["messages"].as_array().unwrap().len(),
+        1,
+        "{fetched}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn send_fetch_ack_list_summary_and_whoami() {
     let home = Home::new();
     let alice = agent(&home, "alice").await;

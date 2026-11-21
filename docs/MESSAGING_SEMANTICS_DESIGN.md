@@ -40,7 +40,7 @@ Built: `POST /v1/send {..., "delivery": {"mode": "fire_and_forget"}}`. The envel
 (persisted in the memory, redb and persistant stores); it is leased once, never redelivered, set aside quietly and
 counted in `dead_lettered`, and its sender gets no `[UNACKED]`. `reliable` or no `delivery` is today's behaviour;
 any other mode is `400 malformed`. Test: `fire_and_forget_is_delivered_once_and_its_sender_is_not_told` in
-`crates/synapsed/tests/delivery_backoff.rs`. Not yet: the MCP `send` tool parameter, room modes, TTL.
+`crates/synapsed/tests/delivery_backoff.rs`. The MCP `send` tool takes `delivery` too (test `send_takes_a_delivery_mode_and_the_daemon_refuses_an_unknown_one`). Not yet: room modes, TTL.
 
 
 `send` gains an optional `delivery` object; absent means today's behaviour (reliable direct). The sender's request is
