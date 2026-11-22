@@ -28,7 +28,15 @@ it explicitly (slice 2b).
   is the receiver's text folded to one header word (letters, digits, `- . :`, others become `_`, at most 60 bytes;
   `-` when none was given); the raw text is capped at 200 bytes. The notice is delivered once, like `[UNACKED]`, and
   there is never a notice about a notice.
-- A room copy's decline is not reported per copy: the per-post outcome is slice 2c.
+- A decline of a copy of an ordinary (reliable) room post is told to the post's sender like a direct decline
+  (`[DECLINED] to=<member> id=<sender>/<id>#<room> ...`). A copy of a `room_any` / `room_all` post is folded into that
+  post's one `[ROOM-OUTCOME]` (section 4) and is not also told one by one.
+- A nack of a `fire_and_forget` message still tells the sender: failover needs the signal, and a decline is not
+  delivery tracking.
+- The daemon's own notices (`[DECLINED]`, `[UNACKED]`, `[EXPIRED]`, ...) get `NOTICE_HEADROOM` (64 messages, 64 KiB) past
+  the queue bound, so a sender whose queue is full is still told. Known gap: a crash between the nack commit and the notice
+  enqueue (two store transactions) loses the notice; enqueueing it in the nack's own transaction is the structural fix.
+- Fire-and-forget mail is not counted in `[STALLED]` notices (`waiting_senders`).
 - Per-role counter `nacked` in `/v1/stats`.
 - Tests: `crates/synapsed/tests/nack.rs` (red before the route existed: the first run answered `null` for both),
   `nack_removes_for_good_reports_the_sender_and_is_idempotent` in the mailbox conformance suite (runs on the memory,

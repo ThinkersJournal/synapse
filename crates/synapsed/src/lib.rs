@@ -2449,15 +2449,20 @@ async fn nack(
     } = outcome
     {
         count(&shared, &session.global_id, |c| c.nacked += 1);
-        let told = shared
+        // A post waiting for acks (`room_any` / `room_all`) reports through its one `[ROOM-OUTCOME]`;
+        // any other copy of a room post is told to its sender like a direct decline (review of #375).
+        let (tracked, told) = shared
             .room_posts
             .lock()
             .ok()
-            .and_then(|mut t| t.declined(&message_id, &session.global_id, now));
+            .map_or((false, None), |mut t| {
+                let tracked = t.tracked(&message_id);
+                (tracked, t.declined(&message_id, &session.global_id, now))
+            });
         send_room_outcomes(&shared, told, now);
         let notice_from = format!("{NOTICE_SENDER}@{}", shared.account);
-        // Never a notice about a notice; a room copy's outcome is reported per post (a later slice).
-        if from != notice_from && room_copy(&message_id).is_none() {
+        // Never a notice about a notice.
+        if from != notice_from && !tracked {
             let reason = body.reason.as_deref().map(reason_word);
             let notice =
                 declined_notice(&to, &from, &message_id, reason.as_deref(), &shared.account);

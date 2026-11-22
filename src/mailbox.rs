@@ -158,6 +158,11 @@ impl fmt::Debug for Envelope {
     }
 }
 
+/// How many daemon notices a queue accepts past `max_messages`, and how many bytes past `max_bytes`.
+pub const NOTICE_HEADROOM: usize = 64;
+/// See [`NOTICE_HEADROOM`].
+pub const NOTICE_HEADROOM_BYTES: u64 = 64 * 1024;
+
 /// The longest `message_id` or `from` the mailbox accepts, in bytes.
 pub const MAX_ADDRESS_LEN: usize = 256;
 
@@ -202,9 +207,18 @@ fn enqueue_in(
         return Ok(Fanout::Duplicate);
     }
     let (count, bytes) = txn.stats(role).map_err(MailError::Store)?;
-    if count + 1 > config.max_messages
-        || bytes.saturating_add(env.body.len() as u64) > config.max_bytes
-    {
+    // The daemon's own notices (`[DECLINED]`, `[UNACKED]`, ...) get a little room past the bound, so a
+    // sender whose queue is full is still told its message was declined or lost (review of #375).
+    let notice = config.single_delivery_from.as_deref() == Some(env.from.as_str());
+    let (max_messages, max_bytes) = if notice {
+        (
+            config.max_messages.saturating_add(NOTICE_HEADROOM),
+            config.max_bytes.saturating_add(NOTICE_HEADROOM_BYTES),
+        )
+    } else {
+        (config.max_messages, config.max_bytes)
+    };
+    if count + 1 > max_messages || bytes.saturating_add(env.body.len() as u64) > max_bytes {
         return Ok(Fanout::Full);
     }
     let seq = txn.next_seq().map_err(MailError::Store)?;
@@ -1042,7 +1056,8 @@ impl<S: MailStore> Mailbox<S> {
                         .lease
                         .as_ref()
                         .is_some_and(|held| held.epoch == record.epoch && held.until > now);
-                    if !leased {
+                    // Fire and forget asked not to be tracked: it is no "waiting" signal for its sender.
+                    if !leased && !stored.envelope.fire_and_forget {
                         let entry = senders
                             .entry(stored.envelope.from.clone())
                             .or_insert((0, stored.enqueued_at));

@@ -424,6 +424,71 @@ pub fn the_bound_refuses_by_count_and_by_bytes_and_keeps_the_queue<S: MailStore>
     );
 }
 
+/// A queue at its bound still takes the daemon's own notices (up to the headroom) and refuses ordinary mail.
+pub fn a_full_queue_still_takes_a_daemon_notice_but_not_ordinary_mail<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let config = MailConfig {
+        max_messages: 1,
+        ..MailConfig::default()
+    };
+    let mut mb = Mailbox::open_volatile(make(), config, t0() - Duration::seconds(1)).expect("open");
+    mb.set_single_delivery_sender("synapsed@acct".to_string());
+    let _epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    assert_eq!(
+        mb.enqueue(env("m2", LANE, b"y"), t0()).unwrap_err(),
+        MailError::MailboxFull
+    );
+    let notice = Envelope {
+        from: "synapsed@acct".to_string(),
+        ..env("n1", LANE, b"[DECLINED] to=x id=y reason=-")
+    };
+    assert_eq!(
+        mb.enqueue(notice, t0()).unwrap(),
+        Enqueued::Queued,
+        "a notice fits past the bound"
+    );
+    let mut sent = 0;
+    for i in 0..=super::NOTICE_HEADROOM {
+        let notice = Envelope {
+            from: "synapsed@acct".to_string(),
+            ..env(&format!("more{i}"), LANE, b"n")
+        };
+        if mb.enqueue(notice, t0()).is_ok() {
+            sent += 1;
+        }
+    }
+    assert_eq!(
+        sent,
+        super::NOTICE_HEADROOM - 1,
+        "the headroom is bounded: the notices stop at it, never unbounded"
+    );
+}
+
+/// Fire-and-forget mail does not count as a sender's waiting mail (no `[STALLED]` for it).
+pub fn fire_and_forget_mail_is_not_waiting_mail<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let _epoch = ids.claim(&mut mb, "lane", t0());
+    let quiet = Envelope {
+        fire_and_forget: true,
+        ..env("q1", LANE, b"x")
+    };
+    mb.enqueue(quiet, t0()).unwrap();
+    assert!(
+        mb.waiting_senders(t0()).unwrap().is_empty(),
+        "a fire-and-forget message is not waiting mail"
+    );
+    mb.enqueue(env("m1", LANE, b"y"), t0()).unwrap();
+    let waiting = mb.waiting_senders(t0()).unwrap();
+    assert_eq!(
+        waiting[LANE]["peer@acct"].0, 1,
+        "an ordinary message still is: {waiting:?}"
+    );
+}
+
 pub fn sweep_deletes_old_acked_history_never_queued_mail<S: MailStore>(make: impl Fn() -> S) {
     let ids = Ids::new();
     let mut mb = open(make());
@@ -1134,6 +1199,13 @@ pub fn a_stalled_backend_returns_an_error_not_a_hang<S: MailStore>(
 /// # Panics
 /// With the case name prefixed, on the first failing case.
 pub fn run_all<S: MailStore>(make: impl Fn() -> S) {
+    case(
+        "a_full_queue_still_takes_a_daemon_notice_but_not_ordinary_mail",
+        || a_full_queue_still_takes_a_daemon_notice_but_not_ordinary_mail(&make),
+    );
+    case("fire_and_forget_mail_is_not_waiting_mail", || {
+        fire_and_forget_mail_is_not_waiting_mail(&make)
+    });
     case("rooms_are_written_through_the_store", || {
         rooms_are_written_through_the_store(&make)
     });

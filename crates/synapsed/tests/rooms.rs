@@ -754,6 +754,32 @@ async fn an_unanswered_room_all_times_out_once() {
     d.stop().await;
 }
 
+/// A member declining its copy of an ordinary (reliable) room post tells the post's sender, like a direct
+/// decline; only `room_any` / `room_all` fold declines into their one outcome (review of #375).
+#[tokio::test]
+async fn a_member_declining_a_plain_room_copy_tells_the_sender() {
+    let (d, pm, dev, _ops) = lounge_of_three().await;
+    let (status, reply) = post(&d, &pm, "lounge", "can anyone take this", Some("p1")).await;
+    assert_eq!(status, 200, "{reply}");
+    let copy = inbox(&d, &dev).await;
+    let id = copy[0]["message_id"].as_str().unwrap().to_string();
+    let (status, _) = call(
+        &d,
+        &dev,
+        "/v1/nack",
+        Some(json!({"message_id": id, "reason": "busy"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let told = one_notice(&d, &pm).await;
+    assert!(
+        told.starts_with("[DECLINED] to=dev id=pm@acct/p1#lounge@acct"),
+        "{told}"
+    );
+    assert!(told.ends_with("reason=busy"), "{told}");
+    d.stop().await;
+}
+
 #[tokio::test]
 async fn the_post_grant_does_not_imply_join() {
     let d = start(home_with_a_poster()).await;
