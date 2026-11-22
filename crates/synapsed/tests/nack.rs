@@ -216,3 +216,41 @@ async fn a_nack_needs_the_lease_and_an_unknown_id_is_not_found() {
     // The message is still there to be fetched and acked.
     assert_eq!(fetch(&d, &b).await.len(), 1);
 }
+
+/// Nack of a fire-and-forget message still tells the sender: failover needs the signal, and a decline is not
+/// delivery tracking (review of #375).
+#[tokio::test]
+async fn a_nack_of_a_fire_and_forget_message_still_tells_the_sender() {
+    let d = start(&[]).await;
+    let a = claim(&d, "a").await;
+    let b = claim(&d, "b").await;
+    let (status, reply) = call(
+        &d,
+        Some(&a),
+        "/v1/send",
+        Some(
+            json!({"to": "b@acct", "message_id": "f1", "body_b64": B64.encode(b"x"),
+                    "delivery": {"mode": "fire_and_forget"}}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    let got = fetch(&d, &b).await;
+    let id = got[0]["message_id"].as_str().unwrap().to_string();
+    let (status, reply) = call(&d, Some(&b), "/v1/nack", Some(json!({"message_id": id}))).await;
+    assert_eq!(
+        (status, reply["outcome"].as_str()),
+        (200, Some("declined")),
+        "{reply}"
+    );
+    let mut notice = Vec::new();
+    for _ in 0..40 {
+        notice = fetch(&d, &a).await;
+        if !notice.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(notice.len(), 1);
+    assert_eq!(text(&notice[0]), "[DECLINED] to=b id=a@acct/f1 reason=-");
+}

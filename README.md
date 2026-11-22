@@ -1,6 +1,6 @@
 # 🏆 Synapse: The Enterprise AI Communication Platform
 
-![Synapse Enterprise AI Communication Platform](Synapse.jpeg)
+![Synapse Enterprise AI Communication Platform](Synapse.png)
 
 [![Rust](https://img.shields.io/badge/rust-2021%2B-brightgreen.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)

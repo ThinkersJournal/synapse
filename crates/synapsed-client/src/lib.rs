@@ -24,10 +24,12 @@
 //! gets neither. A listener that fails the proof is reported on stderr and ignored.
 
 pub mod events;
+pub mod timeout;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -39,6 +41,8 @@ use synapse::certificate::chain_to_pem;
 use synapse::keystore::{KeystoreError, check_owner_only, load_role};
 use synapse::roles::sign_claim_for;
 use synapse::security_events::SecurityEventKind;
+
+use crate::timeout::Estimator;
 
 /// The daemon's announce file in the home, written by `synapsed` (M5a).
 const ANNOUNCE_FILE: &str = "synapsed.json";
@@ -58,7 +62,6 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 const START_LOG: &str = "synapsed-start.err";
 /// How much of it the CLI reads back.
 const START_LOG_READ: u64 = 4096;
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest `waiting` poll this client asks for: under `CALL_TIMEOUT`, and under the daemon's
 /// own 30 s cap.
@@ -193,6 +196,9 @@ pub struct Daemon {
     addr: String,
     instance_id: String,
     started_at: DateTime<Utc>,
+    /// How long the daemon has been taking to answer; sets how long the next probe and call wait
+    /// (`docs/CLIENT_TIMEOUTS_DESIGN.md` R3).
+    estimator: Mutex<Estimator>,
 }
 
 impl Daemon {
@@ -213,11 +219,14 @@ impl Daemon {
     pub fn connect_existing(home: &Path) -> Result<Daemon, MailError> {
         let http = Self::http_client()?;
         let mut squat = Squat::default();
-        // Two tries, as in `connect`: one slow answer from a live daemon is not "no daemon".
-        for _ in 0..2 {
-            if let Some(found) = squat.check(home, answering(&http, home)?) {
-                return Ok(Daemon::new(http, home, found));
+        let estimator = Mutex::new(seed_estimator(home));
+        // A live pid that is slow to answer is waited for (R1), never read as "no daemon".
+        match locate(&http, home, &mut squat, &estimator)? {
+            Located::Found(found) => return Ok(Daemon::new(http, home, found, estimator)),
+            Located::Slow(announce, waited) => {
+                return Err(MailError::NoDaemon(slow_daemon(&announce, home, waited)));
             }
+            Located::Nothing => {}
         }
         Err(MailError::NoDaemon(match &squat.0 {
             Some(addr) => format!(
@@ -233,10 +242,12 @@ impl Daemon {
     /// address, or a different instance does. A listener that fails the proof is not "gone" (it
     /// may be a squatter or a slow daemon), so this stays false and sends nothing to it.
     pub fn instance_gone(&self) -> bool {
-        match answering(&self.http, &self.home) {
+        let allowance = self.allowance();
+        match answering(&self.http, &self.home, allowance) {
             Ok(Answer::Nothing) => true,
             Ok(Answer::Proven(announce, _)) => announce.instance_id != self.instance_id,
-            Ok(Answer::Unproven(_)) | Err(_) => false,
+            // Slow is a live pid that did not answer in time: a loaded daemon, not a gone one (R1).
+            Ok(Answer::Slow(_) | Answer::Unproven(_)) | Err(_) => false,
         }
     }
 
@@ -258,11 +269,15 @@ impl Daemon {
         }
         let http = Self::http_client()?;
         let mut squat = Squat::default();
-        // Two tries, so one slow answer from a live daemon doesn't start a doomed second one.
-        for _ in 0..2 {
-            if let Some(found) = squat.check(home, answering(&http, home)?) {
-                return Ok(Daemon::new(http, home, found));
+        let estimator = Mutex::new(seed_estimator(home));
+        // A slow answer from a live daemon is waited for, up to the ceiling, and never starts a second
+        // one (R1, R2): the announce file names a live pid, so something holds the store.
+        match locate(&http, home, &mut squat, &estimator)? {
+            Located::Found(found) => return Ok(Daemon::new(http, home, found, estimator)),
+            Located::Slow(announce, waited) => {
+                return Err(MailError::NoDaemon(slow_daemon(&announce, home, waited)));
             }
+            Located::Nothing => {}
         }
         // Something live holds the announced port but failed the proof. A daemon of ours that
         // would bind that very address exits "address in use" and leaves a stray store, so say so
@@ -279,8 +294,9 @@ impl Daemon {
         loop {
             // Whichever daemon answers will do: ours, or, if two CLIs raced, the one holding the
             // store (ours then exits on its lock), or a live one that was only slow to answer.
-            if let Some(found) = squat.check(home, answering(&http, home)?) {
-                return Ok(Daemon::new(http, home, found));
+            let allowance = lock_estimator(&estimator).allowance();
+            if let Some(found) = squat.check(home, answering(&http, home, allowance)?) {
+                return Ok(Daemon::new(http, home, found, estimator));
             }
             // A squatter that failed the proof still holds its port, so a daemon of ours that has
             // exited is not coming back: say why now rather than wait out the deadline.
@@ -311,6 +327,7 @@ impl Daemon {
         http: reqwest::blocking::Client,
         home: &Path,
         (announce, started_at): (Announce, DateTime<Utc>),
+        estimator: Mutex<Estimator>,
     ) -> Daemon {
         Daemon {
             http,
@@ -318,7 +335,13 @@ impl Daemon {
             addr: announce.addr,
             instance_id: announce.instance_id,
             started_at,
+            estimator,
         }
+    }
+
+    /// How long the next probe waits, from the running average of how long the daemon has taken.
+    fn allowance(&self) -> Duration {
+        lock_estimator(&self.estimator).allowance()
     }
 
     /// The instance id of the daemon this connection proved (not a secret: it is in the announce
@@ -390,10 +413,10 @@ impl Daemon {
     /// and retries the call once.
     pub fn call(&self, role: &str, path: &str, body: Option<&Value>) -> Result<Value, MailError> {
         let session = self.session(role)?;
-        match self.request(path, Some(&session.token), body) {
+        match self.request_retrying(path, Some(&session.token), body) {
             Err(MailError::Api { kind, .. }) if kind == "session_expired" => {
                 let fresh = self.reclaim_expired(role, &session.token)?;
-                self.request(path, Some(&fresh.token), body)
+                self.request_retrying(path, Some(&fresh.token), body)
             }
             other => other,
         }
@@ -549,13 +572,57 @@ impl Daemon {
         }
     }
 
-    /// POST with a JSON body, or GET without one.
+    /// One authenticated or open request, no retry (a claim is signed with a nonce: a repeat is refused).
     fn request(
         &self,
         path: &str,
         token: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Value, MailError> {
+        self.attempt(path, token, body, 1, 1).map_err(|(e, _)| e)
+    }
+
+    /// `request`, repeated on a transport failure when the call is safe to repeat (R5): a send carries
+    /// its own message id, so a repeat is `duplicate`; ack and nack answer `already_*`; a lost fetch
+    /// reply leaves leases that expire by themselves. Claims, state writes, launch and admin routes
+    /// are tried once. Bounded by the ceiling.
+    fn request_retrying(
+        &self,
+        path: &str,
+        token: Option<&str>,
+        body: Option<&Value>,
+    ) -> Result<Value, MailError> {
+        if !repeatable(path) {
+            return self.request(path, token, body);
+        }
+        let started = Instant::now();
+        let max = u32::try_from(RETRY_GAPS_MS.len()).unwrap_or(0) + 1;
+        let mut tried = 1;
+        loop {
+            match self.attempt(path, token, body, tried, max) {
+                Ok(v) => return Ok(v),
+                Err((_, true)) if tried < max && started.elapsed() < crate::timeout::CEILING => {
+                    let gap = RETRY_GAPS_MS[usize::try_from(tried - 1).unwrap_or(0)];
+                    // Up to 25% jitter, so callers that failed together do not retry together.
+                    let jitter = random_bytes::<1>().map_or(0, |b| u64::from(b[0]) * gap / 1024);
+                    std::thread::sleep(Duration::from_millis(gap + jitter));
+                    tried += 1;
+                }
+                Err((e, _)) => return Err(e),
+            }
+        }
+    }
+
+    /// One try. The second field says whether a failure to *send* (connect, reset, timeout) happened, which
+    /// is the only failure a retry may follow.
+    fn attempt(
+        &self,
+        path: &str,
+        token: Option<&str>,
+        body: Option<&Value>,
+        tried: u32,
+        max: u32,
+    ) -> Result<Value, (MailError, bool)> {
         let url = format!("http://{}{path}", self.addr);
         let mut req = match body {
             Some(b) => self.http.post(url).json(b),
@@ -564,32 +631,212 @@ impl Daemon {
         if let Some(t) = token {
             req = req.bearer_auth(t);
         }
-        let resp = req
-            .send()
-            .map_err(|e| MailError::Transport(e.without_url().to_string()))?;
+        // Never shorter than the old fixed limit (a long poll waits by design), longer when the daemon has
+        // been slow, never past the ceiling.
+        let allowance = CALL_TIMEOUT
+            .max(self.allowance())
+            .min(crate::timeout::CEILING);
+        let started = Instant::now();
+        let resp = match req.timeout(allowance).send() {
+            Ok(resp) => resp,
+            Err(e) => {
+                let kind = transport_kind(&e);
+                if kind == "timeout" {
+                    lock_estimator(&self.estimator).timed_out();
+                }
+                let text = failure_text(
+                    &e.without_url().to_string(),
+                    "call",
+                    kind,
+                    allowance,
+                    started.elapsed(),
+                    tried,
+                    max,
+                );
+                eprintln!("synapse: {path}: {text}");
+                return Err((MailError::Transport(text), true));
+            }
+        };
+        // A long poll takes as long as it was asked to and says nothing about load.
+        if !path.contains("wait") {
+            lock_estimator(&self.estimator).sample(started.elapsed());
+        }
         let status = resp.status();
         let text = resp
             .text()
-            .map_err(|e| MailError::Transport(e.without_url().to_string()))?;
+            .map_err(|e| (MailError::Transport(e.without_url().to_string()), false))?;
         let value: Value = serde_json::from_str(&text).map_err(|_| {
-            MailError::Transport(format!("HTTP {status}, and the reply is not JSON"))
+            (
+                MailError::Transport(format!("HTTP {status}, and the reply is not JSON")),
+                false,
+            )
         })?;
         let ok = status.is_success();
         if ok {
             return Ok(value);
         }
-        Err(MailError::Api {
-            kind: value["error"].as_str().unwrap_or("error").to_string(),
-            message: value["message"].as_str().unwrap_or("").to_string(),
-            current: value["current"].as_u64(),
-        })
+        Err((
+            MailError::Api {
+                kind: value["error"].as_str().unwrap_or("error").to_string(),
+                message: value["message"].as_str().unwrap_or("").to_string(),
+                current: value["current"].as_u64(),
+            },
+            false,
+        ))
     }
+}
+
+/// Waits between the tries of a repeatable call, in milliseconds (R5).
+const RETRY_GAPS_MS: [u64; 3] = [500, 1000, 2000];
+
+/// Whether a call may be sent again after a transport failure (R5).
+fn repeatable(path: &str) -> bool {
+    let route = path.split('?').next().unwrap_or(path);
+    matches!(
+        route,
+        "/v1/send" | "/v1/ack" | "/v1/nack" | "/v1/heartbeat" | "/v1/fetch"
+    )
+}
+
+fn lock_estimator(estimator: &Mutex<Estimator>) -> std::sync::MutexGuard<'_, Estimator> {
+    estimator
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What kind of failure a send was (R6).
+fn transport_kind(e: &reqwest::Error) -> &'static str {
+    if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "connect"
+    } else {
+        "other"
+    }
+}
+
+/// A transport failure that says which timeout fired (R6).
+fn failure_text(
+    base: &str,
+    phase: &str,
+    kind: &str,
+    timeout: Duration,
+    elapsed: Duration,
+    tried: u32,
+    max: u32,
+) -> String {
+    format!(
+        "{base} (phase={phase} kind={kind} timeout_ms={} elapsed_ms={} attempt={tried}/{max})",
+        timeout.as_millis(),
+        elapsed.as_millis()
+    )
+}
+
+/// The latency file the daemon writes (R4), read as a starting estimate for a short-lived caller. Absent,
+/// stale (over a minute) or unreadable: nothing seen yet.
+fn seed_estimator(home: &Path) -> Estimator {
+    #[derive(Deserialize)]
+    struct Seen {
+        smoothed_ms: u64,
+        deviation_ms: u64,
+        at: DateTime<Utc>,
+    }
+    let path = announce_dir(home).join(LATENCY_FILE);
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Estimator::new();
+    };
+    let Ok(seen) = serde_json::from_str::<Seen>(&text) else {
+        return Estimator::new();
+    };
+    let age = Utc::now() - seen.at;
+    if age > chrono::Duration::seconds(60) || age < chrono::Duration::seconds(-60) {
+        return Estimator::new();
+    }
+    Estimator::seeded(
+        Duration::from_millis(seen.smoothed_ms),
+        Duration::from_millis(seen.deviation_ms),
+    )
+}
+
+/// The file in the daemon's home where it publishes how long its requests take (R4).
+pub const LATENCY_FILE: &str = "synapsed-latency.json";
+
+/// Where `locate` ended.
+enum Located {
+    Found((Announce, DateTime<Utc>)),
+    /// No live daemon answered: none announced, or a squatter, or nothing.
+    Nothing,
+    /// The announce file names a live pid that did not answer within the ceiling.
+    Slow(Announce, Duration),
+}
+
+/// Find the announced daemon. Two silent or unproven tries end in `Nothing`, as before. A live pid that
+/// does not answer in time is "slow", not "down" (R1): wait with a growing gap, up to the ceiling, with
+/// each probe given the running-average allowance (R3).
+fn locate(
+    http: &reqwest::blocking::Client,
+    home: &Path,
+    squat: &mut Squat,
+    estimator: &Mutex<Estimator>,
+) -> Result<Located, MailError> {
+    let started = Instant::now();
+    let mut gap = Duration::from_millis(250);
+    let mut quiet_tries = 0;
+    let mut warned = false;
+    loop {
+        let allowance = lock_estimator(estimator).allowance();
+        let probe = Instant::now();
+        match answering(http, home, allowance)? {
+            Answer::Proven(announce, started_at) => {
+                lock_estimator(estimator).sample(probe.elapsed());
+                return Ok(Located::Found((announce, started_at)));
+            }
+            Answer::Unproven(addr) => {
+                squat.check(home, Answer::Unproven(addr));
+                quiet_tries += 1;
+            }
+            Answer::Nothing => quiet_tries += 1,
+            Answer::Slow(announce) => {
+                lock_estimator(estimator).timed_out();
+                if started.elapsed() >= crate::timeout::CEILING {
+                    return Ok(Located::Slow(announce, started.elapsed()));
+                }
+                if !warned {
+                    eprintln!(
+                        "synapse: synapsed (pid {}) did not answer health within {} ms; it is alive, so waiting (phase=health kind=timeout timeout_ms={})",
+                        announce.pid,
+                        allowance.as_millis(),
+                        allowance.as_millis()
+                    );
+                    warned = true;
+                }
+                std::thread::sleep(gap);
+                gap = (gap * 2).min(Duration::from_secs(2));
+                continue;
+            }
+        }
+        if quiet_tries >= 2 {
+            return Ok(Located::Nothing);
+        }
+    }
+}
+
+/// Why a live but silent daemon was not started over (R2).
+fn slow_daemon(announce: &Announce, home: &Path, waited: Duration) -> String {
+    format!(
+        "synapsed (pid {}) is alive but did not answer health in {} s; not starting a second one (announce file {}; if that process is not a synapsed, remove the file)",
+        announce.pid,
+        waited.as_secs(),
+        announce_path(home).display()
+    )
 }
 
 /// What the announced address said to a challenged health request.
 enum Answer {
-    /// No announce file, a dead daemon, or nothing answering.
+    /// No announce file, or a dead daemon.
     Nothing,
+    /// The announce file names a live pid, but the health probe got no answer in time: a loaded daemon.
+    Slow(Announce),
     /// The listener answered without a valid proof of the announced instance id.
     Unproven(String),
     /// The real daemon, and its start time.
@@ -620,7 +867,7 @@ impl Squat {
                 }
                 None
             }
-            Answer::Nothing => None,
+            Answer::Nothing | Answer::Slow(_) => None,
         }
     }
 }
@@ -646,13 +893,17 @@ fn squat_warning(addr: &str) -> String {
 }
 
 /// The announced daemon, if it is alive and proves it holds the announced instance id.
-fn answering(http: &reqwest::blocking::Client, home: &Path) -> Result<Answer, MailError> {
+fn answering(
+    http: &reqwest::blocking::Client,
+    home: &Path,
+    timeout: Duration,
+) -> Result<Answer, MailError> {
     let Some(announce) = read_announce(home)? else {
         return Ok(Answer::Nothing);
     };
     let challenge = random_bytes::<16>()?;
-    Ok(match health(http, &announce, &challenge) {
-        Health::Silent => Answer::Nothing,
+    Ok(match health(http, &announce, &challenge, timeout) {
+        Health::Silent => Answer::Slow(announce),
         Health::Unproven => Answer::Unproven(announce.addr),
         Health::Proven(started_at) => Answer::Proven(announce, started_at),
     })
@@ -781,14 +1032,19 @@ enum Health {
 /// is `Silent`: any HTTP reply at all means something holds the announced port, so a reply that is
 /// not an ok health with a valid proof is `Unproven` (review: a squatter answering `ok: false` must
 /// be reported too).
-fn health(http: &reqwest::blocking::Client, announce: &Announce, challenge: &[u8; 16]) -> Health {
+fn health(
+    http: &reqwest::blocking::Client,
+    announce: &Announce,
+    challenge: &[u8; 16],
+    timeout: Duration,
+) -> Health {
     let Ok(resp) = http
         .get(format!(
             "http://{}/v1/health?challenge={}",
             announce.addr,
             hex(challenge)
         ))
-        .timeout(HEALTH_TIMEOUT)
+        .timeout(timeout)
         .send()
     else {
         return Health::Silent;
@@ -1182,6 +1438,9 @@ pub fn printable(text: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod timeout_tests;
 
 #[cfg(test)]
 mod tests {

@@ -200,6 +200,9 @@ const REDELIVERY_CHECK: std::time::Duration = std::time::Duration::from_secs(30)
 /// so a notice that itself goes unacked cannot start a loop.
 const NOTICE_SENDER: &str = "synapsed";
 const STATS_FLUSH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often the daemon publishes its request latency for clients to read.
+const LATENCY_PUBLISH: std::time::Duration = std::time::Duration::from_secs(5);
 /// How recently a role must have been heard from to count as online.
 const ONLINE_WINDOW: chrono::Duration = chrono::Duration::seconds(90);
 /// A role idle this many days is retired (hidden from `list`, kept) unless `synapsed.toml` says
@@ -273,6 +276,9 @@ struct Shared {
     instance_id: String,
     proof_key: ring::hmac::Key,
     home: PathBuf,
+    /// How long this daemon's own request handling has been taking (a running average, published to
+    /// `synapsed-latency.json` for short-lived callers; `docs/CLIENT_TIMEOUTS_DESIGN.md` R4).
+    latency: Mutex<synapsed_client::timeout::Estimator>,
     started_at: DateTime<Utc>,
     sweep_every: std::time::Duration,
     /// How often to look for messages whose redeliveries ran out (see `Mailbox::dead_exhausted`).
@@ -789,6 +795,7 @@ impl Daemon {
                 instance_id,
                 proof_key: ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &instance),
                 home: cfg.home.clone(),
+                latency: Mutex::new(synapsed_client::timeout::Estimator::new()),
                 started_at,
                 sweep_every: cfg.sweep_every,
                 redelivery_check: REDELIVERY_CHECK,
@@ -1089,6 +1096,17 @@ impl Daemon {
                 }
             })
         };
+        let latency_task = {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(LATENCY_PUBLISH);
+                loop {
+                    tick.tick().await;
+                    publish_latency(&shared);
+                }
+            })
+        };
+        let measured = shared.clone();
         let app = Router::new()
             .route(
                 "/v1/health",
@@ -1135,6 +1153,9 @@ impl Daemon {
                 delay_failures(pause.clone(), req, next)
             }))
             .layer(middleware::from_fn(move |req: Request, next: Next| {
+                measure_latency(measured.clone(), req, next)
+            }))
+            .layer(middleware::from_fn(move |req: Request, next: Next| {
                 host_guard(bound, req, next)
             }))
             .with_state(shared.clone());
@@ -1145,11 +1166,62 @@ impl Daemon {
         notice_task.abort();
         redelivery_task.abort();
         stats_task.abort();
+        latency_task.abort();
         flush_stats(&shared);
         if let Some(task) = alert_task {
             task.abort();
         }
         result
+    }
+}
+
+/// Time each request's handling into the running average. A long poll (`wait` in the query) takes as long
+/// as it was asked to and says nothing about load, so it is not counted.
+async fn measure_latency(shared: Arc<Shared>, req: Request, next: Next) -> Response {
+    let long_poll = req.uri().query().is_some_and(|q| q.contains("wait"));
+    let started = std::time::Instant::now();
+    let response = next.run(req).await;
+    if !long_poll && let Ok(mut latency) = shared.latency.lock() {
+        latency.sample(started.elapsed());
+    }
+    response
+}
+
+/// Write `<home>/synapsed-latency.json` (smoothed and deviation, in ms, and when) atomically and owner-only,
+/// for a short-lived client to start its timeout from. Advisory: a client clamps whatever it reads.
+fn publish_latency(shared: &Shared) {
+    let Ok(latency) = shared.latency.lock().map(|l| *l) else {
+        return;
+    };
+    let Some(smoothed) = latency.smoothed() else {
+        return;
+    };
+    let body = json!({
+        "smoothed_ms": u64::try_from(smoothed.as_millis()).unwrap_or(u64::MAX),
+        "deviation_ms": u64::try_from(latency.deviation().as_millis()).unwrap_or(u64::MAX),
+        "at": Utc::now().to_rfc3339(),
+    })
+    .to_string();
+    let temp = shared
+        .home
+        .join(format!(".tmp-latency-{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = (|| {
+        use std::io::Write;
+        options.open(&temp)?.write_all(body.as_bytes())?;
+        std::fs::rename(&temp, shared.home.join(synapsed_client::LATENCY_FILE))
+    })();
+    if let Err(e) = written {
+        eprintln!(
+            "synapsed: {} not written: {e}",
+            synapsed_client::LATENCY_FILE
+        );
     }
 }
 
@@ -2377,15 +2449,20 @@ async fn nack(
     } = outcome
     {
         count(&shared, &session.global_id, |c| c.nacked += 1);
-        let told = shared
+        // A post waiting for acks (`room_any` / `room_all`) reports through its one `[ROOM-OUTCOME]`;
+        // any other copy of a room post is told to its sender like a direct decline (review of #375).
+        let (tracked, told) = shared
             .room_posts
             .lock()
             .ok()
-            .and_then(|mut t| t.declined(&message_id, &session.global_id, now));
+            .map_or((false, None), |mut t| {
+                let tracked = t.tracked(&message_id);
+                (tracked, t.declined(&message_id, &session.global_id, now))
+            });
         send_room_outcomes(&shared, told, now);
         let notice_from = format!("{NOTICE_SENDER}@{}", shared.account);
-        // Never a notice about a notice; a room copy's outcome is reported per post (a later slice).
-        if from != notice_from && room_copy(&message_id).is_none() {
+        // Never a notice about a notice.
+        if from != notice_from && !tracked {
             let reason = body.reason.as_deref().map(reason_word);
             let notice =
                 declined_notice(&to, &from, &message_id, reason.as_deref(), &shared.account);
