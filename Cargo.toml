@@ -123,7 +123,7 @@ regex = { version = "1.10", optional = true }
 # From 10.x jsonwebtoken ships no crypto by default and PANICS at first use without a
 # backend (tests/jwt_backend.rs). aws_lc_rs: already in the tree via rustls, and unlike
 # rust_crypto it does not pull `rsa` (RUSTSEC-2023-0071, no fix).
-jsonwebtoken = { version = "11.1.0", optional = true, default-features = false, features = ["use_pem", "aws_lc_rs"] }
+jsonwebtoken = { version = "12.0.0", optional = true, default-features = false, features = ["use_pem", "aws_lc_rs"] }
 pem = { version = "4.0", optional = true }
 bcrypt = { version = "0.19", optional = true }
 hex = { version = "0.4", optional = true }
