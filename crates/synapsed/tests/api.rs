@@ -1712,3 +1712,120 @@ async fn presence_cwd_repo_filter_list_and_ride_on_fetched_mail() {
     assert_eq!(m["from_cwd"], r"C:/Projects/synapse");
     d.stop().await;
 }
+
+/// CodeQL alert 178 (`rust/unsafe-deserialization`, `parse<T: DeserializeOwned>`), proof 1: the body types are
+/// concrete structs that refuse unknown fields, so a body cannot smuggle extra data into one. Every route here
+/// answers 400 `malformed` to a valid-looking body plus one field it does not know (the routes parse right after
+/// authentication, so this reaches the parser). The two state routes take a JSON value first and then a typed
+/// struct; they are in the table so that path is pinned too.
+#[tokio::test]
+async fn every_json_route_refuses_a_body_with_an_unknown_field() {
+    let d = start().await;
+    let (token, _) = claim(&d, "alice").await;
+    let routes: [(&str, Value); 9] = [
+        ("/v1/send", json!({"to": "alice@acct", "body_b64": "eA=="})),
+        ("/v1/fetch", json!({})),
+        ("/v1/ack", json!({"message_id": "x"})),
+        ("/v1/heartbeat", json!({})),
+        ("/v1/rooms/create", json!({"room": "lounge"})),
+        ("/v1/rooms/join", json!({"room": "lounge"})),
+        (
+            "/v1/state/create",
+            json!({"kind": "note", "key": "k", "value": {}}),
+        ),
+        (
+            "/v1/state/patch",
+            json!({"id": "x", "expected_revision": 0, "patch": {}}),
+        ),
+        ("/v1/state/facts", json!({"reports": []})),
+    ];
+    for (path, mut body) in routes {
+        body["not_a_field"] = json!(1);
+        let (status, reply, text) = post(&d, path, Some(&token), body).await;
+        assert_eq!(status, 400, "{path}: {text}");
+        assert_eq!(reply["error"], "malformed", "{path}: {text}");
+        assert!(
+            text.contains("not_a_field") || text.contains("unknown field"),
+            "{path} says why: {text}"
+        );
+    }
+    // A claim is unauthenticated and parsed first of all.
+    let mut claim = claim_body(&d, "bob");
+    claim["not_a_field"] = json!(1);
+    let (status, reply, text) = post(&d, "/v1/claim", None, claim).await;
+    assert_eq!(
+        (status, reply["error"].as_str()),
+        (400, Some("malformed")),
+        "{text}"
+    );
+    d.stop().await;
+}
+
+/// Proof 2: a body over axum's default limit (`DefaultBodyLimit`, 2 MiB = 2_097_152 bytes; axum-core 0.5.6
+/// `request.rs` `DEFAULT_LIMIT`) is refused for an authenticated caller too, not only before auth, and nothing in
+/// `synapsed` lifts it (the test below reads the source for that).
+#[tokio::test]
+async fn an_authenticated_oversize_body_is_refused_too() {
+    let d = start().await;
+    let (token, _) = claim(&d, "alice").await;
+    let body = vec![b' '; 3 * 1024 * 1024];
+    let sent = client()
+        .post(d.url("/v1/send"))
+        .bearer_auth(&token)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await;
+    match sent {
+        Ok(reply) => assert_eq!(reply.status().as_u16(), 413, "past the 2 MiB default"),
+        Err(e) => assert!(
+            e.is_request() || e.is_connect(),
+            "closed on the oversize body: {e}"
+        ),
+    }
+    d.stop().await;
+}
+
+/// Proof 3, as a guard: no body or state type is polymorphic (`untagged`, `flatten`), and nothing in the daemon
+/// lifts or replaces the default body limit. A change that adds either fails here and has to be argued.
+#[test]
+fn no_untagged_or_flattened_type_and_no_lifted_body_limit_in_the_daemon_or_the_state_model() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = vec![];
+    for dir in [root.join("src"), root.join("../../src/state")] {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    files.push(root.join("../../src/state.rs"));
+    assert!(
+        files.len() > 5,
+        "the guard reads the daemon and state sources: {files:?}"
+    );
+    for path in files {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+            for banned in [
+                "serde(untagged",
+                "serde(flatten",
+                ", flatten",
+                "DefaultBodyLimit",
+                "RequestBodyLimit",
+            ] {
+                assert!(
+                    !code.contains(banned),
+                    "{}:{}: {banned} needs a reason this guard can name",
+                    path.display(),
+                    n + 1
+                );
+            }
+        }
+    }
+}
