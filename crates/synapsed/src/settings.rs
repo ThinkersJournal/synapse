@@ -29,6 +29,9 @@ pub struct Settings {
     /// Senders (`role` or `role@account`) whose pending mail counts toward a launch signal; empty
     /// means no signal at all.
     pub launch_senders: Vec<String>,
+    /// Whether that list is consulted (`list`, the default) or every authenticated sender may raise
+    /// a signal (`any`).
+    pub launch_senders_mode: crate::launch::SendersMode,
     /// Roles that receive security alerts as mail.
     pub alert_roles: Vec<String>,
     /// Roles a new lane may see and message, and be seen and messaged by, from its first claim
@@ -89,6 +92,10 @@ pub fn load(env: &BTreeMap<String, String>, file: Option<&str>) -> Result<Settin
             "launch.senders: {bad:?} is not a role or role@account"
         ));
     }
+    let mode_text: String = config
+        .get("launch.senders_mode")
+        .map_err(|e| e.to_string())?;
+    let launch_senders_mode = crate::launch::SendersMode::parse(&mode_text)?;
     let days: i64 = config
         .get("liveness.role_ttl_days")
         .map_err(|e| e.to_string())?;
@@ -144,6 +151,7 @@ pub fn load(env: &BTreeMap<String, String>, file: Option<&str>) -> Result<Settin
         store_pin_from_env,
         launcher_roles: roles("launch.roles")?,
         launch_senders,
+        launch_senders_mode,
         stall_after_secs,
         stall_realert_secs,
         alert_roles: roles("alert.roles")?,

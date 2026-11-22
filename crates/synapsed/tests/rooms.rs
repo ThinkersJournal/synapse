@@ -71,6 +71,7 @@ async fn start_opts(
     let mut daemon = Daemon::open(&cfg)
         .expect("open daemon")
         .with_redelivery_gaps(vec![chrono::Duration::milliseconds(300); 3])
+        .with_room_outcome_timeout(chrono::Duration::seconds(3))
         .with_redelivery_check(Duration::from_millis(50));
     if let Some(window) = window {
         daemon = daemon.with_online_window(window);
@@ -616,6 +617,140 @@ async fn a_non_member_holding_the_post_grant_posts_and_receives_nothing() {
         ["dev@acct"],
         "posting did not make ann a member"
     );
+    d.stop().await;
+}
+
+/// `delivery.mode = room_broadcast` (messaging step 2b): every member gets one copy that is never
+/// redelivered and never reported as unacked; it is refused for a direct recipient.
+#[tokio::test]
+async fn a_room_broadcast_is_delivered_once_and_the_sender_hears_no_unacked() {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    let ops = claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev", "ops"]).await;
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    assert_eq!(join(&d, &ops, "lounge").await.0, 200);
+    let body = |to: &str| {
+        json!({"to": to, "message_id": "b1", "body_b64": B64.encode(b"all hands"),
+               "delivery": {"mode": "room_broadcast"}})
+    };
+    let (status, reply) = call(&d, &pm, "/v1/send", Some(body("lounge@acct"))).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["room"]["delivered"], 2);
+    let (status, reply) = call(&d, &pm, "/v1/send", Some(body("dev@acct"))).await;
+    assert_eq!(status, 400, "a broadcast needs a room: {reply}");
+    assert_eq!(inbox(&d, &dev).await.len(), 1);
+    assert_eq!(inbox(&d, &ops).await.len(), 1);
+    // Reliable copies would return after the 300 ms gap and end in an unacked notice.
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert!(inbox(&d, &dev).await.is_empty(), "not redelivered");
+    }
+    assert!(
+        inbox(&d, &pm).await.is_empty(),
+        "the sender is told nothing"
+    );
+    d.stop().await;
+}
+
+async fn post_mode(d: &Running, token: &str, mode: &str, id: &str) -> (u16, Value) {
+    let body = json!({"to": "lounge@acct", "message_id": id, "body_b64": B64.encode(b"who can take this"),
+                      "delivery": {"mode": mode}});
+    call(d, token, "/v1/send", Some(body)).await
+}
+
+async fn one_notice(d: &Running, token: &str) -> String {
+    for _ in 0..80 {
+        let got = inbox(d, token).await;
+        if let Some(m) = got.first() {
+            return String::from_utf8(B64.decode(m["body_b64"].as_str().unwrap()).unwrap())
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no mail arrived for the sender");
+}
+
+async fn lounge_of_three() -> (Running, String, String, String) {
+    let d = start(homes()).await;
+    let pm = claim(&d, "pm").await;
+    let dev = claim(&d, "dev").await;
+    let ops = claim(&d, "ops").await;
+    assert_eq!(create(&d, &pm, "lounge").await.0, 200);
+    share(&d, &pm, "lounge", &["dev", "ops"]).await;
+    assert_eq!(join(&d, &dev, "lounge").await.0, 200);
+    assert_eq!(join(&d, &ops, "lounge").await.0, 200);
+    (d, pm, dev, ops)
+}
+
+/// `room_any`: the first ack ends it and the sender is told who; the other copy is not recalled.
+#[tokio::test]
+async fn room_any_reports_the_first_ack_and_leaves_the_other_copy_alone() {
+    let (d, pm, dev, ops) = lounge_of_three().await;
+    let (status, reply) = post_mode(&d, &pm, "room_any", "q1").await;
+    assert_eq!(status, 200, "{reply}");
+    let copy = inbox(&d, &dev).await;
+    let id = copy[0]["message_id"].as_str().unwrap().to_string();
+    let (status, _) = call(&d, &dev, "/v1/ack", Some(json!({"message_id": id}))).await;
+    assert_eq!(status, 200);
+    let told = one_notice(&d, &pm).await;
+    assert!(
+        told.starts_with("[ROOM-OUTCOME] room=lounge id=q1 mode=any result=acked acked=dev "),
+        "{told}"
+    );
+    assert!(told.ends_with("pending=ops"), "{told}");
+    assert_eq!(inbox(&d, &ops).await.len(), 1, "ops still holds its copy");
+    d.stop().await;
+}
+
+/// `room_all`: told once when every member acked; told `incomplete` when one declined.
+#[tokio::test]
+async fn room_all_waits_for_everyone_and_a_decline_ends_it_incomplete() {
+    let (d, pm, dev, ops) = lounge_of_three().await;
+    post_mode(&d, &pm, "room_all", "q2").await;
+    for who in [&dev, &ops] {
+        let copy = inbox(&d, who).await;
+        let id = copy[0]["message_id"].as_str().unwrap().to_string();
+        call(&d, who, "/v1/ack", Some(json!({"message_id": id}))).await;
+    }
+    let told = one_notice(&d, &pm).await;
+    assert!(
+        told.contains("mode=all result=complete acked=dev,ops "),
+        "{told}"
+    );
+
+    post_mode(&d, &pm, "room_all", "q3").await;
+    let copy = inbox(&d, &dev).await;
+    let id = copy[0]["message_id"].as_str().unwrap().to_string();
+    call(&d, &dev, "/v1/ack", Some(json!({"message_id": id}))).await;
+    let copy = inbox(&d, &ops).await;
+    let id = copy[0]["message_id"].as_str().unwrap().to_string();
+    call(
+        &d,
+        &ops,
+        "/v1/nack",
+        Some(json!({"message_id": id, "reason": "busy"})),
+    )
+    .await;
+    let told = one_notice(&d, &pm).await;
+    assert!(
+        told.contains("id=q3 mode=all result=incomplete acked=dev declined=ops "),
+        "{told}"
+    );
+    d.stop().await;
+}
+
+/// Nobody answers: one `timeout` outcome, naming who is still pending.
+#[tokio::test]
+async fn an_unanswered_room_all_times_out_once() {
+    let (d, pm, _dev, _ops) = lounge_of_three().await;
+    post_mode(&d, &pm, "room_all", "q4").await;
+    let told = one_notice(&d, &pm).await;
+    assert!(told.contains("id=q4 mode=all result=timeout"), "{told}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(inbox(&d, &pm).await.is_empty(), "told once");
     d.stop().await;
 }
 

@@ -299,7 +299,7 @@ impl SynapseMcpServer {
         let inner = self.inner.clone();
         let body = encode_body(body.as_bytes());
         tokio::task::spawn_blocking(move || {
-            inner.call(|d, role| send_call(d, role, to, &message_id, &body, None))
+            inner.call(|d, role| send_call(d, role, to, &message_id, &body, None, None))
         })
         .await
         .map_err(|_| "the call task failed".to_string())?
@@ -334,6 +334,10 @@ pub struct SendArgs {
     /// MESSAGE-FORMATS v1 message, which the daemon checks and refuses when it is not one).
     #[serde(default)]
     pub mode: Option<String>,
+    /// Delivery: `reliable` (the default: redelivered until acked, you are told when it runs out), `room_broadcast`, `room_any` or `room_all` (room posts: the daemon mails you one `[ROOM-OUTCOME]`)
+    /// or `fire_and_forget` (delivered once, never redelivered, nobody tells you if it is not read).
+    #[serde(default)]
+    pub delivery: Option<String>,
 }
 
 /// Arguments of the `fetch` tool.
@@ -352,6 +356,16 @@ pub struct FetchArgs {
 pub struct AckArgs {
     /// A message_id that `fetch` returned.
     pub message_id: String,
+}
+
+/// Arguments of the `nack` tool.
+#[derive(Deserialize, JsonSchema)]
+pub struct NackArgs {
+    /// A message_id that `fetch` returned.
+    pub message_id: String,
+    /// Why you decline it, in a few words (optional).
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Arguments of the room tools.
@@ -688,6 +702,7 @@ fn send_call(
     id: &str,
     body_b64: &str,
     mode: Option<&str>,
+    delivery: Option<&str>,
 ) -> Result<Value, MailError> {
     let to = if to.contains('@') {
         to
@@ -701,6 +716,9 @@ fn send_call(
     let mut request = json!({"to": to, "message_id": id, "body_b64": body_b64});
     if let Some(mode) = mode {
         request["mode"] = Value::String(mode.to_string());
+    }
+    if let Some(delivery) = delivery {
+        request["delivery"] = json!({"mode": delivery});
     }
     daemon.call(role, "/v1/send", Some(&request))
 }
@@ -718,8 +736,19 @@ impl SynapseMcpServer {
         let to = args.to;
         let body = encode_body(args.body.as_bytes());
         let mode = args.mode;
-        self.daemon(move |daemon, role| send_call(daemon, role, to, &id, &body, mode.as_deref()))
-            .await
+        let delivery = args.delivery;
+        self.daemon(move |daemon, role| {
+            send_call(
+                daemon,
+                role,
+                to,
+                &id,
+                &body,
+                mode.as_deref(),
+                delivery.as_deref(),
+            )
+        })
+        .await
     }
 
     #[tool(
@@ -758,6 +787,23 @@ impl SynapseMcpServer {
                 role,
                 "/v1/ack",
                 Some(&json!({"message_id": args.message_id})),
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Decline a message you cannot handle (the counterpart of ack): it is removed and not delivered again, and its sender is told with a [DECLINED] mail carrying your reason so it can pass the message on. Use the message_id that fetch returned; reason is optional, short text."
+    )]
+    pub async fn nack(
+        &self,
+        Parameters(args): Parameters<NackArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.daemon(move |daemon, role| {
+            daemon.call(
+                role,
+                "/v1/nack",
+                Some(&json!({"message_id": args.message_id, "reason": args.reason})),
             )
         })
         .await

@@ -221,3 +221,20 @@ default_peers = [\"pm\", \"mlmf\"]
     let bad = settings(&[("SYNAPSE_DEFAULT_PEERS", "has space")], None);
     assert!(bad.is_err(), "a bad role name is refused");
 }
+
+#[test]
+fn launch_senders_mode_defaults_to_list_and_takes_any_but_not_ancestors_yet() {
+    use synapsed::SendersMode;
+    assert_eq!(
+        settings(&[], None).unwrap().launch_senders_mode,
+        SendersMode::List
+    );
+    let any = settings(&[("SYNAPSE_LAUNCH_SENDERS_MODE", "any")], None).unwrap();
+    assert_eq!(any.launch_senders_mode, SendersMode::Any);
+    let from_file = settings(&[], Some("[launch]\nsenders_mode = \"any\"\n")).unwrap();
+    assert_eq!(from_file.launch_senders_mode, SendersMode::Any);
+    let err = settings(&[("SYNAPSE_LAUNCH_SENDERS_MODE", "ancestors")], None).unwrap_err();
+    assert!(err.contains("not built yet"), "{err}");
+    let err = settings(&[("SYNAPSE_LAUNCH_SENDERS_MODE", "everyone")], None).unwrap_err();
+    assert!(err.contains("not a mode"), "{err}");
+}

@@ -44,6 +44,13 @@ env = "SYNAPSE_LAUNCH_SENDERS"
 description = "authenticated senders (`role` or `role@account`) whose pending mail may raise a launch signal; empty means no signal at all, even with launch.roles set"
 
 [[value]]
+key = "launch.senders_mode"
+type = "string"
+default = "list"
+env = "SYNAPSE_LAUNCH_SENDERS_MODE"
+description = "who may raise a launch signal: `list` (only launch.senders; empty means nobody) or `any` (every authenticated sender, no list). `ancestors` is reserved for the account hierarchy and refused until it exists"
+
+[[value]]
 key = "liveness.role_ttl_days"
 type = "int"
 default = 30

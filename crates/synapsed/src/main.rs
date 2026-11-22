@@ -125,6 +125,7 @@ async fn main() -> ExitCode {
         .with_alert_roles(settings.alert_roles.clone())
         .with_default_peers(settings.default_peers.clone())
         .with_launch_senders(settings.launch_senders.clone())
+        .with_launch_senders_mode(settings.launch_senders_mode)
         .with_launcher(synapsed::LauncherConfig {
             roles: settings.launcher_roles.clone(),
             ..synapsed::LauncherConfig::default()
@@ -132,6 +133,7 @@ async fn main() -> ExitCode {
     tokio::spawn(reload_launch_senders(
         daemon.launch_senders(),
         settings.launch_senders.clone(),
+        settings.launch_senders_mode,
     ));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
@@ -189,7 +191,11 @@ async fn shutdown_signal() {
 /// Re-read `SYNAPSE_LAUNCH_SENDERS` and `synapsed.toml` every few seconds, so a changed allowlist
 /// applies on the next poll without a restart. A file that does not read or parse keeps the last
 /// good list. (The environment cannot change in a running process; the file is what moves.)
-async fn reload_launch_senders(handle: synapsed::LaunchSenders, mut current: Vec<String>) {
+async fn reload_launch_senders(
+    handle: synapsed::LaunchSenders,
+    mut current: Vec<String>,
+    mut current_mode: synapsed::SendersMode,
+) {
     let Ok(home) = synapse::keystore::default_home() else {
         return;
     };
@@ -204,6 +210,11 @@ async fn reload_launch_senders(handle: synapsed::LaunchSenders, mut current: Vec
         else {
             continue;
         };
+        if settings.launch_senders_mode != current_mode {
+            handle.set_mode(settings.launch_senders_mode);
+            current_mode = settings.launch_senders_mode;
+            eprintln!("synapsed: launch.senders_mode reloaded");
+        }
         if settings.launch_senders != current {
             handle.set(settings.launch_senders.clone());
             current = settings.launch_senders;
