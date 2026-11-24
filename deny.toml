@@ -11,7 +11,7 @@ ignore = [
     # never waive the check. Renewed 2026-11-21 (pm-platform cluster disposition, as auth-framework does):
     # what keeps chrono in the lock is third-party (`cargo tree --workspace --all-features -i chrono`), so
     # moving our own 313 lines would not clear it (ROADMAP row 52).
-    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 unmaintained; kept in the lock by async-imap 0.12.0, auto-discovery 0.3.3, rmcp 3.10.0 and schemars 1.2.3 (chrono04 feature), none of which we can change; expiry 2027-01-21, re-checked at each of their releases" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 unmaintained; kept in the lock by async-imap 0.12.0, auto-discovery 0.3.3, rmcp 3.10.0 and schemars 1.2.3 (chrono04 feature), none of which we can change; expiry 2026-12-17 (the 30 days CireSnave ratified; renewal past it needs a new decision), exit is the move-off-chrono row 52, re-checked at each of their releases" },
     # pin-utils is unmaintained, pulled in by async-imap (`cargo tree --workspace --all-features -i pin-utils`); no vulnerability, no fix.
     { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained, transitive via async-imap; revisit by 2026-12-17" },
 ]
