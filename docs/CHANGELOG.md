@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.266): pin the coderipper portfolio caller at dc45e363, url 2.5.9, canonical LICENSE-APACHE
+
+Pins the coderipper portfolio.yml caller, bumps `url` to 2.5.9 in Cargo.lock (RUSTSEC-2026-0592), and replaces LICENSE-APACHE with the canonical Apache-2.0 text.
+
 ### Fixed, Changed, Docs (rc.265): the client waits for a slow daemon and repeats a failed send; the review fixes for messaging step 2; CodeQL 178 proof tests; logo; rows 13, 15, 52, 53, 54
 
 `synapsed-client`: a health probe that gets no answer from an announced daemon whose pid is alive is "slow", not "down": it is waited for (up to 60 s) and no second `synapsed` is started (a live daemon holds the store). The probe and call allowance is a running average (smoothed latency + 4 x deviation, the TCP retransmission-timer method) clamped to 2 s .. 60 s, doubled after a timeout; a call is never given less than the old 30 s. `send`, `ack`, `nack`, `heartbeat` and `fetch` are repeated up to three times (0.5, 1, 2 s plus jitter) after a transport failure; claims, state writes and launch/admin calls are tried once. Every transport failure now carries `phase`, `kind`, `timeout_ms`, `elapsed_ms` and `attempt`. `synapsed` writes `<home>/synapsed-latency.json` every 5 s (its own request latency, long polls excluded) for short-lived callers to start from. Evidence: `crates/synapsed-client/src/timeout_tests.rs`, `src/timeout.rs`, `crates/synapsed/tests/latency_file.rs`; mutations caught: silent probe read as no daemon, send not repeatable and launch-clear repeatable, no sampling, long polls sampled, latency never published, latency never sampled. Design: `docs/CLIENT_TIMEOUTS_DESIGN.md`. `synapsed` now depends on `synapsed-client` (it was a dev-dependency) for the estimator.
