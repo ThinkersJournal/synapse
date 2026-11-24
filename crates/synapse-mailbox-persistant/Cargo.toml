@@ -10,7 +10,7 @@ repository = "https://github.com/ThinkersJournal/synapse"
 
 [dependencies]
 synapse = { path = "../..", version = "6.0.0-rc.266" }
-persistant-kv = "0.16"
+persistant-kv = "0.18"
 persistant-sqlx = { version = "0.16", features = ["sqlite"] }
 persistant = { version = "0.16", features = ["registry-sqlite", "registry-postgres", "registry-mysql"] }
 tokio = { version = "1.46.1", features = ["rt-multi-thread", "time"] }

@@ -1137,7 +1137,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2622,11 +2622,11 @@ checksum = "24e2363d01a148d398172d8e9cd3e298798bd24ca7de960e5ac27eb61e324e70"
 dependencies = [
  "futures-util",
  "opendal",
- "persistant-blob",
- "persistant-core",
- "persistant-kv",
+ "persistant-blob 0.16.8",
+ "persistant-core 0.16.8",
+ "persistant-kv 0.16.8",
  "persistant-opendal",
- "persistant-relational",
+ "persistant-relational 0.16.8",
  "persistant-sqlx",
  "serde",
  "serde_json",
@@ -2639,7 +2639,16 @@ version = "0.16.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13f62619fe032d551ccafc0f174be52d2c8ce09a2c40df0be28abaf2327f8a4f"
 dependencies = [
- "persistant-core",
+ "persistant-core 0.16.8",
+]
+
+[[package]]
+name = "persistant-blob"
+version = "0.18.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "258569d7454b6a757d6a9fd6becf6f693d3b0c8d532bbdd0ecce82587a582ab6"
+dependencies = [
+ "persistant-core 0.18.30",
 ]
 
 [[package]]
@@ -2653,14 +2662,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "persistant-core"
+version = "0.18.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "119c1f75981a816882f3dfdabceca6b08469c20ac78cbc5244a5ec2465d9f75b"
+dependencies = [
+ "capant",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "persistant-kv"
 version = "0.16.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91ea8fdff24b50864b7e9412dd83dffa714462666cb1d96eafc3af7d0f7ae1f5"
 dependencies = [
- "persistant-blob",
- "persistant-core",
- "persistant-relational",
+ "persistant-blob 0.16.8",
+ "persistant-core 0.16.8",
+ "persistant-relational 0.16.8",
+ "tokio",
+ "unisql",
+]
+
+[[package]]
+name = "persistant-kv"
+version = "0.18.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e4a1232e22251f210a97d2944d4d857aba629d44b3bd4dc096c15661596caff"
+dependencies = [
+ "persistant-blob 0.18.30",
+ "persistant-core 0.18.30",
+ "persistant-relational 0.18.30",
  "tokio",
  "unisql",
 ]
@@ -2673,8 +2705,8 @@ checksum = "6b7b6f9ab54521ca5572cb643a841a76cf6e665b78bcfc8f4b5a844b829ff239"
 dependencies = [
  "futures-util",
  "opendal",
- "persistant-blob",
- "persistant-core",
+ "persistant-blob 0.16.8",
+ "persistant-core 0.16.8",
  "tokio",
 ]
 
@@ -2684,8 +2716,17 @@ version = "0.16.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b96e07fe3e5a8b1146959666867bc80a735f56ed04f0fd47abf9fcff3fe1a73e"
 dependencies = [
- "persistant-core",
+ "persistant-core 0.16.8",
  "unisql-core",
+]
+
+[[package]]
+name = "persistant-relational"
+version = "0.18.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed7b437779edd549c4b7b425d2219c3de38300fcac19a332eef308b1e2152e43"
+dependencies = [
+ "persistant-core 0.18.30",
 ]
 
 [[package]]
@@ -2694,8 +2735,8 @@ version = "0.16.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d52a7f50eefa85e1e3490eda2565573d5724c135f839a312fa313a7cd978067"
 dependencies = [
- "persistant-core",
- "persistant-relational",
+ "persistant-core 0.16.8",
+ "persistant-relational 0.16.8",
  "sqlx",
  "tokio",
 ]
@@ -2932,7 +2973,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3279,7 +3320,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3338,7 +3379,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4138,7 +4179,7 @@ version = "6.0.0-rc.266"
 dependencies = [
  "chrono",
  "persistant",
- "persistant-kv",
+ "persistant-kv 0.18.30",
  "persistant-sqlx",
  "serde",
  "serde_json",
@@ -4292,10 +4333,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5115,7 +5156,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
