@@ -27,12 +27,12 @@ fn an_hs256_token_round_trips_through_the_jwt_dependency() {
     let token = encode(
         &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret(b"test-secret"),
+        &EncodingKey::from_secret(b"test-secret").unwrap(),
     )
     .expect("sign");
     let decoded = decode::<Claims>(
         &token,
-        &DecodingKey::from_secret(b"test-secret"),
+        &DecodingKey::from_secret(b"test-secret").unwrap(),
         &Validation::new(Algorithm::HS256),
     )
     .expect("verify");
@@ -40,7 +40,7 @@ fn an_hs256_token_round_trips_through_the_jwt_dependency() {
 
     let forged = decode::<Claims>(
         &token,
-        &DecodingKey::from_secret(b"another-secret"),
+        &DecodingKey::from_secret(b"another-secret").unwrap(),
         &Validation::new(Algorithm::HS256),
     );
     assert!(
