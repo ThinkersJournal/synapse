@@ -615,3 +615,76 @@ fn a_message_without_an_id_parses_to_none() {
     assert_eq!(view.message_id(), None);
     assert_eq!(view.from(), Some("alice@acct"));
 }
+
+const FAST_REPUSH: &[Duration] = &[Duration::from_millis(300), Duration::from_millis(600)];
+
+/// ROADMAP row 56: the first write can be lost (the client was not listening yet), so the same
+/// notification is written again at the configured offsets while the message is unacked, without a
+/// new lease and without counting as a push; an acked message is not re-sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_write_is_repeated_at_the_offsets_until_acked() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    for body in ["keep", "ack me"] {
+        alice
+            .send(Parameters(SendArgs {
+                to: "bob".into(),
+                body: body.into(),
+                message_id: None,
+                mode: None,
+                delivery: None,
+            }))
+            .await
+            .expect("send");
+    }
+    let config = PushConfig {
+        lease_secs: 30,
+        repush_after: FAST_REPUSH,
+        ..PushConfig::default()
+    };
+    let ledger = PushLedger::default();
+    let sink = Recording::plain();
+    assert_eq!(
+        push_once_with(&Example, &bob, &sink, &config, &ledger).await,
+        Ok(2)
+    );
+    let ids: Vec<String> = sink
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    // The model acks the second one.
+    bob.confirm(ids[1].clone()).await.expect("ack");
+
+    // Before the first offset: nothing more is written.
+    assert_eq!(
+        push_once_with(&Example, &bob, &sink, &config, &ledger).await,
+        Ok(0)
+    );
+    assert_eq!(sink.seen.lock().unwrap().len(), 2);
+
+    // After each offset the unacked one is written again, the acked one never.
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    push_once_with(&Example, &bob, &sink, &config, &ledger)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    push_once_with(&Example, &bob, &sink, &config, &ledger)
+        .await
+        .unwrap();
+    // No third re-write.
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    push_once_with(&Example, &bob, &sink, &config, &ledger)
+        .await
+        .unwrap();
+    let seen = sink.seen.lock().unwrap();
+    let count = |id: &str| seen.iter().filter(|p| p["id"] == id).count();
+    assert_eq!(count(&ids[0]), 3, "first write plus two re-writes");
+    assert_eq!(count(&ids[1]), 1, "an acked message is not re-sent");
+    drop(seen);
+    assert_eq!(ledger.pushes(&ids[0]), 1, "re-writes are not pushes");
+}
