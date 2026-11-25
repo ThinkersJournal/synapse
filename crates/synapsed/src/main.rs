@@ -122,6 +122,13 @@ async fn main() -> ExitCode {
                 .map(|s| chrono::Duration::seconds(i64::try_from(*s).unwrap_or(i64::MAX)))
                 .collect(),
         )
+        .with_fetch_log(
+            if std::env::var_os(synapsed::FETCH_LOG_ENV).is_some_and(|v| v == "1") {
+                synapsed::FetchLog::Stderr
+            } else {
+                synapsed::FetchLog::Off
+            },
+        )
         .with_alert_roles(settings.alert_roles.clone())
         .with_default_peers(settings.default_peers.clone())
         .with_launch_senders(settings.launch_senders.clone())

@@ -95,7 +95,19 @@ pub struct PushConfig {
     /// count is the daemon's, kept with the message across sessions and adapter restarts. The ack
     /// also needs two pushes by one process, so a value of 0 or 1 acts as 2 pushes.
     pub max_pushes: u32,
+    /// Offsets after a message's FIRST write by this process at which the same notification is
+    /// written again while the message is still unacked (ROADMAP row 56). The first write can land
+    /// before the client listens (the dev-channels dialog, or an uninitialised session), and the
+    /// daemon then hides the message for its redelivery gap (about 120 s). A re-write takes no new
+    /// lease and does not touch the daemon's `attempts` or this ledger's push count, so the
+    /// daemon's schedule and [`should_ack`] are unchanged; a receiver tells a repeat by its
+    /// `message_id`. Empty turns it off. A message the model acked or declined is not re-sent; one
+    /// acked by another route (the CLI) may be re-sent once, as a harmless repeat.
+    pub repush_after: &'static [Duration],
 }
+
+/// The default [`PushConfig::repush_after`]: 10 s and 30 s after the first write.
+pub const DEFAULT_REPUSH: &[Duration] = &[Duration::from_secs(10), Duration::from_secs(30)];
 
 impl Default for PushConfig {
     fn default() -> Self {
@@ -104,6 +116,7 @@ impl Default for PushConfig {
             lease_secs: 30,
             batch: 10,
             max_pushes: 3,
+            repush_after: DEFAULT_REPUSH,
         }
     }
 }
@@ -137,6 +150,15 @@ pub struct PushLedger {
     /// Ids this process has pushed up to the bound and stopped pushing ([`AckPolicy::ReceiverOnly`]),
     /// oldest first, at most [`MAX_PARKED`].
     parked: Mutex<VecDeque<String>>,
+    /// First writes still due a re-write ([`PushConfig::repush_after`]).
+    repush: Mutex<HashMap<String, Repush>>,
+}
+
+/// A message written once and due its re-writes.
+struct Repush {
+    params: Value,
+    first_at: Instant,
+    sent: usize,
 }
 
 /// The most ids the ledger passes over, which is what the daemon accepts in one fetch. Past it the
@@ -180,6 +202,50 @@ impl PushLedger {
             parked.pop_front();
         }
         parked.push_back(id.to_string());
+    }
+
+    /// Remember the first write of `id` so it can be written again.
+    fn plan_repush(&self, id: &str, params: Value, now: Instant) {
+        let mut m = self.repush.lock().unwrap_or_else(|p| p.into_inner());
+        if m.len() >= MAX_PARKED {
+            return;
+        }
+        m.entry(id.to_string()).or_insert(Repush {
+            params,
+            first_at: now,
+            sent: 0,
+        });
+    }
+
+    /// The daemon handed `id` out again: its own redelivery has come, so no re-write is due.
+    fn cancel_repush(&self, id: &str) {
+        self.repush
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(id);
+    }
+
+    /// Re-writes due at `now`: `(id, params)` for each, with its count advanced. Entries with
+    /// nothing left to send are dropped, as are those `settled` says were acked.
+    fn due_repushes(
+        &self,
+        now: Instant,
+        offsets: &[Duration],
+        settled: impl Fn(&str) -> bool,
+    ) -> Vec<(String, Value)> {
+        let mut m = self.repush.lock().unwrap_or_else(|p| p.into_inner());
+        let mut due = Vec::new();
+        m.retain(|id, r| {
+            if settled(id) || r.sent >= offsets.len() {
+                return false;
+            }
+            if now.saturating_duration_since(r.first_at) >= offsets[r.sent] {
+                r.sent += 1;
+                due.push((id.clone(), r.params.clone()));
+            }
+            r.sent < offsets.len()
+        });
+        due
     }
 
     /// Times `id` has been pushed.
@@ -240,6 +306,14 @@ pub async fn push_once_with<R: Renderer, N: Notifier>(
     config: &PushConfig,
     ledger: &PushLedger,
 ) -> Result<usize, String> {
+    // Re-writes of first writes that may have been lost (see `PushConfig::repush_after`). A failed
+    // write is not retried: the daemon's own redelivery is still the backstop.
+    let due = ledger.due_repushes(Instant::now(), config.repush_after, |id| {
+        source.is_settled(id)
+    });
+    for (_, params) in due {
+        let _ = notifier.notify(params).await;
+    }
     let parked = ledger.parked();
     let messages = match source
         .pull_views_excluding(config.batch, config.lease_secs, &parked)
@@ -274,9 +348,17 @@ pub async fn push_once_with<R: Renderer, N: Notifier>(
         let Some(id) = message.message_id() else {
             continue;
         };
+        // The daemon handed it out again: its own redelivery has come.
+        if ledger.pushes(id) > 0 {
+            ledger.cancel_repush(id);
+        }
         // Only a write that happened counts.
-        if notifier.notify(renderer.render(message)).await.is_ok() {
+        let params = renderer.render(message);
+        if notifier.notify(params.clone()).await.is_ok() {
             ledger.pushed(id, now);
+            if ledger.pushes(id) == 1 {
+                ledger.plan_repush(id, params, now);
+            }
             pushed += 1;
             let ack = match renderer.ack_policy() {
                 AckPolicy::BoundedAttempts => {

@@ -73,6 +73,13 @@ One start with one mail queued, three timestamps: the daemon's lease (`/v1/fetch
 answer to the dev-channels dialog, the first channel entry in the transcript. Lease before the answer means (a), and
 H1/H2 apply; if the lease is after the answer and the event is still lost, the loss is elsewhere and neither fixes it.
 
+## 4b. Built in #386 (PM allowed 2026-11-25)
+
+H2 is built: `PushConfig::repush_after` (default 10 s and 30 s), `crates/synapse-mcp-server/src/push.rs`. agentlife measured
+the host answering the dialog at median 2.3 s, p90 5.1 s, max 21.5 s of host start, so +10 s covers p90 and +30 s the max
+seen (MCP `initialized` is not host start; the probe fixes that). Also built: `SYNAPSE_FETCH_LOG=1` makes `synapsed` write one
+stderr line per lease (`fetch-lease role= message_id= attempts= leased_at= lease_until=`, never a body) for the probe.
+
 ## 5. Decisions wanted from the PM
 
 1. H2 first, then H1 (recommended), or H1 only?

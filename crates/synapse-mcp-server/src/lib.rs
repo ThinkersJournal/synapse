@@ -12,6 +12,7 @@
 
 pub mod push;
 
+use std::collections::HashSet;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -150,7 +151,14 @@ pub struct SynapseMcpServer {
     /// What `whoami` reports under `push`: the capability key and notification method of the
     /// renderer wrapping this server, or `None` for the generic adapter, which pushes nothing.
     push: Option<Arc<Value>>,
+    /// Ids this session has acked or declined, so the push loop does not re-send one (see
+    /// `push::PushConfig::repush_after`). Bounded by [`MAX_SETTLED`].
+    settled: Arc<Mutex<HashSet<String>>>,
 }
+
+/// Most settled ids remembered; past it the set is cleared (a re-send of an old, acked id is a
+/// harmless repeat, and the loop only re-sends within seconds of the first write).
+const MAX_SETTLED: usize = 1024;
 
 /// Fixed text for failures whose own message could name a key path.
 fn describe(e: &MailError) -> String {
@@ -222,7 +230,11 @@ impl SynapseMcpServer {
                 }
             }
         });
-        Ok(Self { inner, push: None })
+        Ok(Self {
+            inner,
+            push: None,
+            settled: Arc::default(),
+        })
     }
 
     /// Record the push method this server's wrapper uses, so `whoami` can advertise it.
@@ -231,6 +243,23 @@ impl SynapseMcpServer {
             json!({"capability_key": capability_key, "method": method}),
         ));
         self
+    }
+
+    /// Remember that `id` was acked or declined by this session.
+    pub(crate) fn settle(&self, id: &str) {
+        let mut set = self.settled.lock().unwrap_or_else(PoisonError::into_inner);
+        if set.len() >= MAX_SETTLED {
+            set.clear();
+        }
+        set.insert(id.to_string());
+    }
+
+    /// Whether this session acked or declined `id`.
+    pub(crate) fn is_settled(&self, id: &str) -> bool {
+        self.settled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(id)
     }
 
     /// Run a blocking daemon call off the async workers; a refusal becomes a tool error.
@@ -310,12 +339,14 @@ impl SynapseMcpServer {
     /// Acknowledge a message returned by [`Self::pull`].
     pub async fn confirm(&self, message_id: String) -> Result<(), String> {
         let inner = self.inner.clone();
+        let id = message_id.clone();
         tokio::task::spawn_blocking(move || {
             inner.call(|d, role| d.call(role, "/v1/ack", Some(&json!({"message_id": message_id}))))
         })
         .await
         .map_err(|_| "the call task failed".to_string())?
         .map_err(|e| describe(&e))?;
+        self.settle(&id);
         Ok(())
     }
 }
@@ -782,14 +813,20 @@ impl SynapseMcpServer {
         &self,
         Parameters(args): Parameters<AckArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.daemon(move |daemon, role| {
-            daemon.call(
-                role,
-                "/v1/ack",
-                Some(&json!({"message_id": args.message_id})),
-            )
-        })
-        .await
+        let id = args.message_id.clone();
+        let result = self
+            .daemon(move |daemon, role| {
+                daemon.call(
+                    role,
+                    "/v1/ack",
+                    Some(&json!({"message_id": args.message_id})),
+                )
+            })
+            .await;
+        if matches!(&result, Ok(r) if r.is_error != Some(true)) {
+            self.settle(&id);
+        }
+        result
     }
 
     #[tool(
@@ -799,14 +836,20 @@ impl SynapseMcpServer {
         &self,
         Parameters(args): Parameters<NackArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.daemon(move |daemon, role| {
-            daemon.call(
-                role,
-                "/v1/nack",
-                Some(&json!({"message_id": args.message_id, "reason": args.reason})),
-            )
-        })
-        .await
+        let id = args.message_id.clone();
+        let result = self
+            .daemon(move |daemon, role| {
+                daemon.call(
+                    role,
+                    "/v1/nack",
+                    Some(&json!({"message_id": args.message_id, "reason": args.reason})),
+                )
+            })
+            .await;
+        if matches!(&result, Ok(r) if r.is_error != Some(true)) {
+            self.settle(&id);
+        }
+        result
     }
 
     #[tool(

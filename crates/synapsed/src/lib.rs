@@ -284,6 +284,8 @@ struct Shared {
     /// How often to look for messages whose redeliveries ran out (see `Mailbox::dead_exhausted`).
     redelivery_check: std::time::Duration,
     security: Security,
+    /// Where the per-lease debug line goes (off by default; see [`FetchLog`]).
+    fetch_log: FetchLog,
     pause: Pause,
     /// Fired by `/v1/daemon/shutdown`; `serve` stops gracefully when it does.
     stop: tokio::sync::Notify,
@@ -800,6 +802,7 @@ impl Daemon {
                 sweep_every: cfg.sweep_every,
                 redelivery_check: REDELIVERY_CHECK,
                 security: Security::new(SecurityConfig::default(), Arc::new(sink)),
+                fetch_log: FetchLog::Off,
                 pause: sleep_pause(),
                 stop: tokio::sync::Notify::new(),
                 launcher: LauncherConfig::default(),
@@ -943,6 +946,14 @@ impl Daemon {
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .set_redelivery_gaps(gaps);
+        self
+    }
+
+    /// Turns the per-lease debug line on or off (default off; `synapsed` turns it on with
+    /// `SYNAPSE_FETCH_LOG=1`). Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_fetch_log(mut self, log: FetchLog) -> Daemon {
+        self.shared.fetch_log = log;
         self
     }
 
@@ -2268,6 +2279,36 @@ struct FetchBody {
     exclude: Vec<String>,
 }
 
+/// Where `fetch` writes one debug line per message it leases (ROADMAP row 56: the probe for the lost
+/// first delivery needs the lease time). The line names the role, the message id, the delivery
+/// attempt and the lease start and end, and never the body or any note text.
+#[derive(Clone, Default)]
+pub enum FetchLog {
+    /// No line (the default).
+    #[default]
+    Off,
+    /// One line per lease on the daemon's stderr, where its other `synapsed:` lines go.
+    Stderr,
+    /// Lines collected in memory (tests).
+    Capture(Arc<Mutex<Vec<String>>>),
+}
+
+impl FetchLog {
+    fn write(&self, line: &str) {
+        match self {
+            FetchLog::Off => {}
+            FetchLog::Stderr => eprintln!("synapsed: {line}"),
+            FetchLog::Capture(lines) => lines
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(line.to_string()),
+        }
+    }
+}
+
+/// The environment variable `synapsed` reads to turn on [`FetchLog::Stderr`].
+pub const FETCH_LOG_ENV: &str = "SYNAPSE_FETCH_LOG";
+
 async fn fetch(
     State(shared): State<Arc<Shared>>,
     headers: HeaderMap,
@@ -2294,6 +2335,19 @@ async fn fetch(
         Utc::now(),
         &body.exclude,
     )?;
+    if !matches!(shared.fetch_log, FetchLog::Off) {
+        let leased_at = Utc::now();
+        for d in &deliveries {
+            shared.fetch_log.write(&format!(
+                "fetch-lease role={} message_id={} attempts={} leased_at={} lease_until={}",
+                session.global_id,
+                d.envelope.message_id,
+                d.attempts,
+                leased_at.to_rfc3339(),
+                d.lease_until.to_rfc3339()
+            ));
+        }
+    }
     // Counted after the fetch committed, never from the request: a refused fetch moves nothing.
     let redelivered = deliveries.iter().filter(|d| d.attempts > 1).count();
     let expired = deliveries.iter().filter(|d| d.prior_lease_lapsed).count();
