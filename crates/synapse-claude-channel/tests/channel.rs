@@ -115,6 +115,7 @@ fn quick() -> ChannelConfig {
         lease_secs: 30,
         batch: 10,
         max_pushes: 3,
+        repush_after: &[],
     }
 }
 
