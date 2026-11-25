@@ -44,6 +44,11 @@ impl Running {
 /// Online window and stall delay 300 ms, sweep every 100 ms; `realert` as given; `ops` is the one
 /// alert role; `pm` holds `role-admin`.
 async fn start(realert: Duration) -> Running {
+    start_with_window(realert, 300).await
+}
+
+/// As `start`, with the online window set to `window_ms`.
+async fn start_with_window(realert: Duration, window_ms: i64) -> Running {
     let home = tempfile::tempdir().unwrap();
     Keystore::init_account(home.path(), "acct").expect("init account");
     Keystore::open(home.path())
@@ -58,7 +63,7 @@ async fn start(realert: Duration) -> Running {
     common::allow_all(&config.home);
     let daemon = Daemon::open(&config)
         .expect("open daemon")
-        .with_online_window(chrono::Duration::milliseconds(300))
+        .with_online_window(chrono::Duration::milliseconds(window_ms))
         .with_stall(Duration::from_millis(300), realert)
         .with_alert_roles(vec!["ops".to_string()]);
     let started_at = daemon.started_at();
@@ -186,7 +191,9 @@ async fn an_offline_role_with_queued_mail_gets_one_stalled_notice_per_sender() {
 
 #[tokio::test]
 async fn an_online_role_is_never_stalled() {
-    let d = start(Duration::from_secs(3600)).await;
+    // A 1 s online window against 100 ms heartbeats: a 300 ms window failed once on a loaded CI
+    // runner (run 45304206420, stall.rs:198), the cause unproven, so the margin is widened.
+    let d = start_with_window(Duration::from_secs(3600), 1000).await;
     let alpha = claim(&d, "alpha").await;
     let beta = claim(&d, "beta").await;
     send(&d, &beta, "alpha@acct", "hello").await;
