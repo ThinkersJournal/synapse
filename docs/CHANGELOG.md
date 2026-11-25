@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.267): dependency bumps (jsonwebtoken 12, redb 5, persistant 0.18, cargo-deny-action 2.1.2, lock refresh)
+
+Takes the open Dependabot PRs (#377 to #382) as one change. `jsonwebtoken` 11.1 -> 12.0 (`DecodingKey::from_secret` and
+`EncodingKey::from_secret` now return a `Result`; only `tests/jwt_backend.rs` called them), `redb` 4.5 -> 5.0,
+`persistant`, `persistant-kv` and `persistant-sqlx` 0.16 -> 0.18, the `cargo-deny-action` pin, and a `cargo update`
+for the minor and patch group. No behaviour change in the daemon.
+
+Evidence: `cargo check --workspace --all-targets --features "jwt mailbox-redb"` clean; `jwt_backend`, the
+`synapse-mailbox-persistant` suite and the `mailbox` lib tests pass.
+
 ### Changed (rc.266): pin the coderipper portfolio caller at dc45e363, url 2.5.9, canonical LICENSE-APACHE
 
 Pins the coderipper portfolio.yml caller, bumps `url` to 2.5.9 in Cargo.lock (RUSTSEC-2026-0592), and replaces LICENSE-APACHE with the canonical Apache-2.0 text.
