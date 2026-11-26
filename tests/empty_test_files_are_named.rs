@@ -61,6 +61,10 @@ fn documented_empty_set(doc: &str) -> Option<BTreeSet<String>> {
     let idx = doc.find(marker)?;
     // The list may wrap; read to the blank-ish terminator.
     let tail = &doc[idx + marker.len()..];
+    // "none" is a statement of the empty set, not an absence of one.
+    if tail.trim_start().starts_with("none") {
+        return Some(BTreeSet::new());
+    }
     let end = tail
         .find("(4 of")
         .or_else(|| tail.find('\n').map(|_| tail.len()))?;

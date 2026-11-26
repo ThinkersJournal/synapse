@@ -1,3 +1,11 @@
+# Per-file licence gate (SUP-016 opt-in), run by the spdx job in ci_cd.yml.
+[sup016]
+gate = true
+licence = "MIT OR Apache-2.0"
+extensions = [".rs", ".py", ".ps1", ".sh", ".sql"]
+min_files = 120
+copyright_expected = ["spdx_gate.py"]
+
 [[allow]]
 check = "SUP-001"
 file = ".github/workflows/ci_cd.yml"

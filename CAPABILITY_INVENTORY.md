@@ -1264,7 +1264,7 @@ files — would make the pipeline able to report on the thing it exists to repor
   the known failure is in `transport_error_handling_test`. So every target that sorts after it had
   never run in CI:
   - `transport_manager_starts`, the regression test added with the deadlock fix;
-  - `webrtc_transport_integration_test`, which has 0 tests;
+  - `webrtc_transport_integration_test`, which had 0 tests (the empty file was removed 2026-11-26);
   - **all 25 doc-tests**. They pass locally and take about 72 s.
 - With `--no-fail-fast` the failing set is unchanged, `{test_transport_error_handling}`. 108 named
   tests and the 25 doc-tests pass.
@@ -1571,7 +1571,7 @@ exactly 1 declaration; the files below return 0.
 | `src/transport/udp.rs` | 320 | |
 | `src/transport/email_enhanced.rs` | 313 | imported by a demo that therefore fails — §5.5 |
 | `src/transport/discovery_test.rs` | 57 | |
-| `src/types_new.rs` | 0 | empty |
+| `src/types_new.rs` | 0 | empty; removed 2026-11-26 |
 
 ⚠️ **`src/auth_integration.rs` is not just another orphan, and the reason is a selection criterion
 worth stating explicitly because it is easy to lose.** It is the module the **published** crate
@@ -1618,7 +1618,7 @@ working.
 
 ### 5.6 Empty and disabled files that read as coverage
 
-Four test files are **0 bytes** — they appear in `ls tests/` and in any file-count, and contain
+Four test files were **0 bytes** (removed 2026-11-26, when the SUP-016 licence gate made headerless files fail CI) — they appeared in `ls tests/` and in any file-count, and contained
 nothing:
 `high_load_test_new.rs`, `multi_transport_integration_new.rs`, `registry_integration_test_new.rs`,
 `webrtc_transport_integration_test.rs`.
