@@ -11,4 +11,6 @@ The gate failed on five 0-byte files with no header, so they are deleted: `src/t
 `CAPABILITY_INVENTORY.md` now says they were removed. Before the deletion the gate exited 1 naming 5 of 258 files;
 after it, exit 0 (255 of 255 tracked source files declare the licence). `.coderipper.toml` is added to `spdx_gate.py`'s `COPYRIGHT_EXPECTED` (its `copyright_expected` key trips the legacy scan), and `spdx_gate.py` to the new `copyright_expected`.
 
+The guard `tests/empty_test_files_are_named.rs` held the report's empty-file list to the tree, so it failed (CI run 45734729198, job core is model-agnostic) once the files went. The archive report's correction block now says the current empty set is `none` (the old four kept as the d796b25d record), and the guard accepts `none` as a stated set.
+
 — lane: synapse

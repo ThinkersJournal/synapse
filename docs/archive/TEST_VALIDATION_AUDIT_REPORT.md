@@ -16,8 +16,11 @@
 >   tests/high_load_test_new.rs · tests/multi_transport_integration_new.rs
 >   tests/registry_integration_test_new.rs
 >
-> the current empty set is exactly: high_load_test_new, multi_transport_integration_new,
-> registry_integration_test_new, webrtc_transport_integration_test    (4 of 21)
+> at d796b25d the empty set was: high_load_test_new, multi_transport_integration_new,
+> registry_integration_test_new, webrtc_transport_integration_test    (4 of 21); all four were then
+> deleted (SUP-016 licence gate, 2026-11-26), so
+>
+> the current empty set is exactly: none
 > ```
 >
 > ⚠️ **This is neither a stale document nor a false one, and neither standard remedy fits.** A supersession banner implies it was current and drifted — it never was current in this repository, not for one commit. A correction implies it was wrong on arrival — it was not; it was right about the tree it was written against.
