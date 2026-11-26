@@ -42,7 +42,8 @@ jobs:
   spdx:
     name: Every source file declares the licence
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The SUP-016 step compiles coderipper from crates.io on a cold runner (minutes).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -54,6 +55,18 @@ jobs:
 
       - name: Every tracked source file declares the licence
         run: python3 .github/spdx_gate.py
+
+      # SUP-016 (coderipper 0.48.1 from crates.io; config in .coderipper.toml) is the per-file gate
+      # alongside the spdx_gate.py copy above, which stays until the fleet job retires.
+      - name: Install coderipper 0.48.1
+        env:
+          RUSTC_WRAPPER: ''
+        run: cargo install coderipper --version 0.48.1 --locked
+
+      # --deny medium: the LICENSE-MIT "names a person" finding is Info (CireSnave 2026-10-25: all
+      # licences may name him); a headerless file is Medium/High and fails.
+      - name: Every tracked source file declares the licence (SUP-016)
+        run: coderipper check SUP-016 --project . --deny medium
 
   build:
     name: Build and Test
