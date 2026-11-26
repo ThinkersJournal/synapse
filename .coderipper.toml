@@ -4,6 +4,7 @@ gate = true
 licence = "MIT OR Apache-2.0"
 extensions = [".rs", ".py", ".ps1", ".sh", ".sql"]
 min_files = 120
+copyright_expected = ["spdx_gate.py"]
 
 [[allow]]
 check = "SUP-001"
