@@ -87,3 +87,11 @@ stderr line per lease (`fetch-lease role= message_id= attempts= leased_at= lease
 3. Who runs the probe and when (agentlife on launchtest)?
 
 — lane: synapse
+
+## 4c. H1 built (PM FIX, 2026-11-26)
+
+The control is a file, not an HTTP call: the launcher creates `redeliver-<role>.request` in the Synapse home after it answers
+the dev-channels dialog and before the first prompt; the adapter's loop consumes it within one poll (1 s) and writes every
+unacked message it wrote again, once, with no lease and no `attempts` change. Path: `push::redeliver_request_path`.
+
+— lane: synapse

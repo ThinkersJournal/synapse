@@ -688,3 +688,89 @@ async fn a_first_write_is_repeated_at_the_offsets_until_acked() {
     drop(seen);
     assert_eq!(ledger.pushes(&ids[0]), 1, "re-writes are not pushes");
 }
+
+/// ROADMAP row 56 H1: the host answers the dev-channels dialog and asks for a redelivery. Every
+/// message this process wrote and that is still unacked is written again at once, even after its
+/// timed re-writes are spent, with no new lease and no push counted; an acked one is not re-sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_redeliver_request_rewrites_every_unacked_message_at_once() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    for body in ["keep", "ack me"] {
+        alice
+            .send(Parameters(SendArgs {
+                to: "bob".into(),
+                body: body.into(),
+                message_id: None,
+                mode: None,
+                delivery: None,
+            }))
+            .await
+            .expect("send");
+    }
+    let config = PushConfig {
+        lease_secs: 30,
+        repush_after: FAST_REPUSH,
+        ..PushConfig::default()
+    };
+    let ledger = PushLedger::default();
+    let sink = Recording::plain();
+    assert_eq!(
+        push_once_with(&Example, &bob, &sink, &config, &ledger).await,
+        Ok(2)
+    );
+    let ids: Vec<String> = sink
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap().to_string())
+        .collect();
+    bob.confirm(ids[1].clone()).await.expect("ack");
+    // Spend both timed re-writes.
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        push_once_with(&Example, &bob, &sink, &config, &ledger)
+            .await
+            .unwrap();
+    }
+    let before = sink.seen.lock().unwrap().len();
+
+    // Without a request nothing more is written.
+    push_once_with(&Example, &bob, &sink, &config, &ledger)
+        .await
+        .unwrap();
+    assert_eq!(sink.seen.lock().unwrap().len(), before);
+
+    ledger.request_redeliver();
+    push_once_with(&Example, &bob, &sink, &config, &ledger)
+        .await
+        .unwrap();
+    {
+        let seen = sink.seen.lock().unwrap();
+        let count = |id: &str| seen.iter().filter(|p| p["id"] == id).count();
+        assert_eq!(count(&ids[0]), 4, "two timed re-writes plus the redelivery");
+        assert_eq!(count(&ids[1]), 1, "an acked message is not re-sent");
+    }
+    assert_eq!(ledger.pushes(&ids[0]), 1, "a redelivery is not a push");
+
+    // One request, one redelivery.
+    push_once_with(&Example, &bob, &sink, &config, &ledger)
+        .await
+        .unwrap();
+    assert_eq!(sink.seen.lock().unwrap().len(), before + 1);
+}
+
+/// The host's request is a file named for the role in the Synapse home; taking it consumes it.
+#[test]
+fn the_redeliver_request_file_is_consumed_once() {
+    let dir = std::env::temp_dir().join(format!("syn-redeliver-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = synapse_mcp_server::push::redeliver_request_path(&dir, "bob");
+    assert!(!synapse_mcp_server::push::take_redeliver_request(&path));
+    std::fs::write(&path, b"").unwrap();
+    assert!(synapse_mcp_server::push::take_redeliver_request(&path));
+    assert!(!synapse_mcp_server::push::take_redeliver_request(&path));
+    std::fs::remove_dir_all(&dir).ok();
+}

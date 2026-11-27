@@ -152,6 +152,11 @@ pub struct PushLedger {
     parked: Mutex<VecDeque<String>>,
     /// First writes still due a re-write ([`PushConfig::repush_after`]).
     repush: Mutex<HashMap<String, Repush>>,
+    /// The notification last written for each id this process wrote and has not seen acked, for
+    /// [`Self::request_redeliver`] (ROADMAP row 56, H1).
+    written: Mutex<HashMap<String, Value>>,
+    /// A host asked for every unacked message to be written again.
+    redeliver: std::sync::atomic::AtomicBool,
 }
 
 /// A message written once and due its re-writes.
@@ -202,6 +207,30 @@ impl PushLedger {
             parked.pop_front();
         }
         parked.push_back(id.to_string());
+    }
+
+    /// Ask for every unacked message this process wrote to be written again on the next look,
+    /// once: the host has answered the dev-channels dialog, so the client listens now. Takes no
+    /// lease and counts no push.
+    pub fn request_redeliver(&self) {
+        self.redeliver.store(true, Ordering::SeqCst);
+    }
+
+    fn remember_written(&self, id: &str, params: &Value) {
+        let mut m = self.written.lock().unwrap_or_else(|p| p.into_inner());
+        if m.len() < MAX_PARKED || m.contains_key(id) {
+            m.insert(id.to_string(), params.clone());
+        }
+    }
+
+    /// The notifications to write for a pending request: none unless one was made.
+    fn take_redeliveries(&self, settled: impl Fn(&str) -> bool) -> Vec<Value> {
+        if !self.redeliver.swap(false, Ordering::SeqCst) {
+            return Vec::new();
+        }
+        let mut m = self.written.lock().unwrap_or_else(|p| p.into_inner());
+        m.retain(|id, _| !settled(id));
+        m.values().cloned().collect()
     }
 
     /// Remember the first write of `id` so it can be written again.
@@ -314,6 +343,9 @@ pub async fn push_once_with<R: Renderer, N: Notifier>(
     for (_, params) in due {
         let _ = notifier.notify(params).await;
     }
+    for params in ledger.take_redeliveries(|id| source.is_settled(id)) {
+        let _ = notifier.notify(params).await;
+    }
     let parked = ledger.parked();
     let messages = match source
         .pull_views_excluding(config.batch, config.lease_secs, &parked)
@@ -355,6 +387,7 @@ pub async fn push_once_with<R: Renderer, N: Notifier>(
         // Only a write that happened counts.
         let params = renderer.render(message);
         if notifier.notify(params.clone()).await.is_ok() {
+            ledger.remember_written(id, &params);
             ledger.pushed(id, now);
             if ledger.pushes(id) == 1 {
                 ledger.plan_repush(id, params, now);
@@ -396,6 +429,26 @@ pub async fn push_once_with<R: Renderer, N: Notifier>(
     Ok(pushed)
 }
 
+/// The file a host creates in the Synapse home to ask `role`'s adapter to write its unacked mail again.
+pub fn redeliver_request_path(home: &std::path::Path, role: &str) -> std::path::PathBuf {
+    let safe: String = role
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    home.join(format!("redeliver-{safe}.request"))
+}
+
+/// Consume a redeliver request: true when `path` existed and was removed by this call.
+pub fn take_redeliver_request(path: &std::path::Path) -> bool {
+    std::fs::remove_file(path).is_ok()
+}
+
 /// The push server: the generic tools plus the push task, for the client `R` renders for.
 #[derive(Clone)]
 pub struct PushServer<R: Renderer> {
@@ -403,6 +456,8 @@ pub struct PushServer<R: Renderer> {
     renderer: Arc<R>,
     config: PushConfig,
     started: Arc<AtomicBool>,
+    home: std::path::PathBuf,
+    role: String,
 }
 
 impl<R: Renderer> PushServer<R> {
@@ -412,6 +467,7 @@ impl<R: Renderer> PushServer<R> {
         config: PushConfig,
         renderer: R,
     ) -> Result<Self, String> {
+        let (home, role) = (mcp.home.clone(), mcp.role.clone());
         let inner = SynapseMcpServer::start(mcp)
             .await?
             .with_push(renderer.capability_key(), renderer.method());
@@ -420,6 +476,8 @@ impl<R: Renderer> PushServer<R> {
             renderer: Arc::new(renderer),
             config,
             started: Arc::new(AtomicBool::new(false)),
+            home,
+            role,
         })
     }
 }
@@ -491,11 +549,15 @@ impl<R: Renderer> ServerHandler for PushServer<R> {
             method: renderer.method().to_string(),
         };
         let ledger = PushLedger::default();
+        let request = redeliver_request_path(&self.home, &self.role);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(config.poll_every);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
+                if take_redeliver_request(&request) {
+                    ledger.request_redeliver();
+                }
                 // Once the client is gone nothing can be pushed, and leasing mail would only hide
                 // it from this role's next session until the lease ran out.
                 if peer.is_transport_closed() {
