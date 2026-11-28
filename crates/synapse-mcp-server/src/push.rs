@@ -225,11 +225,17 @@ impl PushLedger {
 
     /// The notifications to write for a pending request: none unless one was made.
     fn take_redeliveries(&self, settled: impl Fn(&str) -> bool) -> Vec<Value> {
-        if !self.redeliver.swap(false, Ordering::SeqCst) {
+        if !self.redeliver.load(Ordering::SeqCst) {
             return Vec::new();
         }
         let mut m = self.written.lock().unwrap_or_else(|p| p.into_inner());
         m.retain(|id, _| !settled(id));
+        // A request that finds nothing written stays pending: the host can ask before the first
+        // mail is written (probe rc.271), and spending it on an empty ledger would lose it.
+        if m.is_empty() {
+            return Vec::new();
+        }
+        self.redeliver.store(false, Ordering::SeqCst);
         m.values().cloned().collect()
     }
 

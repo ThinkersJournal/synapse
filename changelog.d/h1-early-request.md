@@ -1,0 +1,3 @@
+Fixed: H1 redeliver request made before any mail is written is no longer lost (ROADMAP row 56)
+
+The redeliver request was consumed on the first poll tick even when this process had written nothing, so a request that landed before the first mail (agentlife probe on rc.271: 2.1 s before the first prompt, mail written afterwards) did nothing. It now stays pending until there is an unacked written message, then rewrites it once. Red test `a_redeliver_request_made_before_any_write_acts_on_the_first_message` failed (1 write, expected 2) before the change and passes after. Not shown: that this alone makes the mail first-turn in a real session; that needs a re-probe.

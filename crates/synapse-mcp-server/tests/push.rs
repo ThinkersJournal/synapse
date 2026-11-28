@@ -774,3 +774,55 @@ fn the_redeliver_request_file_is_consumed_once() {
     assert!(!synapse_mcp_server::push::take_redeliver_request(&path));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// ROADMAP row 56 H1, probe rc.271 (2026-11-28): the host's request lands before this process has
+/// written anything (agentlife: 2.1 s before the first prompt, mail arriving after). It must not be
+/// spent on an empty ledger: it stays pending and acts on the first message written after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_redeliver_request_made_before_any_write_acts_on_the_first_message() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    let config = PushConfig {
+        lease_secs: 30,
+        repush_after: &[],
+        ..PushConfig::default()
+    };
+    let ledger = PushLedger::default();
+    let sink = Recording::plain();
+
+    // The request comes first; the look finds no mail, so there is nothing to write again.
+    ledger.request_redeliver();
+    assert_eq!(
+        push_once_with(&Example, &bob, &sink, &config, &ledger).await,
+        Ok(0)
+    );
+
+    alice
+        .send(Parameters(SendArgs {
+            to: "bob".into(),
+            body: "after the request".into(),
+            message_id: None,
+            mode: None,
+            delivery: None,
+        }))
+        .await
+        .expect("send");
+    assert_eq!(
+        push_once_with(&Example, &bob, &sink, &config, &ledger).await,
+        Ok(1)
+    );
+    push_once_with(&Example, &bob, &sink, &config, &ledger)
+        .await
+        .unwrap();
+    assert_eq!(
+        sink.seen.lock().unwrap().len(),
+        2,
+        "the first write, then the redelivery the early request asked for"
+    );
+    // Still one request, one redelivery.
+    push_once_with(&Example, &bob, &sink, &config, &ledger)
+        .await
+        .unwrap();
+    assert_eq!(sink.seen.lock().unwrap().len(), 2);
+}
