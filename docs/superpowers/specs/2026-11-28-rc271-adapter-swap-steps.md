@@ -45,12 +45,13 @@ NOT RUN, so not measured. The release build of one crate is the slow part (minut
 
 Automated, read-only against live: in a worktree at the tag, `cargo test -p synapse-mcp-server --test push` includes `a_redeliver_request_rewrites_every_unacked_message_at_once` and `the_redeliver_request_file_is_consumed_once`; both must pass.
 
-Manual, on a scratch home (`SYNAPSE_DAEMON_HOME=C:/Projects/_scratch-rc271`, `SYNAPSE_NO_AUTOSTART` unset only for the scratch daemon, port `127.0.0.1:7961`, never 9962 or the live port):
-1. Start the old `synapsed.exe` (rc.247) on the scratch home; send 3 messages to role `b` with `synapse send`.
-2. Run the staged rc.271 `synapse-claude-channel.exe` as role `b` against the scratch home; expect the 3 pushes to be written once.
-3. Create `redeliver-b.request` in the scratch home. Expected within one poll tick: the same 3 notifications are written again, the file is gone (`ls` shows no `redeliver-b.request`), and `attempts` is unchanged.
-4. Create the request file again after acking one message: expect 2 notifications, not 3.
-5. Kill the scratch daemon by its recorded pid, restart it, and expect `GET /v1/health` back with the same version and `b`'s unacked mail still present (precedent: 2026-10-30 rehearsal, 2.6 s). Delete the scratch home afterwards.
+Manual, on a scratch home, **RUN 2026-11-28** (real output in PR #389). Port `127.0.0.1:7961` only, home `C:/Projects/_scratch-rc271/home`, binaries built with `CARGO_TARGET_DIR=C:/Projects/_scratch-rc271-target cargo build --release -p synapse-claude-channel -p synapsectl`, old daemon = a copy of rc.247 `synapsed.exe` made into the scratch dir (the live bin was only read). Set `SYNAPSE_NO_AUTOSTART=1 SYNAPSE_HOME=<home> SYNAPSE_ADDR=127.0.0.1:7961` for every command; leave `SYNAPSE_MAILBOX_STORE` unset (the daemon records `sqlite-full` on a fresh home).
+1. `synapse id init --account scratch`; `synapse claim --role a`, `synapse claim --role pm` (a role must claim before it can be a recipient; the receiver is `pm` because `a` holds see/send only on `agent:pm@scratch` by default). Start `synapsed` (rc.247) in the background; `curl /v1/health` shows `"version":"6.0.0-rc.247"`. Send 3 messages `a` -> `pm`: each prints `outcome: queued`.
+2. `python -I 2026-11-28-rc271-smoke-driver.py <staged channel.exe> <home> pm` plays the MCP host (declares `claude/channel`). Expected and seen: the 3 pushes at start (`notifications: 3`).
+3. The driver creates `redeliver-pm.request`. Seen: the same 3 notifications again within one poll tick, the file consumed (`request exists after #1: False`).
+4. The driver acks the first message, then creates the request again. Seen: 2 redeliveries (smoke-5, smoke-6), not 3. The driver's window also catches the ordinary 10 s repush of those two, so that window reads 4; the first window (under 10 s) reads exactly 3.
+5. Kill the scratch daemon by its recorded pid (`taskkill /PID <pid> /F`), start it again: health answered again, `pm` still shows its 2 unacked messages `queued` (the lease reset at restart). Not timed. The adapter re-attach after a daemon restart was **not** re-run here (2026-10-30 rehearsal covers a restart).
+6. Kill the scratch daemon by pid and delete the scratch home and target dir.
 
 ## 7. Not established
 
