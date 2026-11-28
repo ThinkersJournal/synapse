@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.272): exact adapter-swap steps for rc.271 (H1)
+
+New spec docs/superpowers/specs/2026-11-28-rc271-adapter-swap-steps.md: only synapse-claude-channel.exe changes in rc.271; rename-and-copy swap, rollback, who restarts when, and a scratch-home smoke test. Every step is marked READ or NOT RUN; no swap was run.
+
 ### Added (rc.271): redeliver unacked mail on a host request, after the dev-channels dialog (ROADMAP row 56, H1)
 
 The push loop now also writes every message this process wrote and that is still unacked again, once, when a host creates `redeliver-<role>.request` in the Synapse home (`push::redeliver_request_path`). The launcher creates it after it answers the dev-channels dialog and before the first prompt, so the mail is in the session before a lane's first fetch comes back empty. It takes no lease, counts no push and leaves `attempts` and the 2/4/8/16 schedule alone; an acked message is not re-sent, and one request makes one redelivery. Tests: `a_redeliver_request_rewrites_every_unacked_message_at_once` (written red first, before the code existed) and `the_redeliver_request_file_is_consumed_once`.
